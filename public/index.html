@@ -1,0 +1,364 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>DataOS — Universal Data Operating System</title>
+  <meta name="description" content="A domain-agnostic Universal Data Operating System where everything is data, entities are objects, relationships form a graph, and computation is verifiable against real data.">
+  <link rel="stylesheet" href="/static/css/dataos.css">
+</head>
+<body>
+
+  <!-- Top Header Navigation -->
+  <header class="dataos-header">
+    <div class="brand-section">
+      <div class="brand-logo">
+        <div class="brand-dot"></div>
+        <span>DataOS</span>
+      </div>
+      <span class="system-tag">UNIVERSAL v1.0</span>
+      <input type="text" id="global-search-input" class="dataos-input" placeholder="Search objects, datasets, code, or ask natural language query..." style="width: 380px; margin-left: 1rem; padding: 0.35rem 0.75rem; font-size: 0.8rem;">
+    </div>
+    <div class="header-metrics">
+      <div class="metric-pill">Objects: <strong id="metric-objects-count">0</strong></div>
+      <div class="metric-pill">Edges: <strong id="metric-rels-count">0</strong></div>
+      <div class="metric-pill health-score">Health: <strong id="metric-health-score">100%</strong></div>
+    </div>
+  </header>
+
+  <!-- App Layout -->
+  <div class="app-container">
+    
+    <!-- Sidebar -->
+    <aside class="app-sidebar">
+      <div class="nav-group-label">Core Spine</div>
+      <div class="nav-item active" data-tab="objects">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18"/><path d="M9 21V9"/></svg>
+        <span>Object Explorer</span>
+      </div>
+      <div class="nav-item" data-tab="graph">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/></svg>
+        <span>Relationship Graph</span>
+      </div>
+      <div class="nav-item" data-tab="lineage">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+        <span>Data Lineage</span>
+      </div>
+
+      <div class="nav-divider"></div>
+      <div class="nav-group-label">Computation & Query</div>
+      <div class="nav-item" data-tab="query">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+        <span>Query & SQL Studio</span>
+      </div>
+      <div class="nav-item" data-tab="profiling">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
+        <span>Data Profiling & Quality</span>
+      </div>
+      <div class="nav-item" data-tab="agents">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="10" rx="2"/><circle cx="12" cy="5" r="2"/><path d="M12 7v4"/></svg>
+        <span>AI Agents & Grounding</span>
+      </div>
+
+      <div class="nav-divider"></div>
+      <div class="nav-group-label">I/O & Governance</div>
+      <div class="nav-item" data-tab="ingest">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+        <span>Ingest & Discovery</span>
+      </div>
+      <div class="nav-item" data-tab="catalog">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
+        <span>Data Catalog & Health</span>
+      </div>
+      <div class="nav-item" data-tab="export">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+        <span>Lossless Export</span>
+      </div>
+    </aside>
+
+    <!-- Main Workspace Area -->
+    <main class="workspace-content">
+
+      <!-- PANEL 1: OBJECT EXPLORER -->
+      <section id="panel-objects" class="workspace-panel active">
+        <div class="panel-header">
+          <div>
+            <div class="panel-title">Universal Object Explorer</div>
+            <div class="panel-description">All entities in DataOS conform to the universal 11-field model with first-class provenance and schemas.</div>
+          </div>
+          <div style="display:flex; gap:0.5rem;">
+            <select id="object-filter-type" class="dataos-select" style="width:160px;" onchange="loadObjectsList()">
+              <option value="">All Types</option>
+              <option value="dataset">Dataset</option>
+              <option value="document">Document</option>
+              <option value="code">Code</option>
+              <option value="metric">Metric</option>
+              <option value="quality_report">Quality Report</option>
+            </select>
+            <button class="dataos-btn" onclick="switchTab('ingest')">+ Ingest Object</button>
+          </div>
+        </div>
+
+        <div class="dataos-table-wrapper">
+          <table class="dataos-table">
+            <thead>
+              <tr>
+                <th>ID</th>
+                <th>Type</th>
+                <th>Name / Filename</th>
+                <th>Schema</th>
+                <th>Version</th>
+                <th>Action</th>
+              </tr>
+            </thead>
+            <tbody id="objects-table-body">
+              <!-- Rendered via JS -->
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- PANEL 2: RELATIONSHIP GRAPH -->
+      <section id="panel-graph" class="workspace-panel">
+        <div class="panel-header">
+          <div>
+            <div class="panel-title">Universal Relationship Graph</div>
+            <div class="panel-description">Explicit relationship graph connecting files, datasets, code, citations, and concepts.</div>
+          </div>
+          <button class="dataos-btn btn-secondary" onclick="loadGraphVisualizer()">Refresh Graph</button>
+        </div>
+
+        <div class="graph-canvas-container">
+          <canvas id="graphCanvas"></canvas>
+        </div>
+      </section>
+
+      <!-- PANEL 3: DATA LINEAGE -->
+      <section id="panel-lineage" class="workspace-panel">
+        <div class="panel-header">
+          <div>
+            <div class="panel-title">Data Lineage & Provenance Traversal</div>
+            <div class="panel-description">End-to-end lineage tracing from raw data ingestion to transformation, analytics, and reports.</div>
+          </div>
+        </div>
+
+        <div class="dataos-card">
+          <div class="card-title">Provenance Trace: Root Cause Analysis</div>
+          <div style="display:flex; gap:0.75rem; margin-bottom:1rem;">
+            <input type="text" id="lineage-object-id" class="dataos-input" placeholder="Enter target Object ID to trace...">
+            <button class="dataos-btn" onclick="runLineageTrace()">Trace Upstream Lineage</button>
+          </div>
+          <div id="lineage-result-output" class="code-preview">Enter an object ID above to trace its upstream data lineage.</div>
+        </div>
+      </section>
+
+      <!-- PANEL 4: QUERY & SQL STUDIO -->
+      <section id="panel-query" class="workspace-panel">
+        <div class="panel-header">
+          <div>
+            <div class="panel-title">Computation & Unified Query Studio</div>
+            <div class="panel-description">Deterministic SQL and Python execution against real data sources. Zero fabricated results.</div>
+          </div>
+        </div>
+
+        <div class="grid-2">
+          <!-- SQL Engine -->
+          <div class="dataos-card">
+            <div class="card-title">SQL Query Engine (In-Memory SQLite)</div>
+            <textarea id="sql-query-input" class="dataos-textarea code-font" rows="5" placeholder="SELECT * FROM students WHERE gpa > 3.5 ORDER BY gpa DESC;"></textarea>
+            <div style="margin-top:0.75rem; display:flex; justify-content:space-between; align-items:center;">
+              <span style="font-size:0.75rem; color:var(--text-muted);">Registered tables: <code>students</code>, <code>dataset</code></span>
+              <button class="dataos-btn" onclick="runSQLQuery()">Execute SQL</button>
+            </div>
+            <div id="sql-result-output" style="margin-top:1rem;"></div>
+          </div>
+
+          <!-- Python Sandbox -->
+          <div class="dataos-card">
+            <div class="card-title">Python Computation Sandbox</div>
+            <textarea id="python-code-input" class="dataos-textarea code-font" rows="5" placeholder="import numpy as np&#10;results['mean_val'] = 42.0"></textarea>
+            <div style="margin-top:0.75rem; text-align:right;">
+              <button class="dataos-btn" onclick="runPythonCode()">Run Python</button>
+            </div>
+            <pre id="python-result-output" class="code-preview" style="margin-top:1rem;">Sandbox output will appear here...</pre>
+          </div>
+        </div>
+
+        <!-- Grounded NL Query -->
+        <div class="dataos-card">
+          <div class="card-title">Grounded Natural Language Querying (Rule #16, Rule #48)</div>
+          <div style="display:flex; gap:0.75rem; margin-bottom:1rem;">
+            <input type="text" id="nl-query-input" class="dataos-input" placeholder="e.g. 'Show all objects related to students dataset' or 'What is the average GPA?'">
+            <button class="dataos-btn" onclick="runUnifiedNLQuery()">Ask Grounded Query</button>
+          </div>
+          <div id="nl-result-output"></div>
+        </div>
+      </section>
+
+      <!-- PANEL 5: PROFILING & QUALITY -->
+      <section id="panel-profiling" class="workspace-panel">
+        <div class="panel-header">
+          <div>
+            <div class="panel-title">Data Profiling & Quality Engine</div>
+            <div class="panel-description">Real statistical profiling (distributions, correlations, outliers) & data contract validation.</div>
+          </div>
+          <div style="display:flex; gap:0.5rem;">
+            <select id="profiler-object-select" class="dataos-select" style="width:240px;"></select>
+            <button class="dataos-btn" onclick="runDatasetProfile()">Compute Profile</button>
+          </div>
+        </div>
+
+        <div id="profiler-result-output">
+          <div class="dataos-card" style="text-align:center; color:var(--text-muted); padding:3rem;">
+            Select a dataset above and click <strong>Compute Profile</strong> to generate verified statistical metrics.
+          </div>
+        </div>
+      </section>
+
+      <!-- PANEL 6: AI AGENTS & GROUNDING -->
+      <section id="panel-agents" class="workspace-panel">
+        <div class="panel-header">
+          <div>
+            <div class="panel-title">AI Agent Layer & Verifiable Grounding</div>
+            <div class="panel-description">AI agents operate strictly through permission-controlled APIs. All claims backed by real evidence.</div>
+          </div>
+        </div>
+
+        <div class="grid-2">
+          <div class="dataos-card">
+            <div class="card-title">Agent Capability Matrix & Execution</div>
+            <div style="margin-bottom:0.75rem;">
+              <label style="font-size:0.8rem; color:var(--text-muted); display:block; margin-bottom:0.25rem;">Agent Role</label>
+              <select id="agent-role-select" class="dataos-select">
+                <option value="research_agent">Research Agent (Search + Read + Discover)</option>
+                <option value="analysis_agent">Analysis Agent (Query + Profile + Stats)</option>
+                <option value="quality_agent">Data Quality Agent (Contracts + Drift)</option>
+              </select>
+            </div>
+            <div style="margin-bottom:0.75rem;">
+              <label style="font-size:0.8rem; color:var(--text-muted); display:block; margin-bottom:0.25rem;">Capability to Invoke</label>
+              <select id="agent-cap-select" class="dataos-select">
+                <option value="search">search()</option>
+                <option value="query_sql">query_sql()</option>
+                <option value="compute_python">compute_python()</option>
+                <option value="read_object">read_object()</option>
+              </select>
+            </div>
+            <button class="dataos-btn" onclick="executeAgentCapability()">Execute Capability</button>
+            <div id="agent-exec-result" class="code-preview" style="margin-top:1rem;">Agent execution traces will appear here...</div>
+          </div>
+
+          <div class="dataos-card">
+            <div class="card-title">Grounding Verification Guarantee (Rule #73)</div>
+            <p style="font-size:0.85rem; color:var(--text-muted); margin-bottom:1rem;">
+              In DataOS, AI is an operator, not the source of truth. Every assertion must pass through the Grounding Engine.
+            </p>
+            <div class="proof-card">
+              <div class="proof-claim">✓ Invariant: Zero Data Fabrication</div>
+              <div class="proof-evidence">Unsubstantiated claims trigger strict system rejections.</div>
+            </div>
+            <div class="proof-card">
+              <div class="proof-claim">✓ Invariant: First-Class Lineage</div>
+              <div class="proof-evidence">Every computed output is bound to its inputs and transformation parameters.</div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- PANEL 7: INGESTION & IMPORT -->
+      <section id="panel-ingest" class="workspace-panel">
+        <div class="panel-header">
+          <div>
+            <div class="panel-title">Ingest & Automatic Relationship Discovery</div>
+            <div class="panel-description">Ingest files and automatically discover structural, semantic, and code relationships.</div>
+          </div>
+        </div>
+
+        <div class="grid-2">
+          <div class="dataos-card">
+            <div class="card-title">Ingest New File Content</div>
+            <div style="margin-bottom:0.75rem;">
+              <label style="font-size:0.8rem; color:var(--text-muted); display:block; margin-bottom:0.25rem;">Filename</label>
+              <input type="text" id="ingest-filename" class="dataos-input" placeholder="e.g. students.csv or notes.md">
+            </div>
+            <div style="margin-bottom:0.75rem;">
+              <label style="font-size:0.8rem; color:var(--text-muted); display:block; margin-bottom:0.25rem;">Content (CSV, Markdown, Python code, etc.)</label>
+              <textarea id="ingest-content" class="dataos-textarea code-font" rows="8" placeholder="Paste file content here..."></textarea>
+            </div>
+            <div style="display:flex; justify-content:space-between; align-items:center;">
+              <div style="display:flex; gap:0.5rem;">
+                <button class="dataos-btn btn-secondary" onclick="ingestScenarioSample('students_csv')">Load students.csv</button>
+                <button class="dataos-btn btn-secondary" onclick="ingestScenarioSample('research_notes_md')">Load notes.md</button>
+                <button class="dataos-btn btn-secondary" onclick="ingestScenarioSample('analysis_py')">Load analysis.py</button>
+              </div>
+              <button class="dataos-btn" onclick="runTextIngest()">Ingest & Connect</button>
+            </div>
+          </div>
+
+          <div class="dataos-card">
+            <div class="card-title">Ingestion & Discovery Output</div>
+            <div id="ingest-result-output" class="code-preview">Ready to ingest artifacts...</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- PANEL 8: CATALOG & HEALTH -->
+      <section id="panel-catalog" class="workspace-panel">
+        <div class="panel-header">
+          <div>
+            <div class="panel-title">Data Catalog & Health System</div>
+            <div class="panel-description">Continuous observability and data health scoring (Freshness, Quality, Integrity).</div>
+          </div>
+          <button class="dataos-btn btn-secondary" onclick="loadCatalogView()">Refresh Health Metrics</button>
+        </div>
+
+        <div id="catalog-summary-content" class="dataos-card">
+          Loading catalog telemetry...
+        </div>
+      </section>
+
+      <!-- PANEL 9: LOSSLESS EXPORT -->
+      <section id="panel-export" class="workspace-panel">
+        <div class="panel-header">
+          <div>
+            <div class="panel-title">Lossless Export & Zero Vendor Lock-in</div>
+            <div class="panel-description">Export the entire DataOS graph, objects, and relationships to open standards (Rule #67).</div>
+          </div>
+        </div>
+
+        <div class="grid-2">
+          <div class="dataos-card">
+            <div class="card-title">Select Export Format</div>
+            <div style="display:flex; flex-direction:column; gap:0.75rem;">
+              <a href="/api/io/export?format=json_ld" target="_blank" class="dataos-btn btn-secondary">Download JSON-LD Linked Data</a>
+              <a href="/api/io/export?format=graphml" target="_blank" class="dataos-btn btn-secondary">Download GraphML (XML)</a>
+              <a href="/api/io/export?format=dot" target="_blank" class="dataos-btn btn-secondary">Download Graphviz DOT</a>
+              <a href="/api/io/export?format=sql" target="_blank" class="dataos-btn btn-secondary">Download SQL DDL Dump</a>
+            </div>
+          </div>
+          <div class="dataos-card">
+            <div class="card-title">Open Standards Compatibility</div>
+            <p style="font-size:0.85rem; color:var(--text-muted); line-height:1.6;">
+              DataOS ensures 100% data portability. Objects, schemas, graph topologies, and lineage chains can be losslessly exported to standard data engines without proprietary lock-in.
+            </p>
+          </div>
+        </div>
+      </section>
+
+    </main>
+  </div>
+
+  <!-- Object Inspector Modal -->
+  <div id="inspector-modal" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.7); backdrop-filter:blur(6px); z-index:1000; padding:3rem;">
+    <div style="max-width:800px; margin:0 auto; background:var(--bg-surface); border:1px solid var(--border-default); border-radius:var(--radius-md); padding:1.5rem;">
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1rem;">
+        <h3 id="inspector-title" style="color:var(--text-primary);">Object Inspector</h3>
+        <button class="dataos-btn btn-secondary" onclick="closeInspector()">Close</button>
+      </div>
+      <pre id="inspector-json" class="code-preview" style="max-height:480px;"></pre>
+    </div>
+  </div>
+
+  <script src="/static/js/dataos-app.js"></script>
+</body>
+</html>

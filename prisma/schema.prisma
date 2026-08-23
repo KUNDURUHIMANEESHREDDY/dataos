@@ -1,0 +1,224 @@
+/// <prisma schema for DataOS Universal Data Operating System>
+
+generator client {
+  provider = "postgresql"
+}
+
+// datasource config for Prisma 7.x
+datasource db {
+  provider = "postgresql"
+}
+
+// =============================================================================
+// UNIVERSAL OBJECT MODEL
+// =============================================================================
+
+model Object {
+  id String @unique @db.Uuid
+  type String
+  schema String
+  properties Json @db.Json
+  content Json @db.Json
+  relations Json @db.Json
+  provenance Json @db.Json
+  permissions Json @db.Json
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt()
+  deletedAt DateTime?
+  version Int @default(1)
+  source String
+  metadata Json @db.Json
+  indexes Json @db.Json
+
+  @@ unique([type, source])
+
+  // Inverse relations for Relationship model
+  sourceRelationships Relationship[] @relation("RelationshipSource")
+  targetRelationships Relationship[] @relation("RelationshipTarget")
+
+  // Inverse relations for Query model
+queries  Query[] @relation("QueryOperated")
+
+  // Inverse relations for ProvenanceEvent model
+  provenanceEvents ProvenanceEvent[] @relation("EventTarget")
+
+  // Inverse relations for TransformationStep model
+  inputObjectSteps TransformationStep[] @relation("StepInput")
+  outputObjectSteps TransformationStep[] @relation("StepOutput")
+
+  // Inverse relation for IndexDefinition model
+  objectIndexes IndexDefinition[] @relation("IndexedObject")
+}
+
+// =============================================================================
+// RELATIONSHIP MODEL
+// =============================================================================
+
+model Relationship {
+  id String @unique @db.Uuid
+  sourceObjectId String
+  targetObjectId String
+  source Object @relation("RelationshipSource", fields: [sourceObjectId], references: [id])
+  target Object @relation("RelationshipTarget", fields: [targetObjectId], references: [id])
+  relationType String
+  metadata Json @db.Json
+  confidence Float
+  provenance Json @db.Json
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt()
+  deletedAt DateTime?
+
+  @@ index([sourceObjectId, targetObjectId, relationType])
+
+  /// Relationship feedback records
+  feedbacks RelationshipFeedback[] @relation("FeedbackedRelationship")
+}
+
+// =============================================================================
+// SCHEMA VERSIONING
+// =============================================================================
+
+model SchemaVersion {
+  id String @unique @db.Uuid
+  definition Json @db.Json
+  version Int @default(1)
+  isCurrent Boolean @default(true)
+  createdAt DateTime @default(now())
+  changes String?
+  dependencies Json @db.Json
+  isBreaking Boolean @default(false)
+  compatibilityMode String @default("non_breaking")
+}
+
+// =============================================================================
+// QUERY EXECUTION & PROVENANCE
+// =============================================================================
+
+model Query {
+  id String @unique @db.Uuid
+  queryText String
+  inputs Json @db.Json
+  executionContext Json @db.Json
+  outputs Json @db.Json
+  provenance Json @db.Json
+  executedAt DateTime @default(now())
+  operatedOn Object @relation("QueryOperated", fields: [objectId], references: [id])
+  objectId String
+  queryType String
+  success Boolean @default(true)
+  errorMessage String?
+
+  // Inverse - removed to avoid conflict; use Object.queries instead
+}
+
+/// Provenance event log
+model ProvenanceEvent {
+  id String @unique @db.Uuid
+  targetObject Object @relation("EventTarget", fields: [objectId], references: [id])
+  objectId String
+  eventType String
+  description String
+  inputs Json @db.Json
+  outputs Json @db.Json
+  toolsUsed Json @db.Json
+  parameters Json @db.Json
+  createdAt DateTime @default(now())
+  provenanceChain String
+
+  // Inverse - use Object.provenanceEvents instead
+}
+
+// =============================================================================
+// AGENT & WORKFLOW MODELS
+// =============================================================================
+
+model Agent {
+  id String @unique @db.Uuid
+  name String
+  capabilities Json @db.Json
+  permissions Json @db.Json
+  isActive Boolean @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt()
+  accessibleObjects Json @db.Json
+}
+
+model Workflow {
+  id String @unique @db.Uuid
+  definition Json @db.Json
+  status String @default("pending")
+  triggerType String
+  triggerConditions Json @db.Json
+  actions Json @db.Json
+  outputs Json @db.Json
+  createdAt DateTime @default(now())
+  startedAt DateTime?
+  completedAt DateTime?
+  operatedOn Json @db.Json
+  provenance Json @db.Json
+  errorMessage String?
+}
+
+// =============================================================================
+// UTILITY MODELS
+// =============================================================================
+
+model ImportedArtifact {
+  id String @unique @db.Uuid
+  originalPath String
+  format String
+  fileMetadata Json @db.Json
+  extractedStructure Json @db.Json
+  discoveredRelationships Json @db.Json
+  status String @default("pending")
+  startedAt DateTime?
+  completedAt DateTime?
+  provenance Json @db.Json
+  createdObjects Json @db.Json
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt()
+}
+
+model TransformationStep {
+  id String @unique @db.Uuid
+  operation String
+  inputObject Object @relation("StepInput", fields: [inputId], references: [id])
+  inputId String
+  outputObject Object @relation("StepOutput", fields: [outputId], references: [id])
+  outputId String
+  metadata Json @db.Json
+  provenance Json @db.Json
+  engine String
+  executedAt DateTime @default(now())
+  success Boolean @default(true)
+  errorMessage String?
+}
+
+// =============================================================================
+// INDEXES & PERFORMANCE
+// =============================================================================
+
+model IndexDefinition {
+  id String @unique @db.Uuid
+  object Object @relation("IndexedObject", fields: [objectId], references: [id])
+  objectId String
+  indexType String
+  fields Json @db.Json
+  isFullText Boolean @default(false)
+  confidenceWeight Float @default(1.0)
+  createdAt DateTime @default(now())
+}
+
+// =============================================================================
+// RELATIONSHIP FEEDBACK & EVOLUTION
+// =============================================================================
+
+model RelationshipFeedback {
+  id String @unique @db.Uuid
+  relationship Relationship @relation("FeedbackedRelationship", fields: [relationshipId], references: [id])
+  relationshipId String
+  isCorrect Boolean
+  source String
+  createdAt DateTime @default(now())
+  comments String?
+}
