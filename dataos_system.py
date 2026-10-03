@@ -117,7 +117,32 @@ class GraphNamespace:
         return self.engine.find_paths(source_id, target_id, max_depth=max_depth)
 
     def analytics(self) -> Dict[str, Any]:
-        return self.analytics_engine.compute_all_metrics()
+        # GraphAnalyticsEngine has no compute_all_metrics(); aggregate the real methods.
+        engine = self.analytics_engine
+        try:
+            pagerank = engine.compute_pagerank()
+        except Exception:
+            pagerank = {}
+        try:
+            degree = engine.compute_degree_centrality()
+        except Exception:
+            degree = {}
+        try:
+            betweenness = engine.compute_betweenness_centrality()
+        except Exception:
+            betweenness = {}
+        try:
+            communities = engine.detect_communities()
+        except Exception:
+            communities = []
+        return {
+            "node_count": len(pagerank),
+            "pagerank": pagerank,
+            "degree_centrality": degree,
+            "betweenness_centrality": betweenness,
+            "community_count": len(communities),
+            "communities": communities,
+        }
 
     def recommendations(self, object_id: str, top_k: int = 10) -> List[Dict[str, Any]]:
         return self.recommendations_engine.recommend_connections(object_id, top_k=top_k)

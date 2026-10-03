@@ -1,0 +1,31 @@
+# DataOS Python dependencies
+#
+# Install:  pip install -r requirements.txt
+# There is no pyproject.toml / setup.py — the package is run from the repo root
+# (`python -m cli`, `python -m pytest tests/`, `python -m uvicorn backend.app:app`).
+
+# ── Core: required for `import dataos_system` ────────────────────────────────
+numpy>=1.26
+pandas>=2.0
+scipy>=1.11
+scikit-learn>=1.3
+networkx>=3.0
+
+# ── API backend ──────────────────────────────────────────────────────────────
+fastapi>=0.110
+pydantic>=2.0
+uvicorn>=0.27
+requests>=2.31
+
+# ── Optional: install only the backends you actually use ─────────────────────
+# SQLite is the default and needs nothing extra.
+#
+# psycopg2-binary>=2.9        # PostgreSQL storage backend
+# pymysql>=1.1               # MySQL
+# boto3>=1.34                # S3 blob storage
+# google-cloud-storage>=2.14 # GCS blob storage
+# azure-storage-blob>=12.19  # Azure Blob storage
+# cryptography>=42.0         # encryption (required by DATAOS_MASTER_KEY)
+# pyarrow>=15.0              # Parquet support
+# sentence-transformers>=3.0 # real embeddings; without it DataOS falls back to
+#                            # the built-in HashEmbeddingProvider (dimension=128)

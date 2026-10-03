@@ -10,6 +10,30 @@ import json
 from dataos_system import DataOS
 
 
+def _health(dataos: DataOS) -> dict:
+    """Report real runtime state. DataOS exposes no health method, so this is
+    assembled from the storage backend and the metrics system."""
+    try:
+        objects = dataos.storage.list_objects(limit=100000)
+        object_count = len(objects)
+    except Exception as exc:  # pragma: no cover - defensive
+        object_count = f"unavailable: {exc}"
+
+    report = {
+        "db_path": dataos.db_path,
+        "db_url": dataos.db_url,
+        "storage_backend": type(dataos.storage).__name__,
+        "object_count": object_count,
+    }
+
+    try:
+        report["metrics"] = dataos.metrics.snapshot()
+    except Exception as exc:  # pragma: no cover - defensive
+        report["metrics"] = f"unavailable: {exc}"
+
+    return report
+
+
 def main():
     parser = argparse.ArgumentParser(description="DataOS — Universal Data Operating System CLI")
     subparsers = parser.add_subparsers(dest="command", help="DataOS commands")
@@ -42,31 +66,33 @@ def main():
 
     dataos = DataOS()
 
-    if args.command == "ingest":
-        res = dataos.ingest_file(args.file_path)
-        print(json.dumps(res, indent=2))
+    try:
+        if args.command == "ingest":
+            res = dataos.ingest(args.file_path)
+            print(json.dumps(res, indent=2, default=str))
 
-    elif args.command == "sql":
-        res = dataos.execute_sql(args.query)
-        print(json.dumps(res, indent=2))
+        elif args.command == "sql":
+            res = dataos.sql(args.query)
+            print(json.dumps(res, indent=2, default=str))
 
-    elif args.command == "search":
-        res = dataos.search.search(args.query, limit=args.limit)
-        print(json.dumps(res, indent=2))
+        elif args.command == "search":
+            res = dataos.search(args.query, top_k=args.limit)
+            print(json.dumps(res, indent=2, default=str))
 
-    elif args.command == "health":
-        res = dataos.get_system_health()
-        print(json.dumps(res, indent=2))
+        elif args.command == "health":
+            print(json.dumps(_health(dataos), indent=2, default=str))
 
-    elif args.command == "export":
-        if args.format == "json_ld":
-            print(json.dumps(dataos.exporter.export_json_ld(), indent=2))
-        elif args.format == "graphml":
-            print(dataos.exporter.export_graphml())
-        elif args.format == "dot":
-            print(dataos.exporter.export_dot())
-        elif args.format == "sql":
-            print(dataos.exporter.export_sql_dump())
+        elif args.command == "export":
+            if args.format == "json_ld":
+                print(json.dumps(dataos.exporter.export_json_ld(), indent=2, default=str))
+            elif args.format == "graphml":
+                print(dataos.exporter.export_graphml())
+            elif args.format == "dot":
+                print(dataos.exporter.export_dot())
+            elif args.format == "sql":
+                print(dataos.exporter.export_sql_dump())
+    finally:
+        dataos.close()
 
 
 if __name__ == "__main__":

@@ -80,10 +80,13 @@ def run_scenario():
     print("\n[*] Step 3: Ingesting artifacts and automatically constructing Universal Objects...")
     ingested_objects = {}
     for filename, filepath in artifacts.items():
-        res = dataos.ingest_file(filepath, discover_relations=True)
-        obj_id = res["object_id"]
+        res = dataos.ingest(filepath, discover_relations=True)
+        obj_id = res["primary_object_id"]
         ingested_objects[filename] = obj_id
-        print(f"  -> Ingested '{filename}' -> Object ID: {obj_id[:8]}... (Type: {res['object']['type']}, Extracted Properties: {len(res['object']['properties'])})")
+        ingested = dataos.objects.get(obj_id)
+        otype = getattr(ingested, "type", res.get("primary_object_type", "unknown"))
+        nprops = len(getattr(ingested, "properties", {}) or {})
+        print(f"  -> Ingested '{filename}' -> Object ID: {obj_id[:8]}... (Type: {otype}, Extracted Properties: {nprops})")
 
     # 4. Multi-Signal Automatic Relationship Discovery
     print("\n[*] Step 4: Running full multi-signal relationship discovery pass...")
@@ -91,15 +94,15 @@ def run_scenario():
     all_rels = dataos.storage.list_relationships()
     print(f"  -> Discovered and established {len(all_rels)} relational edge(s) across the data graph:")
     for rel in all_rels:
-        src_obj = dataos.get_object(rel.source)
-        tgt_obj = dataos.get_object(rel.target)
+        src_obj = dataos.objects.get(rel.source)
+        tgt_obj = dataos.objects.get(rel.target)
         src_name = src_obj.properties.get("filename") if src_obj else rel.source[:8]
         tgt_name = tgt_obj.properties.get("filename") if tgt_obj else rel.target[:8]
         print(f"     [{src_name}] --({rel.relation_type}, conf: {rel.confidence})--> [{tgt_name}]")
 
     # 5. Real Data Profiling & Statistical Computation
     print("\n[*] Step 5: Computing verified statistical profile for dataset.csv...")
-    ds_obj = dataos.get_object(ingested_objects["dataset.csv"])
+    ds_obj = dataos.objects.get(ingested_objects["dataset.csv"])
     import pandas as pd
     df = pd.read_csv(csv_path)
     profile = dataos.profiler.profile_dataframe(df, dataset_name="dataset.csv")
@@ -110,7 +113,7 @@ def run_scenario():
 
     # 6. Real SQL and Python Execution
     print("\n[*] Step 6: Executing verifiable SQL and Python queries against real data...")
-    sql_res = dataos.execute_sql("SELECT major, COUNT(*) as count, AVG(gpa) as avg_gpa FROM dataset GROUP BY major ORDER BY avg_gpa DESC;")
+    sql_res = dataos.sql("SELECT major, COUNT(*) as count, AVG(gpa) as avg_gpa FROM dataset GROUP BY major ORDER BY avg_gpa DESC;")
     print(f"  -> SQL Execution ({sql_res['execution_time_ms']} ms):")
     for row in sql_res["rows"]:
         print(f"     Major: {row['major']:<18} | Count: {row['count']} | Avg GPA: {round(row['avg_gpa'], 2)}")
@@ -133,10 +136,10 @@ def run_scenario():
 
     # 8. Graph Analytics & Traversal
     print("\n[*] Step 8: Running graph analytics and multi-hop traversal...")
-    traversal = dataos.traverse_graph(ingested_objects["notes.md"], max_hops=2)
+    traversal = dataos.graph.engine.traverse(ingested_objects["notes.md"], max_hops=2)
     print(f"  -> Traversal from 'notes.md' reached {traversal['total_nodes_reached']} nodes and {traversal['total_edges_traversed']} edges.")
-    
-    pagerank = dataos.graph_analytics.compute_pagerank()
+
+    pagerank = dataos.graph.analytics()["pagerank"]
     print(f"  -> PageRank scores computed for {len(pagerank)} graph nodes.")
 
     # 9. Lossless Export
@@ -147,12 +150,12 @@ def run_scenario():
     dot_graph = dataos.exporter.export_dot()
     print(f"  -> Graphviz DOT Export: {len(dot_graph.splitlines())} lines.")
 
-    # 10. System Health
-    health = dataos.get_system_health()
+    # 10. System Health — DataOS exposes no health method, so report real counts.
+    total_objects = len(dataos.storage.list_objects(limit=100000))
+    total_relationships = len(dataos.storage.list_relationships())
     print(f"\n[*] Step 10: System Health Summary:")
-    print(f"  -> Composite Health Score: {health['data_health_score']}% (Grade {health['health_grade']})")
-    print(f"  -> Total Persistent Objects: {health['total_objects']}")
-    print(f"  -> Total Graph Edges: {health['total_relationships']}")
+    print(f"  -> Total Persistent Objects: {total_objects}")
+    print(f"  -> Total Graph Edges: {total_relationships}")
 
     # Cleanup
     def remove_readonly(func, path, _):
@@ -160,8 +163,9 @@ def run_scenario():
         os.chmod(path, stat.S_IWRITE)
         func(path)
 
+    # Cleanup. shutil.rmtree gained `onexc` in 3.12; `onerror` works on 3.11 too.
     try:
-        shutil.rmtree(scenario_dir, onexc=lambda fn, path, exc: (os.chmod(path, 0o777), fn(path)))
+        shutil.rmtree(scenario_dir, onerror=lambda fn, path, exc: (os.chmod(path, 0o777), fn(path)))
     except Exception:
         pass
 
