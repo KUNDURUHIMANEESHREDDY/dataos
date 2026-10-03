@@ -6,36 +6,28 @@ graph**, and **first-class provenance** — every derived result traceable back 
 The design principle, stated in `context/ai-workflow-rules.md`: **AI is an operator over the graph, never an
 authority over it.**
 
-> ⚠️ **The library is real. Everything above it is unfinished.** ~180 Python files, 12 engine packages, and ~660
-> unit tests form a coherent, substantial core. But a **one-line import bug currently prevents the package from
-> importing at all**, the FastAPI layer calls an API that no longer exists, and the CLI and demo script do not run.
-> See [Current blockers](#current-blockers) — and note the first one has a one-line fix.
+> ⚠️ **The library is real. Everything above it is unfinished.** ~180 Python files, 12 engine packages, and ~670
+> unit tests form a coherent, substantial core. The package imports cleanly and **653 correctness tests pass**.
+> However, the FastAPI layer calls an API that no longer exists, and the CLI and demo script do not run. See
+> [Current blockers](#current-blockers).
 
 ---
 
 ## Current blockers
 
-### 1. `import dataos_system` fails — one-line fix
+### ✅ Resolved
 
-`core/permissions/policy.py:7` imports from `typing` but never imports `Union`, which lines 56 and 61 use in
-eagerly-evaluated annotations with no `from __future__ import annotations`:
+Two bugs that made the package unusable were fixed in `dab962b`:
 
-```python
-from typing import Dict, Any, List, Optional, Set     # ← Union missing
+- **`import dataos_system` failed with `NameError: name 'Union' is not defined`.** `core/permissions/policy.py:7`
+  imported from `typing` without `Union`, which lines 56 and 61 used in eagerly-evaluated annotations. Because
+  `core/__init__.py:11` imports that module, this took down the kernel, backend, CLI, demo, and every test.
+- **`ActionResult.execution_time_ms` measured as `0.0`.** `engines/actions/registry.py` used `time.time()`, whose
+  clock granularity on Windows is ~16 ms, so any fast action timed as zero. Now uses `time.perf_counter()`.
 
-def has_capability(self, capability: Union[Capability, str]) -> bool:
-```
+### Still open
 
-```
-NameError: name 'Union' is not defined
-```
-
-Because `core/__init__.py:11` imports the module and `dataos_system.py:20` imports from it, this breaks the kernel,
-the backend, the CLI, `scenario_demo.py`, and most of the test suite.
-
-**Fix:** add `Union` to that import. `policy.py` is the only file in `core/` or `engines/` with this bug.
-
-### 2. The FastAPI backend targets an API that no longer exists
+#### 1. The FastAPI backend targets an API that no longer exists
 
 `backend/app.py` makes 52 `dataos.*` attribute accesses; only about 13 resolve. **Roughly 22 of ~35 endpoints
 return HTTP 500.** It was written against an older, richer `DataOS` and never updated.
@@ -49,18 +41,18 @@ Working endpoints: `/api/objects` CRUD, `/api/relationships`, `/api/vectors/sear
 `/api/provenance/lineage/{id}`, `/api/profiling/{id}`, `/api/quality/{id}`, `/api/objects/{id}/why`,
 `/api/objects/{id}/impact`, `/api/ask`, `/api/ingest/universal`, `/api/io/export`, `/health`.
 
-### 3. `scenario_demo.py` cannot run
+#### 2. `scenario_demo.py` cannot run
 
 It calls six methods that do not exist on `DataOS` — `ingest_file`, `get_object`, `execute_sql`,
 `traverse_graph`, `graph_analytics`, `get_system_health` — and dies at line 83. It also passes `onexc=` to
 `shutil.rmtree`, which requires Python 3.12+.
 
-### 4. The CLI is 4/4 broken
+#### 3. The CLI is 4/4 broken
 
 All four subcommands call the same nonexistent methods. There is also **no `pyproject.toml`, `setup.py`, or
 `requirements.txt`** — the project is not installable.
 
-### 5. `npm install` will fail
+#### 4. `npm install` will fail
 
 `package.json` declares versions that were never published:
 
@@ -85,9 +77,9 @@ pip install pandas numpy scipy scikit-learn networkx fastapi uvicorn
 ```
 
 ```bash
-# Apply the Union fix first (see Current blockers #1)
+# The Union import bug is fixed — the kernel now imports cleanly.
 python -m pytest tests/          # the gate: must pass with zero failures
-python scenario_demo.py          # currently broken
+python scenario_demo.py          # currently broken, see Current blockers
 ```
 
 ### Library
@@ -269,12 +261,23 @@ imported.
 Plain `unittest`, each file self-contained with `tempfile.mktemp` in `setUp`. No `conftest.py`, no pytest config.
 
 ```bash
-python -m pytest tests/                      # the documented gate
+python -m pytest tests/                              # the documented gate
+python -m pytest tests/ --ignore=tests/test_benchmarks.py   # correctness only
 python -m unittest discover -s tests
 python -m tests.benchmarks.run_all
 ```
 
-**Note:** most tests cannot currently pass, because the `Union` bug breaks the package import. Fix that first.
+**Current result: 653 passed** excluding `tests/test_benchmarks.py`, which is a separate matter.
+
+### `test_benchmarks.py` is flaky
+
+`BenchmarkSQL` contains three wall-clock assertions with a **50 ms budget** (`assertLess(median_ms, 50)`) for
+1000-row queries. On shared or virtualised hardware these straddle the threshold — three consecutive runs measured
+**36 ms, 45 ms, and 76 ms**, so the file fails intermittently regardless of the code.
+
+These are performance targets, not correctness checks, and they will make CI non-deterministic on any machine
+slower than the one they were written on. Move them behind a benchmark-only marker, or make the budget
+environment-overridable, rather than letting them gate correctness.
 
 ---
 
