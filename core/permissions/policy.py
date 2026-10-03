@@ -4,7 +4,7 @@ Fine-grained capability gating for users and AI agents.
 """
 
 from enum import Enum
-from typing import Dict, Any, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Union
 from dataclasses import dataclass, field
 
 
