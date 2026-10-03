@@ -6,10 +6,10 @@ graph**, and **first-class provenance** — every derived result traceable back 
 The design principle, stated in `context/ai-workflow-rules.md`: **AI is an operator over the graph, never an
 authority over it.**
 
-> ⚠️ **The library is real. Everything above it is unfinished.** ~180 Python files, 12 engine packages, and ~670
-> unit tests form a coherent, substantial core. The package imports cleanly and **653 correctness tests pass**.
-> However, the FastAPI layer calls an API that no longer exists, and the CLI and demo script do not run. See
-> [Current blockers](#current-blockers).
+> ⚠️ **The library is real. The API layer is not.** ~180 Python files, 12 engine packages, and ~670 unit tests
+> form a coherent, substantial core. The package imports cleanly, **653 correctness tests pass**, the **CLI works
+> end to end**, and **`scenario_demo.py` runs all 10 steps**. What remains broken is the FastAPI backend, which
+> still calls a `DataOS` API that no longer exists. See [Current blockers](#current-blockers).
 
 ---
 
@@ -17,13 +17,25 @@ authority over it.**
 
 ### ✅ Resolved
 
-Two bugs that made the package unusable were fixed in `dab962b`:
+Six bugs that made the project unusable, fixed in `dab962b` and `4193152`:
 
 - **`import dataos_system` failed with `NameError: name 'Union' is not defined`.** `core/permissions/policy.py:7`
   imported from `typing` without `Union`, which lines 56 and 61 used in eagerly-evaluated annotations. Because
   `core/__init__.py:11` imports that module, this took down the kernel, backend, CLI, demo, and every test.
 - **`ActionResult.execution_time_ms` measured as `0.0`.** `engines/actions/registry.py` used `time.time()`, whose
   clock granularity on Windows is ~16 ms, so any fast action timed as zero. Now uses `time.perf_counter()`.
+- **`graph.analytics()` raised `AttributeError`.** It called
+  `GraphAnalyticsEngine.compute_all_metrics()`, which has never existed. It now aggregates the real methods
+  (PageRank, degree/betweenness centrality, communities).
+- **All 4 CLI commands called methods that no longer exist** — `ingest_file`, `execute_sql`, `search.search`,
+  `get_system_health`. Now mapped to `ingest()`, `sql()`, `search()`, with `health` assembled from live storage
+  state. Added `cli/__main__.py` so `python -m cli` runs without a `runpy` warning.
+- **`scenario_demo.py` died at line 83.** Six nonexistent calls, a wrong ingest return shape, and
+  `shutil.rmtree(onexc=)` which needs Python 3.12 (`onerror=` works on 3.11).
+- **`npm install` failed.** `django: ^99.99.99`, `fastapi: ^0.0.8`, and `uvicorn: ^0.0.1-security` are Python
+  packages pinned to versions never published. Removed, along with `cors` and `pg` (Node server libs a Next.js
+  frontend cannot use). Now resolves 252 packages.
+- **No Python dependency manifest existed.** Added `requirements.txt`.
 
 ### Still open
 
@@ -33,54 +45,49 @@ Two bugs that made the package unusable were fixed in `dab962b`:
 return HTTP 500.** It was written against an older, richer `DataOS` and never updated.
 
 Broken calls include `dataos.execute_sql` (the real name is `DataOS.sql`), `dataos.execute_python` (`.python`),
-`dataos.ingest_file`, `dataos.get_object`, `dataos.graph.traverse` (`GraphNamespace` has no `traverse`),
-`dataos.create_agent`, `dataos.get_system_health`, `dataos.run_multi_agent_pipeline`, and
-`dataos.query.execute_query` (where `dataos.query` is actually a bound method, not a namespace).
+`dataos.ingest_file`, `dataos.get_object`, `dataos.graph.traverse` (use `dataos.graph.engine.traverse`),
+`dataos.create_agent`, `dataos.get_system_health` (no such method anywhere), `dataos.run_multi_agent_pipeline`,
+and `dataos.query.execute_query` (where `dataos.query` is a bound method, not a namespace).
 
 Working endpoints: `/api/objects` CRUD, `/api/relationships`, `/api/vectors/search`,
 `/api/provenance/lineage/{id}`, `/api/profiling/{id}`, `/api/quality/{id}`, `/api/objects/{id}/why`,
 `/api/objects/{id}/impact`, `/api/ask`, `/api/ingest/universal`, `/api/io/export`, `/health`.
 
-#### 2. `scenario_demo.py` cannot run
+The CLI and `scenario_demo.py` show exactly how each missing call should be rewritten.
 
-It calls six methods that do not exist on `DataOS` — `ingest_file`, `get_object`, `execute_sql`,
-`traverse_graph`, `graph_analytics`, `get_system_health` — and dies at line 83. It also passes `onexc=` to
-`shutil.rmtree`, which requires Python 3.12+.
+#### 2. Prisma is dead weight
 
-#### 3. The CLI is 4/4 broken
-
-All four subcommands call the same nonexistent methods. There is also **no `pyproject.toml`, `setup.py`, or
-`requirements.txt`** — the project is not installable.
-
-#### 4. `npm install` will fail
-
-`package.json` declares versions that were never published:
-
-```json
-"django": "^99.99.99",
-"fastapi": "^0.0.8",
-"uvicorn": "^0.0.1-security"
-```
-
-These are Python packages listed as npm dependencies. There is no `@prisma/client`, and Prisma — despite a
-224-line `prisma/schema.prisma` — is **entirely unused**: nothing in `src/` imports it, there are no Prisma
-scripts, and the schema's `datasource` has no `url`.
+There is a 224-line `prisma/schema.prisma` and `prisma` in `devDependencies`, but **nothing in `src/` imports
+Prisma**, there is no `@prisma/client`, there are no Prisma scripts, and the schema's `datasource` has no `url`.
+SQLite is the default store; the schema is unused.
 
 ---
 
 ## Quick start
 
-No dependency manifest exists. Install what the import path needs:
-
 ```bash
-pip install pandas numpy scipy scikit-learn networkx fastapi uvicorn
+pip install -r requirements.txt
 ```
 
+There is no `pyproject.toml`/`setup.py` — the package runs from the repo root.
+
 ```bash
-# The Union import bug is fixed — the kernel now imports cleanly.
-python -m pytest tests/          # the gate: must pass with zero failures
-python scenario_demo.py          # currently broken, see Current blockers
+python -m pytest tests/ --ignore=tests/test_benchmarks.py   # 653 correctness tests
+python scenario_demo.py                                      # 10-step end-to-end demo
+python -m cli health                                         # CLI
 ```
+
+### CLI
+
+```bash
+python -m cli ingest data.csv
+python -m cli sql "SELECT name, score FROM demo_csv"
+python -m cli search "alpha" --limit 3
+python -m cli health
+python -m cli export --format dot
+```
+
+The kernel imports cleanly with no extra setup — SQLite is the default store, no external service is required.
 
 ### Library
 
@@ -88,12 +95,19 @@ python scenario_demo.py          # currently broken, see Current blockers
 from dataos_system import DataOS
 
 d = DataOS(db_path="dataos.db")
-obj = d.ingest("data.csv")
-d.why(obj.id)       # why does this exist?
-d.impact(obj.id)    # what breaks if this changes?
+
+# ingest() returns a result dict — the new object id is primary_object_id
+obj_id = d.ingest("data.csv")["primary_object_id"]
+
+d.why(obj_id)       # why does this exist?
+d.impact(obj_id)    # what breaks if this changes?
+d.profile(obj_id)   # statistical profile
 d.ask("which majors have the highest average GPA?")
-d.sql("SELECT major, AVG(gpa) FROM objects GROUP BY major")
+d.sql("SELECT major, AVG(gpa) FROM dataset GROUP BY major")
 d.search("query text")
+d.graph.neighbors(obj_id)
+d.graph.analytics()
+d.close()
 ```
 
 Convenience methods that genuinely exist: `from_url`, `ingest`, `why`, `impact`, `ask`, `sql`, `python`,
