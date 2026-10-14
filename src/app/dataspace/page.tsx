@@ -6,14 +6,13 @@ import { api } from "@/lib/api";
 import { useKeyboard } from "@/hooks/useKeyboard";
 import TopBar from "@/components/layout/TopBar";
 import Sidebar from "@/components/layout/Sidebar";
-import BottomInspector from "@/components/layout/BottomInspector";
+import KnowledgeRAGPanel from "@/components/ai/KnowledgeRAGPanel";
 import SpatialCanvas from "@/components/canvas/SpatialCanvas";
 import CanvasControls from "@/components/canvas/CanvasControls";
 import NodePopover from "@/components/canvas/NodePopover";
 import DropZone from "@/components/canvas/DropZone";
 import EmptyState from "@/components/canvas/EmptyState";
 import CommandPalette from "@/components/ai/CommandPalette";
-import ChatPanel from "@/components/ai/ChatPanel";
 
 const SpatialCanvas3D = lazy(() => import("@/components/canvas/SpatialCanvas3D"));
 
@@ -26,6 +25,18 @@ function Canvas3DFallback() {
       </div>
     </div>
   );
+}
+
+async function loadAllObjects() {
+  const pageSize = 500;
+  const objects: any[] = [];
+  for (let offset = 0; ; offset += pageSize) {
+    const page = await api.listObjects({ limit: pageSize, offset });
+    const batch = Array.isArray(page.objects) ? page.objects : [];
+    objects.push(...batch);
+    if (batch.length < pageSize) break;
+  }
+  return { objects, total: objects.length };
 }
 
 export default function DataspacePage() {
@@ -41,8 +52,8 @@ export default function DataspacePage() {
     async function load() {
       try {
         const [objsRes, relsRes] = await Promise.all([
-          api.listObjects({ limit: 200 }),
-          api.listRelationships({ limit: 500 }),
+          loadAllObjects(),
+          api.listRelationships({ limit: 5000 }),
         ]);
 
         const typeMap: Record<string, string> = {
@@ -121,12 +132,11 @@ export default function DataspacePage() {
             <CanvasControls />
           </div>
 
-          <BottomInspector />
+          <div className="h-[280px] shrink-0 min-h-0"><KnowledgeRAGPanel /></div>
         </main>
       </div>
 
       <CommandPalette />
-      <ChatPanel />
     </div>
   );
 }

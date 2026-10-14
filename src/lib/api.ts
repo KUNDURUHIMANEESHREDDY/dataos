@@ -79,4 +79,6 @@ export const api = {
 
   recommendations: (id: string) =>
     apiFetch(`/api/recommendations/connections/${id}`),
+  queryKnowledge: (data: { query: string; selected_file_ids: string[]; include_related?: boolean; max_related_files?: number; min_confidence?: number }) =>
+    apiFetch("/api/knowledge/query", { method: "POST", body: JSON.stringify(data) }),
 };
