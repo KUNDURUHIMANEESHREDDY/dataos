@@ -79,7 +79,7 @@ export default function DataspacePage() {
           source: r.source_id,
           target: r.target_id,
           type: r.relation_type || "related_to",
-          confidence: r.confidence || 1.0,
+          confidence: r.confidence ?? 1.0,
         }));
 
         setObjects(objects);
