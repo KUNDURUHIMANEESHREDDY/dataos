@@ -20,6 +20,7 @@ from dataos_system import DataOS
 from core.object.model import DataObject, ObjectType
 from core.relation.model import Relationship, RelationType
 from core.permissions.policy import Capability
+from backend.knowledge_rag import create_knowledge_router
 
 # Initialize single DataOS kernel
 dataos = DataOS(db_path="dataos.db", blob_dir=".dataos_blobs")
@@ -40,6 +41,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+app.include_router(create_knowledge_router(dataos))
 
 
 # =============================================================================

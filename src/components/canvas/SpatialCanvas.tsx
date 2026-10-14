@@ -24,6 +24,7 @@ export default function SpatialCanvas() {
   const objects = useSpatialStore((s) => s.objects);
   const edges = useSpatialStore((s) => s.edges);
   const selectedIds = useSpatialStore((s) => s.selectedIds);
+  const relatedIds = Array.from(new Set(edges.filter((edge) => Number(edge.confidence ?? 0) >= 0.75).filter((edge) => selectedIds.includes(edge.source) !== selectedIds.includes(edge.target)).map((edge) => selectedIds.includes(edge.source) ? edge.target : edge.source).filter((id) => !selectedIds.includes(id)))).slice(0, 10);
   const hoveredId = useSpatialStore((s) => s.hoveredId);
   const selectObject = useSpatialStore((s) => s.selectObject);
   const setHovered = useSpatialStore((s) => s.setHovered);
@@ -168,9 +169,10 @@ export default function SpatialCanvas() {
   const handleNodeClick = useCallback(
     (e: React.MouseEvent, id: string) => {
       e.stopPropagation();
-      selectObject(id, e.metaKey || e.ctrlKey);
+      const alreadySelected = selectedIds.includes(id);
+      selectObject(id, e.metaKey || e.ctrlKey || e.shiftKey || alreadySelected);
     },
-    [selectObject]
+    [selectObject, selectedIds]
   );
 
   return (
@@ -213,8 +215,8 @@ export default function SpatialCanvas() {
           const s = nodePositions[edge.source];
           const t = nodePositions[edge.target];
           if (!s || !t) return null;
-          const isSelected =
-            selectedIds.includes(edge.source) || selectedIds.includes(edge.target);
+          const isSelected = selectedIds.includes(edge.source) || selectedIds.includes(edge.target);
+          const isInScope = isSelected || relatedIds.includes(edge.source) || relatedIds.includes(edge.target);
           return (
             <line
               key={edge.id}
@@ -222,9 +224,9 @@ export default function SpatialCanvas() {
               y1={s.y}
               x2={t.x}
               y2={t.y}
-              stroke={isSelected ? "rgba(13,148,136,0.6)" : "rgba(0,0,0,0.12)"}
-              strokeWidth={isSelected ? 2 : 1}
-              strokeDasharray={isSelected ? "none" : "4,4"}
+              stroke={isSelected ? "rgba(13,148,136,0.72)" : isInScope ? "rgba(139,92,246,0.48)" : "rgba(0,0,0,0.12)"}
+              strokeWidth={isSelected ? 2 : isInScope ? 1.5 : 1}
+              strokeDasharray={isInScope ? "none" : "4,4"}
               markerEnd="url(#arrowhead)"
               style={{ transition: "stroke 200ms, stroke-width 200ms" }}
             />
@@ -235,6 +237,7 @@ export default function SpatialCanvas() {
           const pos = nodePositions[obj.id];
           if (!pos) return null;
           const isSelected = selectedIds.includes(obj.id);
+          const isRelated = !isSelected && relatedIds.includes(obj.id);
           const isHovered = hoveredId === obj.id;
           const color = TYPE_COLORS[obj.type] || "#666";
           return (
@@ -253,7 +256,7 @@ export default function SpatialCanvas() {
               <circle
                 r={NODE_RADIUS}
                 fill={color}
-                opacity={isSelected ? 1 : 0.85}
+                opacity={isSelected || isRelated ? 1 : 0.85}
                 filter={isSelected ? "url(#node-glow)" : "url(#node-shadow)"}
                 style={{
                   transition: "r 150ms, opacity 150ms",
@@ -281,15 +284,8 @@ export default function SpatialCanvas() {
               >
                 {obj.name.length > 16 ? obj.name.slice(0, 14) + "..." : obj.name}
               </text>
-              {isSelected && (
-                <circle
-                  r={NODE_RADIUS + 6}
-                  fill="none"
-                  stroke={color}
-                  strokeWidth="2"
-                  opacity="0.4"
-                  style={{ animation: "pulse 2s infinite" }}
-                />
+              {(isSelected || isRelated) && (
+                <circle r={NODE_RADIUS + (isSelected ? 6 : 4)} fill="none" stroke={isSelected ? color : "#8b5cf6"} strokeWidth={isSelected ? 2 : 1.5} strokeDasharray={isRelated ? "3,3" : "none"} opacity={isSelected ? 0.55 : 0.72} style={{ animation: isSelected ? "pulse 2s infinite" : undefined }} />
               )}
             </g>
           );
