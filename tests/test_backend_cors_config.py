@@ -28,6 +28,18 @@ def test_normalizes_default_ports_and_deduplicates_equivalent_origins():
     ) == ["https://example.com", "http://localhost"]
 
 
+def test_allows_cleartext_http_only_for_loopback_development():
+    assert parse_cors_origins(
+        "http://localhost:80,http://127.0.0.1,"
+        "http://[::1]:8080,http://ui.dev.localhost:3000"
+    ) == [
+        "http://localhost",
+        "http://127.0.0.1",
+        "http://[::1]:8080",
+        "http://ui.dev.localhost:3000",
+    ]
+
+
 def test_canonicalizes_ipv6_and_browser_compatible_idn_hosts():
     assert parse_cors_origins(
         "https://[2001:0db8:0:0:0:0:0:1]:443,"
@@ -61,9 +73,11 @@ def test_canonicalizes_ipv6_and_browser_compatible_idn_hosts():
         "ftp://example.com",
         "https://example .com",
         "https://example.com\\evil",
+        "http://example.com",
+        "http://api.example.com:8080",
     ],
 )
-def test_rejects_wildcard_and_malformed_origins(value):
+def test_rejects_wildcard_and_malformed_or_insecure_origins(value):
     with pytest.raises(ValueError):
         parse_cors_origins(value)
 
