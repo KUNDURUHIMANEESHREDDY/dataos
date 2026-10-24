@@ -80,6 +80,11 @@ class SubgraphTokenManager:
                 )
                 _EPHEMERAL_SECRET_WARNING_EMITTED = True
 
+        if not isinstance(configured_secret, str):
+            raise TypeError("DATAOS_MASTER_KEY must be a string.")
+        if not configured_secret.strip():
+            raise ValueError("DATAOS_MASTER_KEY must not be empty or whitespace.")
+
         encoded_secret = configured_secret.encode("utf-8")
         if len(encoded_secret) < 32:
             raise ValueError("DATAOS_MASTER_KEY must contain at least 32 UTF-8 bytes.")
