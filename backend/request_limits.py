@@ -73,7 +73,16 @@ class RequestBodyLimitMiddleware:
             if not raw_length.isascii() or not raw_length.isdigit():
                 await self._reject(scope, receive, send, 400, "Invalid Content-Length")
                 return
-            declared_length = int(raw_length)
+            # Strip leading zeroes before integer conversion. Apart from being
+            # unnecessary work, converting an attacker-controlled thousands-digit
+            # value can raise ValueError on Python builds with an integer-string
+            # conversion limit instead of returning a controlled HTTP response.
+            normalized_length = raw_length.lstrip(b"0") or b"0"
+            max_length_digits = len(str(self.max_body_bytes))
+            if len(normalized_length) > max_length_digits:
+                await self._reject(scope, receive, send, 413, "Request body too large")
+                return
+            declared_length = int(normalized_length)
             if declared_length > self.max_body_bytes:
                 await self._reject(scope, receive, send, 413, "Request body too large")
                 return
