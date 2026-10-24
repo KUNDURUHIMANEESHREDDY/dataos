@@ -55,3 +55,13 @@ def parse_cors_origins(raw: str | None) -> list[str]:
             origins.append(origin)
 
     return origins
+
+
+def cors_middleware_options(raw: str | None) -> dict[str, object]:
+    """Return least-privilege options for Starlette's CORS middleware."""
+    return {
+        "allow_origins": parse_cors_origins(raw),
+        "allow_credentials": False,
+        "allow_methods": ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+        "allow_headers": ["Authorization", "Content-Type"],
+    }
