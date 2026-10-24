@@ -151,6 +151,21 @@ def test_expensive_query_routes_publish_bounded_parameters():
     assert vector["top_k"]["minimum"] == 1
     assert vector["top_k"]["maximum"] == 100
 
+    relationships = params("/api/relationships/")
+    for name in ("source_id", "target_id"):
+        assert relationships[name]["minLength"] == 1
+        assert relationships[name]["maxLength"] == 256
+    assert relationships["relation_type"]["minLength"] == 1
+    assert relationships["relation_type"]["maxLength"] == 64
+
+    search = params("/api/search/")
+    assert search["q"]["minLength"] == 1
+    assert search["q"]["maxLength"] == 1000
+    assert search["object_type"]["minLength"] == 1
+    assert search["object_type"]["maxLength"] == 64
+    assert search["context_id"]["minLength"] == 1
+    assert search["context_id"]["maxLength"] == 256
+
     neighbors = params("/api/graph/neighbors/{object_id}")
     assert neighbors["direction"]["pattern"] == "^(outgoing|incoming|both)$"
 
