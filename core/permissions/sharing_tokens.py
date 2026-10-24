@@ -10,6 +10,9 @@ import json
 import base64
 import time
 import datetime
+import os
+import secrets
+import warnings
 from typing import Dict, Any, List, Optional, Set
 from dataclasses import dataclass, field, asdict
 from core.permissions.policy import Capability
@@ -46,12 +49,40 @@ class SharingTokenPayload:
         return capability in self.allowed_capabilities or "*" in self.allowed_capabilities
 
 
+_EPHEMERAL_SECRET_WARNING_EMITTED = False
+
+
 class SubgraphTokenManager:
     """Issues and verifies cryptographically signed HMAC-SHA256 sharing tokens."""
 
-    def __init__(self, secret_key: str = "dataos_subgraph_master_secret_2026"):
-        """Initialize with an HMAC secret key for signing."""
-        self.secret_key = secret_key.encode("utf-8")
+    def __init__(self, secret_key: Optional[str] = None):
+        """Initialize with an explicit or environment-provided HMAC secret.
+
+        Production must configure DATAOS_MASTER_KEY. Non-production processes
+        may use an ephemeral random key, but their tokens will not survive a
+        restart unless the same environment key is configured.
+        """
+        global _EPHEMERAL_SECRET_WARNING_EMITTED
+
+        configured_secret = secret_key if secret_key is not None else os.getenv("DATAOS_MASTER_KEY")
+        if not configured_secret:
+            if os.getenv("DATAOS_ENV", "").strip().lower() in {"prod", "production"}:
+                raise RuntimeError("DATAOS_MASTER_KEY must be configured in production.")
+            configured_secret = secrets.token_urlsafe(32)
+            if not _EPHEMERAL_SECRET_WARNING_EMITTED:
+                warnings.warn(
+                    "DATAOS_MASTER_KEY is unset; using a process-local signing key. "
+                    "Sharing tokens will be invalid after restart. Configure DATAOS_MASTER_KEY "
+                    "for persistent environments.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+                _EPHEMERAL_SECRET_WARNING_EMITTED = True
+
+        encoded_secret = configured_secret.encode("utf-8")
+        if len(encoded_secret) < 32:
+            raise ValueError("DATAOS_MASTER_KEY must contain at least 32 UTF-8 bytes.")
+        self.secret_key = encoded_secret
 
     def issue_token(
         self,
