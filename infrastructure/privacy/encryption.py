@@ -11,6 +11,7 @@ import base64
 import hashlib
 import secrets
 from typing import Dict, Any, Optional, Tuple
+import warnings
 
 
 class EncryptionEngine:
@@ -20,12 +21,19 @@ class EncryptionEngine:
     Falls back to Fernet if cryptography is unavailable.
     """
 
-    def __init__(self, master_key: Optional[str] = None, key_file: Optional[str] = None):
+    def __init__(
+        self,
+        master_key: Optional[str] = None,
+        key_file: Optional[str] = None,
+        *,
+        allow_legacy_xor_decryption: bool = False,
+    ):
         self._backend = None
         self._fernet = None
         self._aes_key = None
+        self._allow_legacy_xor_decryption = allow_legacy_xor_decryption
 
-        if master_key:
+        if master_key is not None:
             self._init_from_password(master_key)
         elif key_file and os.path.exists(key_file):
             self._init_from_file(key_file)
@@ -34,6 +42,8 @@ class EncryptionEngine:
 
     def _init_from_password(self, password: str) -> None:
         """Derive encryption key from password using PBKDF2."""
+        if not isinstance(password, str) or not password.strip():
+            raise EncryptionError("Encryption master key must be a non-empty string")
         salt = self._get_or_create_salt()
         key = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, 480000, dklen=32)
         self._aes_key = key
@@ -52,10 +62,13 @@ class EncryptionEngine:
     def _init_from_env(self) -> None:
         """Initialize from DATAOS_MASTER_KEY environment variable."""
         env_key = os.environ.get("DATAOS_MASTER_KEY")
-        if env_key:
+        if env_key is not None:
+            # An explicitly configured but empty key is a deployment error, not
+            # permission to silently switch to a different encryption key.
             self._init_from_password(env_key)
         else:
-            # Generate ephemeral key (data won't persist across restarts)
+            # Generate ephemeral key (data won't persist across restarts).
+            # This is suitable only for local development/test data.
             self._aes_key = os.urandom(32)
             self._try_init_fernet(self._aes_key)
 
@@ -73,40 +86,57 @@ class EncryptionEngine:
         return salt
 
     def _try_init_fernet(self, key: bytes) -> None:
-        """Try to initialize Fernet encryption (requires cryptography or cryptography)."""
+        """Initialize a supported authenticated-encryption backend or fail closed."""
         try:
             from cryptography.fernet import Fernet
-            # Fernet needs url-safe base64 32-byte key
+            # Fernet needs a URL-safe base64 encoding of a 32-byte key.
             fernet_key = base64.urlsafe_b64encode(key[:32])
             self._fernet = Fernet(fernet_key)
             self._backend = "fernet"
         except ImportError:
             try:
-                from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+                from cryptography.hazmat.primitives.ciphers.aead import AESGCM  # noqa: F401
                 self._backend = "aesgcm"
-            except ImportError:
-                # Pure-Python XOR fallback (NOT secure for production)
-                self._backend = "xor_fallback"
+            except ImportError as exc:
+                self._backend = None
+                raise EncryptionError(
+                    "The cryptography package is required; refusing insecure fallback encryption"
+                ) from exc
 
     def encrypt(self, plaintext: str) -> str:
-        """Encrypt a string, return base64-encoded ciphertext with metadata."""
+        """Encrypt a string using an authenticated-encryption backend."""
         if self._backend == "fernet" and self._fernet:
             encrypted = self._fernet.encrypt(plaintext.encode())
             return f"fernet:{encrypted.decode()}"
-        elif self._backend == "aesgcm":
+        if self._backend == "aesgcm":
             return self._encrypt_aes_gcm(plaintext)
-        else:
-            return self._encrypt_xor_fallback(plaintext)
+        raise EncryptionError(
+            "No secure encryption backend is available; refusing to encrypt with XOR"
+        )
 
     def decrypt(self, ciphertext: str) -> str:
-        """Decrypt a ciphertext string."""
-        if ciphertext.startswith("fernet:") and self._fernet:
+        """Decrypt supported ciphertext formats; legacy XOR requires explicit opt-in."""
+        if ciphertext.startswith("fernet:"):
+            if not self._fernet:
+                raise EncryptionError("Fernet support is unavailable for this ciphertext")
             encrypted = ciphertext[7:].encode()
             return self._fernet.decrypt(encrypted).decode()
-        elif ciphertext.startswith("aesgcm:"):
+        if ciphertext.startswith("aesgcm:"):
+            if self._backend != "aesgcm":
+                raise EncryptionError("AES-GCM support is unavailable for this ciphertext")
             return self._decrypt_aes_gcm(ciphertext)
-        else:
+        if ciphertext.startswith("xor:") and self._allow_legacy_xor_decryption:
+            warnings.warn(
+                "Legacy XOR ciphertext is unauthenticated and insecure; decrypt only to migrate it",
+                RuntimeWarning,
+                stacklevel=2,
+            )
             return self._decrypt_xor_fallback(ciphertext)
+        if ciphertext.startswith("xor:"):
+            raise EncryptionError(
+                "Legacy XOR ciphertext is disabled; set allow_legacy_xor_decryption=True only for migration"
+            )
+        raise EncryptionError("Unsupported ciphertext format")
 
     def _encrypt_aes_gcm(self, plaintext: str) -> str:
         """Encrypt using AES-GCM via cryptography library."""
@@ -127,14 +157,6 @@ class EncryptionEngine:
         ct = combined[12:]
         aesgcm = AESGCM(self._aes_key)
         return aesgcm.decrypt(nonce, ct, None).decode()
-
-    def _encrypt_xor_fallback(self, plaintext: str) -> str:
-        """XOR fallback for environments without cryptography library."""
-        key_bytes = self._aes_key
-        pt_bytes = plaintext.encode()
-        ct_bytes = bytes(pt_bytes[i] ^ key_bytes[i % len(key_bytes)] for i in range(len(pt_bytes)))
-        encoded = base64.b64encode(ct_bytes).decode()
-        return f"xor:{encoded}"
 
     def _decrypt_xor_fallback(self, ciphertext: str) -> str:
         """Decrypt XOR fallback ciphertext."""
