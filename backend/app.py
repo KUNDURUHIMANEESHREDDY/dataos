@@ -37,15 +37,16 @@ app = FastAPI(
     version="1.0.0"
 )
 
-app.add_middleware(
-    CORSMiddleware,
-    **cors_middleware_options(os.getenv("DATAOS_CORS_ORIGINS")),
-)
-
 # Bound JSON and multipart requests before FastAPI parses their bodies.
+# Register the limiter first so CORS remains outermost and can decorate 400/413 responses.
 app.add_middleware(
     RequestBodyLimitMiddleware,
     max_body_bytes=configured_request_body_limit(),
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    **cors_middleware_options(os.getenv("DATAOS_CORS_ORIGINS")),
 )
 
 
