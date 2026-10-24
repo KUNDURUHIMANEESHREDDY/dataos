@@ -150,9 +150,9 @@ async def delete_object(object_id: str, soft: bool = True):
 
 @app.get("/api/relationships/", summary="List Relationships")
 async def list_relationships(
-    source_id: Optional[str] = None,
-    target_id: Optional[str] = None,
-    relation_type: Optional[str] = None,
+    source_id: Optional[str] = FastQuery(None, min_length=1, max_length=256),
+    target_id: Optional[str] = FastQuery(None, min_length=1, max_length=256),
+    relation_type: Optional[str] = FastQuery(None, min_length=1, max_length=64),
     min_confidence: float = FastQuery(0.0, ge=0.0, le=1.0),
     limit: int = FastQuery(1000, ge=1, le=1000)
 ):
@@ -244,8 +244,8 @@ async def query_unified(req: UnifiedQueryRequest):
 @app.get("/api/search/", summary="Hybrid Search")
 async def hybrid_search(
     q: str = FastQuery(..., min_length=1, max_length=1000, description="Search query string"),
-    object_type: Optional[str] = None,
-    context_id: Optional[str] = None,
+    object_type: Optional[str] = FastQuery(None, min_length=1, max_length=64),
+    context_id: Optional[str] = FastQuery(None, min_length=1, max_length=256),
     limit: int = FastQuery(20, ge=1, le=100)
 ):
     results = dataos.search(q, top_k=limit)
