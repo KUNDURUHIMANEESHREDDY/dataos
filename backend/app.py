@@ -58,29 +58,29 @@ class ObjectCreateRequest(BaseModel):
 
 
 class RelationCreateRequest(BaseModel):
-    source_id: str
-    target_id: str
-    relation_type: str = "references"
-    confidence: float = 1.0
+    source_id: str = Field(min_length=1, max_length=256)
+    target_id: str = Field(min_length=1, max_length=256)
+    relation_type: str = Field(default="references", min_length=1, max_length=64)
+    confidence: float = Field(default=1.0, ge=0.0, le=1.0)
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
 
 class SQLQueryRequest(BaseModel):
-    query: str
-    agent_or_user: str = "api_user"
+    query: str = Field(min_length=1, max_length=100_000)
+    agent_or_user: str = Field(default="api_user", min_length=1, max_length=128)
 
 
 class PythonComputeRequest(BaseModel):
-    code: str
-    input_object_ids: List[str] = Field(default_factory=list)
-    agent_or_user: str = "api_user"
+    code: str = Field(min_length=1, max_length=50_000)
+    input_object_ids: List[str] = Field(default_factory=list, max_length=100)
+    agent_or_user: str = Field(default="api_user", min_length=1, max_length=128)
 
 
 class UnifiedQueryRequest(BaseModel):
-    query: str
-    query_type: str = "auto"
-    context_object_id: Optional[str] = None
-    agent_or_user: str = "api_user"
+    query: str = Field(min_length=1, max_length=100_000)
+    query_type: str = Field(default="auto", min_length=1, max_length=32)
+    context_object_id: Optional[str] = Field(default=None, max_length=256)
+    agent_or_user: str = Field(default="api_user", min_length=1, max_length=128)
 
 
 class QualityEvaluateRequest(BaseModel):
@@ -167,7 +167,7 @@ async def list_relationships(
 
 @app.post("/api/relationships/", summary="Create Relationship")
 async def create_relationship(req: RelationCreateRequest):
-    rel = dataos.create_relationship(
+    rel = dataos.graph.create_relation(
         source_id=req.source_id,
         target_id=req.target_id,
         relation_type=req.relation_type,
@@ -179,27 +179,28 @@ async def create_relationship(req: RelationCreateRequest):
 
 @app.get("/api/graph/neighbors/{object_id}", summary="Get Object Neighbors")
 async def get_neighbors(object_id: str, direction: str = "both"):
-    neighbors = dataos.get_neighbors(object_id, direction=direction)
+    neighbors = dataos.graph.neighbors(object_id, direction=direction)
     return {"object_id": object_id, "total": len(neighbors), "neighbors": neighbors}
 
 
 @app.get("/api/graph/traverse/{object_id}", summary="Multi-Hop Graph Traversal")
-async def traverse_graph(object_id: str, max_hops: int = 3, min_confidence: float = 0.0):
-    traversal = dataos.graph.traverse(start_id=object_id, max_hops=max_hops, min_confidence=min_confidence)
+async def traverse_graph(object_id: str, max_hops: int = FastQuery(3, ge=1, le=10), min_confidence: float = FastQuery(0.0, ge=0.0, le=1.0)):
+    traversal = dataos.graph.engine.traverse(start_id=object_id, max_hops=max_hops, min_confidence=min_confidence)
     return traversal
 
 
 @app.get("/api/graph/analytics", summary="Graph Analytics & PageRank")
 async def graph_analytics(algorithm: str = "pagerank"):
+    engine = dataos.graph.analytics_engine
     if algorithm == "pagerank":
-        scores = dataos.graph_analytics.compute_pagerank()
+        scores = engine.compute_pagerank()
         return {"algorithm": "pagerank", "scores": scores}
     elif algorithm == "centrality":
-        deg = dataos.graph_analytics.compute_degree_centrality()
-        bc = dataos.graph_analytics.compute_betweenness_centrality()
+        deg = engine.compute_degree_centrality()
+        bc = engine.compute_betweenness_centrality()
         return {"degree_centrality": deg, "betweenness_centrality": bc}
     elif algorithm == "communities":
-        comms = dataos.graph_analytics.detect_communities()
+        comms = engine.detect_communities()
         return {"communities": comms}
     else:
         raise HTTPException(status_code=400, detail=f"Unsupported algorithm: {algorithm}")
@@ -211,25 +212,28 @@ async def graph_analytics(algorithm: str = "pagerank"):
 
 @app.post("/api/compute/sql", summary="Execute SQL Query")
 async def compute_sql(req: SQLQueryRequest):
-    res = dataos.execute_sql(req.query)
-    return res
+    return dataos.sql(req.query)
 
 
 @app.post("/api/compute/python", summary="Execute Python Sandbox")
 async def compute_python(req: PythonComputeRequest):
-    res = dataos.execute_python(req.code, input_object_ids=req.input_object_ids)
-    return res
+    return dataos.python(req.code, input_object_ids=req.input_object_ids)
 
 
 @app.post("/api/query/", summary="Unified Query Execution")
 async def query_unified(req: UnifiedQueryRequest):
-    res = dataos.query.execute_query(
-        query_text=req.query,
-        query_type=req.query_type,
-        context_object_id=req.context_object_id,
-        agent_or_user=req.agent_or_user
-    )
-    return res
+    query_type = req.query_type.strip().lower()
+    if query_type in {"auto", "ask", "natural_language"}:
+        return dataos.ask(req.query)
+    if query_type == "sql":
+        return dataos.sql(req.query)
+    if query_type in {"python", "code"}:
+        input_ids = [req.context_object_id] if req.context_object_id else []
+        return dataos.python(req.query, input_object_ids=input_ids)
+    if query_type in {"search", "semantic", "hybrid"}:
+        results = dataos.search(req.query, top_k=10)
+        return {"query": req.query, "total_matches": len(results), "results": results}
+    raise HTTPException(status_code=400, detail=f"Unsupported query_type: {query_type}")
 
 
 # =============================================================================
@@ -238,12 +242,20 @@ async def query_unified(req: UnifiedQueryRequest):
 
 @app.get("/api/search/", summary="Hybrid Search")
 async def hybrid_search(
-    q: str = FastQuery(..., description="Search query string"),
+    q: str = FastQuery(..., min_length=1, max_length=1000, description="Search query string"),
     object_type: Optional[str] = None,
     context_id: Optional[str] = None,
-    limit: int = 20
+    limit: int = FastQuery(20, ge=1, le=100)
 ):
-    results = dataos.search.search(query=q, object_type=object_type, context_object_id=context_id, limit=limit)
+    results = dataos.search(q, top_k=limit)
+    if object_type:
+        results = [item for item in results if item.get("type", item.get("object_type")) == object_type]
+    if context_id:
+        results = [
+            item for item in results
+            if item.get("context_id") == context_id
+            or (isinstance(item.get("metadata"), dict) and item["metadata"].get("context_id") == context_id)
+        ]
     return {"query": q, "total_matches": len(results), "results": results}
 
 
@@ -593,7 +605,15 @@ async def export_graph(format: str = "json_ld"):
 
 @app.get("/api/catalog/health", summary="System Health & Catalog Overview")
 async def get_health_overview():
-    return dataos.get_system_health()
+    try:
+        dataos.storage.list_objects(limit=1, offset=0)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="DataOS storage unavailable") from exc
+    return {
+        "status": "operational",
+        "storage": "available",
+        "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    }
 
 
 @app.get("/health", summary="Basic Health Check")
