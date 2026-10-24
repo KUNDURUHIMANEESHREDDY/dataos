@@ -28,10 +28,15 @@ def test_normalizes_default_ports_and_deduplicates_equivalent_origins():
     ) == ["https://example.com", "http://localhost"]
 
 
-def test_canonicalizes_ipv6_and_idn_hosts():
+def test_canonicalizes_ipv6_and_browser_compatible_idn_hosts():
     assert parse_cors_origins(
-        "https://[2001:0db8:0:0:0:0:0:1]:443,https://BÜCHER.example"
-    ) == ["https://[2001:db8::1]", "https://xn--bcher-kva.example"]
+        "https://[2001:0db8:0:0:0:0:0:1]:443,"
+        "https://BÜCHER.example,https://faß.de"
+    ) == [
+        "https://[2001:db8::1]",
+        "https://xn--bcher-kva.example",
+        "https://xn--fa-hia.de",
+    ]
 
 
 @pytest.mark.parametrize(
