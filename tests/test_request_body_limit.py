@@ -132,12 +132,16 @@ def test_rejects_oversized_content_length_before_calling_app():
     [
         [(b"content-length", b"not-a-number")],
         [(b"content-length", b"-1")],
+        [(b"content-length", b"+3")],
+        [(b"content-length", b"1_0")],
+        [(b"content-length", "٣".encode("utf-8"))],
         [(b"content-length", b"2"), (b"content-length", b"3")],
+        [(b"content-length", b"3"), (b"content-length", b"3")],
     ],
 )
-def test_rejects_invalid_or_conflicting_content_length(headers):
+def test_rejects_invalid_or_duplicate_content_length(headers):
     async def app(scope, receive, send):
-        raise AssertionError("invalid Content-Length must be rejected before the route")
+        raise AssertionError("invalid or duplicate Content-Length must be rejected before the route")
 
     sent = run(
         invoke(
