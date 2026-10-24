@@ -210,9 +210,9 @@ def test_time_travel_routes_use_registered_engine(monkeypatch):
     )
     monkeypatch.setattr(api, "dataos", SimpleNamespace(time_travel=engine))
 
-    assert run(api.time_travel_object("obj-1", "2026-01-01T00:00:00Z")) == {"id": "obj-1", "version": 2}
-    assert run(api.time_travel_graph("2026-01-01T00:00:00Z")) == {"nodes": []}
-    assert run(api.time_travel_changes("2026-01-01T00:00:00Z", "2026-01-02T00:00:00Z")) == {"changes": []}
+    assert run(api.time_travel_object("obj-1", "2026-01-01T00:00:00Z", temporal_axis="system_time")) == {"id": "obj-1", "version": 2}
+    assert run(api.time_travel_graph("2026-01-01T00:00:00Z", temporal_axis="system_time")) == {"nodes": []}
+    assert run(api.time_travel_changes("2026-01-01T00:00:00Z", "2026-01-02T00:00:00Z", temporal_axis="system_time")) == {"changes": []}
     engine.get_object_as_of.assert_called_once_with("obj-1", as_of_timestamp="2026-01-01T00:00:00Z", temporal_axis="system_time")
     engine.get_graph_as_of.assert_called_once_with(as_of_timestamp="2026-01-01T00:00:00Z", temporal_axis="system_time")
     engine.changes_between.assert_called_once_with("2026-01-01T00:00:00Z", "2026-01-02T00:00:00Z", temporal_axis="system_time")
