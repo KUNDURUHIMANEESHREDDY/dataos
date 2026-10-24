@@ -16,9 +16,12 @@ import warnings
 
 class EncryptionEngine:
     """
-    AES-256-GCM encryption for data at rest.
-    Uses PBKDF2 for key derivation from passwords.
-    Falls back to Fernet if cryptography is unavailable.
+    Authenticated encryption for data at rest.
+
+    Passwords are expanded with PBKDF2. New writes use Fernet when available
+    and AES-GCM as a compatible alternative. The engine fails closed when no
+    authenticated-encryption backend is available; it never writes XOR
+    ciphertext. Legacy XOR reads require explicit migration-only opt-in.
     """
 
     def __init__(
