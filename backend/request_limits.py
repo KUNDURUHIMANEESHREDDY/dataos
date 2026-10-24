@@ -42,10 +42,11 @@ class RequestBodyLimitMiddleware:
         self.max_body_bytes = max_body_bytes
 
     async def _reject(self, scope, receive, send, status_code: int, detail: str):
+        headers = {"Connection": "close"} if scope.get("http_version") in {"1.0", "1.1"} else {}
         response = JSONResponse(
             status_code=status_code,
             content={"detail": detail},
-            headers={"Connection": "close"},
+            headers=headers,
         )
         await response(scope, receive, send)
 
