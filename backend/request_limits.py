@@ -60,18 +60,20 @@ class RequestBodyLimitMiddleware:
             for key, value in scope.get("headers", [])
             if key.lower() == b"content-length"
         ]
-        if len(set(length_headers)) > 1:
+        # Reject every duplicate field, even identical values. Different HTTP
+        # components may normalize duplicates differently, creating request-
+        # smuggling ambiguity before this middleware sees the ASGI scope.
+        if len(length_headers) > 1:
             await self._reject(scope, receive, send, 400, "Invalid Content-Length")
             return
         if length_headers:
-            try:
-                declared_length = int(length_headers[0])
-            except ValueError:
+            raw_length = length_headers[0]
+            # HTTP Content-Length is one or more ASCII decimal digits. Python's
+            # int() also accepts forms such as +10, 1_0, and Unicode digits.
+            if not raw_length.isascii() or not raw_length.isdigit():
                 await self._reject(scope, receive, send, 400, "Invalid Content-Length")
                 return
-            if declared_length < 0:
-                await self._reject(scope, receive, send, 400, "Invalid Content-Length")
-                return
+            declared_length = int(raw_length)
             if declared_length > self.max_body_bytes:
                 await self._reject(scope, receive, send, 413, "Request body too large")
                 return
