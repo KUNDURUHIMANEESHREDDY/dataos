@@ -104,10 +104,10 @@ class WorkflowExecutionRequest(BaseModel):
 
 @app.get("/api/objects/", summary="List DataOS Objects")
 async def list_objects(
-    object_type: Optional[str] = None,
-    source: Optional[str] = None,
-    limit: int = 100,
-    offset: int = 0
+    object_type: Optional[str] = FastQuery(None, min_length=1, max_length=64),
+    source: Optional[str] = FastQuery(None, min_length=1, max_length=256),
+    limit: int = FastQuery(100, ge=1, le=500),
+    offset: int = FastQuery(0, ge=0, le=1_000_000)
 ):
     objs = dataos.storage.list_objects(object_type=object_type, source=source, limit=limit, offset=offset)
     return {"total": len(objs), "objects": [o.to_dict() for o in objs]}
@@ -152,8 +152,8 @@ async def list_relationships(
     source_id: Optional[str] = None,
     target_id: Optional[str] = None,
     relation_type: Optional[str] = None,
-    min_confidence: float = 0.0,
-    limit: int = 1000
+    min_confidence: float = FastQuery(0.0, ge=0.0, le=1.0),
+    limit: int = FastQuery(1000, ge=1, le=1000)
 ):
     rels = dataos.storage.list_relationships(
         source_id=source_id,
@@ -190,7 +190,7 @@ async def traverse_graph(object_id: str, max_hops: int = FastQuery(3, ge=1, le=1
 
 
 @app.get("/api/graph/analytics", summary="Graph Analytics & PageRank")
-async def graph_analytics(algorithm: str = "pagerank"):
+async def graph_analytics(algorithm: str = FastQuery("pagerank", pattern="^(pagerank|centrality|communities)$")):
     engine = dataos.graph.analytics_engine
     if algorithm == "pagerank":
         scores = engine.compute_pagerank()
@@ -261,8 +261,8 @@ async def hybrid_search(
 
 @app.get("/api/vectors/search", summary="Persistent Vector Similarity Search (Rule #45)")
 async def search_vectors(
-    q: str = FastQuery(..., description="Semantic query string"),
-    top_k: int = 10
+    q: str = FastQuery(..., min_length=1, max_length=1000, description="Semantic query string"),
+    top_k: int = FastQuery(10, ge=1, le=100)
 ):
     results = dataos.search_vector(query_text=q, top_k=top_k)
     return {"query": q, "total_matches": len(results), "results": results}
@@ -300,7 +300,7 @@ async def extract_rich_document_api(
 async def time_travel_object(
     object_id: str,
     as_of: str = FastQuery(..., description="Timestamp ISO string to travel to"),
-    temporal_axis: str = "system_time"
+    temporal_axis: str = FastQuery("system_time", pattern="^(system_time|valid_time|business_time)$", max_length=32)
 ):
     obj = dataos.get_object_as_of(object_id, as_of, temporal_axis=temporal_axis)
     if not obj:
@@ -328,8 +328,8 @@ async def time_travel_changes(
 
 
 class ConflictResolutionRequest(BaseModel):
-    conflict_object_id: str
-    strategy: str = "last_write_wins"
+    conflict_object_id: str = Field(min_length=1, max_length=256)
+    strategy: str = Field(default="last_write_wins", min_length=1, max_length=32)
     manual_properties: Optional[Dict[str, Any]] = None
 
 
@@ -399,7 +399,11 @@ async def evaluate_quality(object_id: str, req: QualityEvaluateRequest):
 # =============================================================================
 
 @app.get("/api/provenance/lineage/{object_id}", summary="Data Lineage Traversal")
-async def get_lineage(object_id: str, direction: str = "upstream", max_depth: int = 10):
+async def get_lineage(
+    object_id: str,
+    direction: str = FastQuery("upstream", pattern="^(upstream|downstream)$"),
+    max_depth: int = FastQuery(10, ge=1, le=20),
+):
     if direction == "upstream":
         return dataos.lineage.trace_upstream_lineage(object_id, max_depth=max_depth)
     else:
@@ -411,10 +415,10 @@ async def get_lineage(object_id: str, direction: str = "upstream", max_depth: in
 # =============================================================================
 
 class MultiAgentPipelineRequest(BaseModel):
-    goal_prompt: str
-    target_dataset_id: str
-    analysis_sql_or_python: str
-    quality_rules: Optional[List[Dict[str, Any]]] = None
+    goal_prompt: str = Field(min_length=1, max_length=20_000)
+    target_dataset_id: str = Field(min_length=1, max_length=256)
+    analysis_sql_or_python: str = Field(min_length=1, max_length=50_000)
+    quality_rules: Optional[List[Dict[str, Any]]] = Field(default=None, max_length=100)
 
 
 @app.post("/api/agents/pipeline/research", summary="Run Composable Multi-Agent Research Pipeline (Rule #20)")
@@ -431,7 +435,7 @@ async def run_multi_agent_pipeline_api(req: MultiAgentPipelineRequest):
 @app.get("/api/recommendations/connections/{object_id}", summary="Graph Recommendation & Missing Link Discovery (Rule #57)")
 async def recommend_connections_api(
     object_id: str,
-    top_k: int = 10
+    top_k: int = FastQuery(10, ge=1, le=100)
 ):
     recs = dataos.recommend_connections(target_object_id=object_id, top_k=top_k)
     return {"target_object_id": object_id, "recommendations": recs}
@@ -440,7 +444,7 @@ async def recommend_connections_api(
 @app.get("/api/recommendations/datasets/{object_id}", summary="Recommend Relevant Datasets (Rule #57)")
 async def recommend_datasets_api(
     object_id: str,
-    top_k: int = 5
+    top_k: int = FastQuery(5, ge=1, le=100)
 ):
     recs = dataos.recommend_datasets(target_object_id=object_id, top_k=top_k)
     return {"target_object_id": object_id, "recommended_datasets": recs}
@@ -465,8 +469,8 @@ async def execute_workflow(req: WorkflowExecutionRequest):
 
 @app.get("/api/governance/duplicates", summary="Fuzzy Duplicate Detection (Rule #58)")
 async def detect_duplicates_api(
-    object_id: Optional[str] = None,
-    min_similarity: float = 0.75
+    object_id: Optional[str] = FastQuery(None, min_length=1, max_length=256),
+    min_similarity: float = FastQuery(0.75, ge=0.0, le=1.0)
 ):
     results = dataos.find_duplicates(target_object_id=object_id, min_similarity=min_similarity)
     return {"total_matches": len(results), "duplicates": results}
@@ -478,12 +482,12 @@ async def get_quota_status_api(principal_id: str):
 
 
 class IssueSharingTokenRequest(BaseModel):
-    issuer: str
-    subject_principal: str
-    subgraph_root_id: str
-    allowed_object_ids: Optional[List[str]] = None
-    allowed_capabilities: Optional[List[str]] = None
-    duration_seconds: Optional[int] = 3600
+    issuer: str = Field(min_length=1, max_length=128)
+    subject_principal: str = Field(min_length=1, max_length=128)
+    subgraph_root_id: str = Field(min_length=1, max_length=256)
+    allowed_object_ids: Optional[List[str]] = Field(default=None, max_length=1000)
+    allowed_capabilities: Optional[List[str]] = Field(default=None, max_length=100)
+    duration_seconds: int = Field(default=3600, ge=1, le=86400)
 
 
 @app.post("/api/sharing/issue_token", summary="Issue Cryptographically Signed Subgraph Token (Rule #65)")
@@ -515,8 +519,8 @@ async def verify_sharing_token_api(req: VerifySharingTokenRequest):
 
 @app.get("/api/federation/search", summary="Federated Cross-Instance Search (Rule #64)")
 async def federated_search_api(
-    q: str = FastQuery(..., description="Query string"),
-    top_k: int = 10
+    q: str = FastQuery(..., min_length=1, max_length=1000, description="Query string"),
+    top_k: int = FastQuery(10, ge=1, le=100)
 ):
     res = dataos.federated_search(query=q, top_k=top_k)
     return res
