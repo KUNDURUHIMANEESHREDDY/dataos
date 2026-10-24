@@ -21,6 +21,7 @@ from core.object.model import DataObject, ObjectType
 from core.relation.model import Relationship, RelationType
 from backend.knowledge_rag import create_knowledge_router
 from backend.cors_config import cors_middleware_options
+from backend.request_limits import RequestBodyLimitMiddleware, configured_request_body_limit
 from engines.governance.deduplication import DuplicateDetectionEngine
 
 # Initialize single DataOS kernel
@@ -39,6 +40,12 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     **cors_middleware_options(os.getenv("DATAOS_CORS_ORIGINS")),
+)
+
+# Bound JSON and multipart requests before FastAPI parses their bodies.
+app.add_middleware(
+    RequestBodyLimitMiddleware,
+    max_body_bytes=configured_request_body_limit(),
 )
 
 
