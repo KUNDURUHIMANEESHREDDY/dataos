@@ -126,6 +126,25 @@ def test_rejects_oversized_content_length_before_calling_app():
     assert response_status(sent) == 413
     assert called == []
 
+def test_rejects_extremely_long_content_length_without_integer_conversion_error():
+    called = []
+
+    async def app(scope, receive, send):
+        called.append(True)
+
+    middleware = RequestBodyLimitMiddleware(app, max_body_bytes=10)
+    sent = run(
+        invoke(
+            middleware,
+            scope_for([(b"content-length", b"9" * 5000)]),
+            request_messages(b""),
+        )
+    )
+
+    assert response_status(sent) == 413
+    assert b"Request body too large" in response_body(sent)
+    assert called == []
+
 
 @pytest.mark.parametrize(
     "headers",
