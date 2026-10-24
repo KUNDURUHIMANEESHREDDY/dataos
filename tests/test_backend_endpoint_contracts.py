@@ -1,5 +1,6 @@
 import asyncio
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 from fastapi import HTTPException
@@ -169,3 +170,115 @@ def test_sharing_token_contract_bounds_lifetime_and_allowlists():
     assert object_id_array["maxItems"] == 1000
     assert capability_array["maxItems"] == 100
 
+
+
+def test_notebook_ingestion_uses_universal_pipeline(fake_dataos):
+    fake_dataos.ingest = Mock(return_value={"id": "notebook-1"})
+    content = '{"cells": [], "metadata": {}, "nbformat": 4, "nbformat_minor": 5}'
+
+    result = run(api.ingest_notebook_api("analysis.ipynb", content))
+
+    assert result == {"id": "notebook-1"}
+    fake_dataos.ingest.assert_called_once_with(content, filename="analysis.ipynb", discover_relations=True)
+
+
+def test_rich_document_ingestion_uses_universal_pipeline(fake_dataos):
+    fake_dataos.ingest = Mock(return_value={"id": "document-1"})
+    content = "# Report\n\nA table and citations."
+
+    result = run(api.extract_rich_document_api("report.md", content))
+
+    assert result == {"id": "document-1"}
+    fake_dataos.ingest.assert_called_once_with(content, filename="report.md", discover_relations=True)
+
+
+def test_text_ingestion_uses_in_memory_content_and_infers_text_extension(fake_dataos):
+    fake_dataos.ingest = Mock(return_value={"id": "text-1"})
+
+    result = run(api.ingest_text("notes", "plain text", "text"))
+
+    assert result == {"id": "text-1"}
+    fake_dataos.ingest.assert_called_once_with("plain text", filename="notes.txt", discover_relations=True)
+
+
+def test_time_travel_routes_use_registered_engine(monkeypatch):
+    object_value = SimpleNamespace(to_dict=lambda: {"id": "obj-1", "version": 2})
+    engine = SimpleNamespace(
+        get_object_as_of=Mock(return_value=object_value),
+        get_graph_as_of=Mock(return_value={"nodes": []}),
+        changes_between=Mock(return_value={"changes": []}),
+    )
+    monkeypatch.setattr(api, "dataos", SimpleNamespace(time_travel=engine))
+
+    assert run(api.time_travel_object("obj-1", "2026-01-01T00:00:00Z")) == {"id": "obj-1", "version": 2}
+    assert run(api.time_travel_graph("2026-01-01T00:00:00Z")) == {"nodes": []}
+    assert run(api.time_travel_changes("2026-01-01T00:00:00Z", "2026-01-02T00:00:00Z")) == {"changes": []}
+    engine.get_object_as_of.assert_called_once_with("obj-1", as_of_timestamp="2026-01-01T00:00:00Z", temporal_axis="system_time")
+    engine.get_graph_as_of.assert_called_once_with(as_of_timestamp="2026-01-01T00:00:00Z", temporal_axis="system_time")
+    engine.changes_between.assert_called_once_with("2026-01-01T00:00:00Z", "2026-01-02T00:00:00Z", temporal_axis="system_time")
+
+
+def test_conflict_resolution_uses_sync_engine(monkeypatch):
+    sync = SimpleNamespace(resolve_conflict=Mock(return_value={"resolved": True}))
+    monkeypatch.setattr(api, "dataos", SimpleNamespace(sync=sync))
+
+    result = run(api.resolve_conflict_api(api.ConflictResolutionRequest(conflict_object_id="conflict-1")))
+
+    assert result == {"resolved": True}
+    assert sync.resolve_conflict.call_args.kwargs["conflict_object_id"] == "conflict-1"
+
+
+def test_multi_agent_pipeline_uses_registered_orchestrator(monkeypatch):
+    pipeline = SimpleNamespace(run_end_to_end_research_pipeline=Mock(return_value={"pipeline_id": "p-1"}))
+    monkeypatch.setattr(api, "dataos", SimpleNamespace(multi_agent=pipeline))
+
+    result = run(api.run_multi_agent_pipeline_api(api.MultiAgentPipelineRequest(
+        goal_prompt="Summarize customers",
+        target_dataset_id="dataset-1",
+        analysis_sql_or_python="SELECT COUNT(*) FROM customers",
+    )))
+
+    assert result == {"pipeline_id": "p-1"}
+    assert pipeline.run_end_to_end_research_pipeline.call_args.kwargs["target_dataset_id"] == "dataset-1"
+
+
+def test_connection_recommendations_use_graph_namespace(monkeypatch):
+    graph = SimpleNamespace(recommendations=Mock(return_value=[{"id": "related-1"}]))
+    monkeypatch.setattr(api, "dataos", SimpleNamespace(graph=graph))
+
+    result = run(api.recommend_connections_api("object-1", top_k=3))
+
+    assert result["recommendations"] == [{"id": "related-1"}]
+    graph.recommendations.assert_called_once_with("object-1", top_k=3)
+
+
+def test_dataset_recommendations_search_and_filter_results(monkeypatch):
+    source = SimpleNamespace(properties={"filename": "customers.csv", "title": "Customer table"})
+    storage = SimpleNamespace(get_object=Mock(return_value=source))
+    search = Mock(return_value=[
+        {"id": "doc-1", "type": "document"},
+        {"id": "dataset-1", "type": "dataset"},
+        {"id": "dataset-2", "object_type": "dataset"},
+    ])
+    monkeypatch.setattr(api, "dataos", SimpleNamespace(storage=storage, search=search))
+
+    result = run(api.recommend_datasets_api("source-1", top_k=1))
+
+    assert result["recommended_datasets"] == [{"id": "dataset-1", "type": "dataset"}]
+    search.assert_called_once_with("customers.csv Customer table", top_k=5)
+
+
+def test_unimplemented_privileged_routes_fail_explicitly_not_with_attribute_errors(monkeypatch):
+    monkeypatch.setattr(api, "dataos", SimpleNamespace())
+
+    with pytest.raises(HTTPException) as agent_exc:
+        run(api.execute_agent(api.AgentExecutionRequest(agent_id="unknown", capability="read_object", params={})))
+    assert agent_exc.value.status_code == 501
+
+    with pytest.raises(HTTPException) as workflow_exc:
+        run(api.execute_workflow(api.WorkflowExecutionRequest(definition={}, context={})))
+    assert workflow_exc.value.status_code == 501
+
+    with pytest.raises(HTTPException) as duplicate_exc:
+        run(api.detect_duplicates_api())
+    assert duplicate_exc.value.status_code == 501
