@@ -35,7 +35,17 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt pytest
       - name: Run correctness suite
-        run: python -m pytest tests/ --ignore=tests/test_benchmarks.py
+        run: |
+          mkdir -p test-results
+          python -m pytest tests/ --ignore=tests/test_benchmarks.py --junitxml=test-results/junit.xml
+      - name: Upload JUnit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dataos-pytest-${{ github.run_id }}
+          path: test-results/junit.xml
+          if-no-files-found: warn
+          retention-days: 14
       - name: Run end-to-end scenario
         run: python scenario_demo.py
       - name: Smoke-test CLI health
