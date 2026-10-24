@@ -198,3 +198,19 @@ def test_request_body_limit_configuration_is_bounded(monkeypatch):
     monkeypatch.setenv("DATAOS_MAX_REQUEST_BODY_BYTES", "999999999")
     with pytest.raises(RuntimeError, match="between"):
         configured_request_body_limit()
+
+@pytest.mark.parametrize("max_body_bytes", [True, False, 0, -1])
+def test_middleware_rejects_boolean_or_non_positive_limits(max_body_bytes):
+    async def app(scope, receive, send):
+        raise AssertionError("invalid limits must be rejected at construction")
+
+    with pytest.raises(ValueError, match="max_body_bytes must be a positive integer"):
+        RequestBodyLimitMiddleware(app, max_body_bytes=max_body_bytes)
+
+
+@pytest.mark.parametrize("raw", ["+2048", "2_048", " 2048", "2048 ", "٢٠٤٨"])
+def test_request_body_limit_rejects_noncanonical_environment_values(monkeypatch, raw):
+    monkeypatch.setenv("DATAOS_MAX_REQUEST_BODY_BYTES", raw)
+    with pytest.raises(RuntimeError, match="must be an integer"):
+        configured_request_body_limit()
+
