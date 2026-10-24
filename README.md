@@ -63,6 +63,23 @@ SQLite is the default store; the schema is unused.
 
 ---
 
+## CI verification
+
+`.github/workflows/backend-verification.yml` runs the documented Python correctness
+suite (excluding only the benchmark module), the 10-step scenario demo, and the CLI
+health smoke test on pushes and pull requests to `main`. The stable
+`Backend required` job fails closed if the backend verification job fails, is
+cancelled, or is skipped.
+
+This is a backend verification gate, not a complete release gate yet. The frontend
+build is deliberately not included until the committed npm lockfile is regenerated
+from the current `package.json`: the lockfile still lists removed Python packages
+(`django`, `fastapi`, and `uvicorn`) as npm dependencies. Do not treat the frontend
+build or required-check branch protection as verified until those separate items are
+completed and checked in GitHub Settings.
+
+---
+
 ## Quick start
 
 ```bash
@@ -119,6 +136,13 @@ Convenience methods that genuinely exist: `from_url`, `ingest`, `why`, `impact`,
 ```bash
 python -m uvicorn backend.app:app --reload    # port 8000, must run from repo root
 ```
+
+For direct browser-to-API development, set `DATAOS_CORS_ORIGINS` to a comma-separated
+list of exact origins (scheme, host, and optional port), for example
+`http://localhost:3000,http://127.0.0.1:3000`. Wildcards, paths, credentials in
+origins, query strings, and malformed values are rejected at startup. If the variable
+is unset, only the two local frontend origins are allowed; setting it to an empty
+string disables cross-origin access. The Next.js rewrite proxy remains same-origin.
 
 `backend/app.py` has no `__main__` block, so the uvicorn CLI is the only way to start it.
 
@@ -264,8 +288,7 @@ lacks `source`. The backend passes both, so those routes raise `TypeError` under
 The frontend reads `r.source_id` / `r.target_id` from relationship JSON, but `Relationship.to_dict()` emits
 `source` / `target`. Every graph edge renders as `undefined`.
 
-CORS is `allow_origins=["*"]` with `allow_credentials=True`, and no endpoint has auth despite `Depends` being
-imported.
+CORS now uses an explicit `DATAOS_CORS_ORIGINS` allowlist (defaulting to the local frontend origins), rejects wildcard or malformed origins, and does not enable credentialed cross-origin requests. Endpoint authentication is still absent despite `Depends` being imported; that remains a separate high-priority production blocker.
 
 ---
 

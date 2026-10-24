@@ -21,6 +21,7 @@ from core.object.model import DataObject, ObjectType
 from core.relation.model import Relationship, RelationType
 from core.permissions.policy import Capability
 from backend.knowledge_rag import create_knowledge_router
+from backend.cors_config import cors_middleware_options
 
 # Initialize single DataOS kernel
 dataos = DataOS(db_path="dataos.db", blob_dir=".dataos_blobs")
@@ -36,10 +37,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    **cors_middleware_options(os.getenv("DATAOS_CORS_ORIGINS")),
 )
 
 
