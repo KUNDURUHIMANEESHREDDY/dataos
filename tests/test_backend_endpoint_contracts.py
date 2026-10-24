@@ -279,6 +279,19 @@ def test_unimplemented_privileged_routes_fail_explicitly_not_with_attribute_erro
         run(api.execute_workflow(api.WorkflowExecutionRequest(definition={}, context={})))
     assert workflow_exc.value.status_code == 501
 
-    with pytest.raises(HTTPException) as duplicate_exc:
-        run(api.detect_duplicates_api())
-    assert duplicate_exc.value.status_code == 501
+
+
+
+def test_duplicate_detection_is_read_only_for_get_requests(monkeypatch):
+    engine = SimpleNamespace(find_duplicates=Mock(return_value=[{"id": "duplicate-1", "similarity_score": 0.9}]))
+    monkeypatch.setattr(api, "duplicate_detection", engine)
+
+    result = run(api.detect_duplicates_api(object_id="object-1", min_similarity=0.8))
+
+    assert result["total_matches"] == 1
+    assert result["duplicates"][0]["similarity_score"] == 0.9
+    engine.find_duplicates.assert_called_once_with(
+        target_object_id="object-1",
+        min_similarity=0.8,
+        auto_link_graph=False,
+    )
