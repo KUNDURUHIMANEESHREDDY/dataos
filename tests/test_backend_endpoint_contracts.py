@@ -164,6 +164,8 @@ def test_sharing_token_contract_bounds_lifetime_and_allowlists():
     schema = api.app.openapi()["components"]["schemas"]["IssueSharingTokenRequest"]["properties"]
     assert schema["duration_seconds"]["minimum"] == 1
     assert schema["duration_seconds"]["maximum"] == 86400
-    assert schema["allowed_object_ids"]["maxItems"] == 1000
-    assert schema["allowed_capabilities"]["maxItems"] == 100
+    object_id_array = next(item for item in schema["allowed_object_ids"]["anyOf"] if item.get("type") == "array")
+    capability_array = next(item for item in schema["allowed_capabilities"]["anyOf"] if item.get("type") == "array")
+    assert object_id_array["maxItems"] == 1000
+    assert capability_array["maxItems"] == 100
 
