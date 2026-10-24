@@ -122,9 +122,11 @@ class EncryptionEngine:
             encrypted = ciphertext[7:].encode()
             return self._fernet.decrypt(encrypted).decode()
         if ciphertext.startswith("aesgcm:"):
-            if self._backend != "aesgcm":
-                raise EncryptionError("AES-GCM support is unavailable for this ciphertext")
-            return self._decrypt_aes_gcm(ciphertext)
+            try:
+                # Read older AES-GCM ciphertext even when new writes use Fernet.
+                return self._decrypt_aes_gcm(ciphertext)
+            except ImportError as exc:
+                raise EncryptionError("AES-GCM support is unavailable for this ciphertext") from exc
         if ciphertext.startswith("xor:") and self._allow_legacy_xor_decryption:
             warnings.warn(
                 "Legacy XOR ciphertext is unauthenticated and insecure; decrypt only to migrate it",
@@ -176,15 +178,16 @@ class EncryptionEngine:
         return result
 
     def decrypt_dict(self, data: Dict[str, Any], fields: Optional[list] = None) -> Dict[str, Any]:
-        """Decrypt specific fields in a dictionary."""
+        """Decrypt recognized encrypted fields without hiding decryption failures."""
         result = dict(data)
         target_fields = fields or list(data.keys())
+        encrypted_prefixes = ("fernet:", "aesgcm:", "xor:")
         for field in target_fields:
-            if field in result and isinstance(result[field], str):
-                try:
-                    result[field] = self.decrypt(result[field])
-                except Exception:
-                    pass  # Field was not encrypted
+            value = result.get(field)
+            if isinstance(value, str) and value.startswith(encrypted_prefixes):
+                # A recognized ciphertext that cannot be decrypted is an error,
+                # not an unencrypted value. Never silently pass it through.
+                result[field] = self.decrypt(value)
         return result
 
     def hash_content(self, content: str) -> str:
