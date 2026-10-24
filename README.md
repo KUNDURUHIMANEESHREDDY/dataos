@@ -63,6 +63,23 @@ SQLite is the default store; the schema is unused.
 
 ---
 
+## CI verification
+
+`.github/workflows/backend-verification.yml` runs the documented Python correctness
+suite (excluding only the benchmark module), the 10-step scenario demo, and the CLI
+health smoke test on pushes and pull requests to `main`. The stable
+`Backend required` job fails closed if the backend verification job fails, is
+cancelled, or is skipped.
+
+This is a backend verification gate, not a complete release gate yet. The frontend
+build is deliberately not included until the committed npm lockfile is regenerated
+from the current `package.json`: the lockfile still lists removed Python packages
+(`django`, `fastapi`, and `uvicorn`) as npm dependencies. Do not treat the frontend
+build or required-check branch protection as verified until those separate items are
+completed and checked in GitHub Settings.
+
+---
+
 ## Quick start
 
 ```bash
