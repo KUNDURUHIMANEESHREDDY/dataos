@@ -11,7 +11,7 @@ DEFAULT_DEV_ORIGINS = (
     "http://127.0.0.1:3000",
 )
 
-_DNS_LABEL = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\Z")
+_DNS_LABEL = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\Z")
 
 
 def _is_loopback_host(hostname: str) -> bool:
@@ -82,7 +82,7 @@ def parse_cors_origins(raw: str | None) -> list[str]:
                 "DATAOS_CORS_ORIGINS must list explicit origins; wildcard origins are forbidden"
             )
 
-        if any(char.isspace() for char in candidate) or "\\\\" in candidate:
+        if any(char.isspace() for char in candidate) or "\\" in candidate:
             raise ValueError(f"Invalid CORS origin: {candidate!r}")
 
         try:
