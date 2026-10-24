@@ -11,7 +11,16 @@ DEFAULT_DEV_ORIGINS = (
     "http://127.0.0.1:3000",
 )
 
-_DNS_LABEL = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\Z")
+_DNS_LABEL = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\Z")
+
+
+def _is_loopback_host(hostname: str) -> bool:
+    """Return whether a hostname is a loopback address or localhost name."""
+    normalized = hostname.rstrip(".").lower()
+    try:
+        return ipaddress.ip_address(normalized).is_loopback
+    except ValueError:
+        return normalized == "localhost" or normalized.endswith(".localhost")
 
 
 def _canonical_host(hostname: str) -> str:
@@ -58,7 +67,8 @@ def parse_cors_origins(raw: str | None) -> list[str]:
     string disables cross-origin access. Invalid configuration fails at startup
     rather than silently widening the browser trust boundary. Hostnames and
     default ports are canonicalized so equivalent origins deduplicate and
-    match the browser's serialized Origin header.
+    match the browser's serialized Origin header. Cleartext HTTP is permitted
+    only for loopback development origins.
     """
     if raw is None:
         candidates = list(DEFAULT_DEV_ORIGINS)
@@ -72,7 +82,7 @@ def parse_cors_origins(raw: str | None) -> list[str]:
                 "DATAOS_CORS_ORIGINS must list explicit origins; wildcard origins are forbidden"
             )
 
-        if any(char.isspace() for char in candidate) or "\\" in candidate:
+        if any(char.isspace() for char in candidate) or "\\\\" in candidate:
             raise ValueError(f"Invalid CORS origin: {candidate!r}")
 
         try:
@@ -97,6 +107,12 @@ def parse_cors_origins(raw: str | None) -> list[str]:
         ):
             raise ValueError(
                 f"Invalid CORS origin {candidate!r}; provide only scheme and host, with an optional port"
+            )
+
+        if scheme == "http" and not _is_loopback_host(hostname):
+            raise ValueError(
+                f"Remote CORS origin {candidate!r} must use HTTPS; "
+                "HTTP is allowed only for loopback development"
             )
 
         host = _canonical_host(hostname)
