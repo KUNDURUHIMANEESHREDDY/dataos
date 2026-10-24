@@ -137,3 +137,33 @@ def test_catalog_health_checks_storage_and_does_not_leak_internal_errors(fake_da
     assert exc.value.status_code == 503
     assert exc.value.detail == "DataOS storage unavailable"
     assert "private database path" not in exc.value.detail
+
+def test_expensive_query_routes_publish_bounded_parameters():
+    schema = api.app.openapi()
+
+    def params(path):
+        return {item["name"]: item["schema"] for item in schema["paths"][path]["get"]["parameters"]}
+
+    vector = params("/api/vectors/search")
+    assert vector["q"]["minLength"] == 1
+    assert vector["q"]["maxLength"] == 1000
+    assert vector["top_k"]["minimum"] == 1
+    assert vector["top_k"]["maximum"] == 100
+
+    lineage = params("/api/provenance/lineage/{object_id}")
+    assert lineage["direction"]["pattern"] == "^(upstream|downstream)$"
+    assert lineage["max_depth"]["minimum"] == 1
+    assert lineage["max_depth"]["maximum"] == 20
+
+    duplicates = params("/api/governance/duplicates")
+    assert duplicates["min_similarity"]["minimum"] == 0.0
+    assert duplicates["min_similarity"]["maximum"] == 1.0
+
+
+def test_sharing_token_contract_bounds_lifetime_and_allowlists():
+    schema = api.app.openapi()["components"]["schemas"]["IssueSharingTokenRequest"]["properties"]
+    assert schema["duration_seconds"]["minimum"] == 1
+    assert schema["duration_seconds"]["maximum"] == 86400
+    assert schema["allowed_object_ids"]["maxItems"] == 1000
+    assert schema["allowed_capabilities"]["maxItems"] == 100
+
