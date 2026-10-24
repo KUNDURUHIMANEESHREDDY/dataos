@@ -1,5 +1,7 @@
 """Strict CORS origin configuration for the DataOS API."""
 
+import ipaddress
+import re
 from urllib.parse import urlsplit
 
 DEFAULT_DEV_ORIGINS = (
@@ -7,13 +9,50 @@ DEFAULT_DEV_ORIGINS = (
     "http://127.0.0.1:3000",
 )
 
+_DNS_LABEL = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\Z")
+
+
+def _canonical_host(hostname: str) -> str:
+    """Return the URL-serialized, lower-case host or reject ambiguous forms."""
+    if not hostname or "%" in hostname:
+        raise ValueError("CORS origin host must not be empty or percent-encoded")
+
+    try:
+        address = ipaddress.ip_address(hostname)
+    except ValueError:
+        if ":" in hostname or all(char in "0123456789." for char in hostname):
+            raise ValueError(f"Invalid IP address in CORS origin: {hostname!r}")
+
+        try:
+            ascii_host = hostname.encode("idna").decode("ascii").lower()
+        except UnicodeError as exc:
+            raise ValueError(f"Invalid hostname in CORS origin: {hostname!r}") from exc
+
+        # A trailing dot is valid DNS syntax and is preserved for exact origin
+        # matching, but empty/interior labels and malformed labels are rejected.
+        labels_host = ascii_host[:-1] if ascii_host.endswith(".") else ascii_host
+        labels = labels_host.split(".")
+        if (
+            not labels_host
+            or len(ascii_host) > 254
+            or any(not _DNS_LABEL.fullmatch(label) for label in labels)
+        ):
+            raise ValueError(f"Invalid hostname in CORS origin: {hostname!r}")
+        return ascii_host
+
+    if isinstance(address, ipaddress.IPv6Address):
+        return f"[{address.compressed}]"
+    return str(address)
+
 
 def parse_cors_origins(raw: str | None) -> list[str]:
     """Parse a comma-separated CORS allowlist without accepting wildcards.
 
     None selects explicit local frontend origins for development. An empty
     string disables cross-origin access. Invalid configuration fails at startup
-    rather than silently widening the browser trust boundary.
+    rather than silently widening the browser trust boundary. Hostnames and
+    default ports are canonicalized so equivalent origins deduplicate and
+    match the browser's serialized Origin header.
     """
     if raw is None:
         candidates = list(DEFAULT_DEV_ORIGINS)
@@ -30,27 +69,35 @@ def parse_cors_origins(raw: str | None) -> list[str]:
         if any(char.isspace() for char in candidate) or "\\" in candidate:
             raise ValueError(f"Invalid CORS origin: {candidate!r}")
 
-        parsed = urlsplit(candidate)
         try:
-            # Accessing .port validates that a supplied port is numeric and in range.
-            _ = parsed.port
+            parsed = urlsplit(candidate)
+            port = parsed.port
+            hostname = parsed.hostname
         except ValueError as exc:
             raise ValueError(f"Invalid CORS origin: {candidate!r}") from exc
 
+        scheme = parsed.scheme.lower()
         if (
-            parsed.scheme.lower() not in {"http", "https"}
-            or not parsed.hostname
+            scheme not in {"http", "https"}
+            or not hostname
             or parsed.username is not None
             or parsed.password is not None
             or parsed.path not in {"", "/"}
             or parsed.query
             or parsed.fragment
+            or "?" in candidate
+            or "#" in candidate
+            or parsed.netloc.endswith(":")
         ):
             raise ValueError(
                 f"Invalid CORS origin {candidate!r}; provide only scheme and host, with an optional port"
             )
 
-        origin = f"{parsed.scheme.lower()}://{parsed.netloc.lower()}"
+        host = _canonical_host(hostname)
+        if (scheme == "http" and port == 80) or (scheme == "https" and port == 443):
+            port = None
+        port_suffix = f":{port}" if port is not None else ""
+        origin = f"{scheme}://{host}{port_suffix}"
         if origin not in origins:
             origins.append(origin)
 
