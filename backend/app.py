@@ -270,7 +270,7 @@ async def search_vectors(
 
 @app.post("/api/vectors/recompute", summary="Recompute All Vector Embeddings (Rule #45)")
 async def recompute_vectors():
-    res = dataos.recompute_vector_index()
+    res = dataos.vector_index.recompute_all(dataos.storage)
     return res
 
 
@@ -279,7 +279,7 @@ async def ingest_notebook_api(
     filename: str = Form("analysis.ipynb"),
     content: str = Form(...)
 ):
-    res = dataos.ingest_notebook(notebook_json_str=content, filename=filename)
+    res = dataos.ingest(content, filename=filename, discover_relations=True)
     return res
 
 
@@ -288,7 +288,7 @@ async def extract_rich_document_api(
     filename: str = Form("paper.md"),
     content: str = Form(...)
 ):
-    res = dataos.ingest_rich_document(content_str=content, filename=filename)
+    res = dataos.ingest(content, filename=filename, discover_relations=True)
     return res
 
 
@@ -302,7 +302,7 @@ async def time_travel_object(
     as_of: str = FastQuery(..., description="Timestamp ISO string to travel to"),
     temporal_axis: str = FastQuery("system_time", pattern="^(system_time|valid_time|business_time)$", max_length=32)
 ):
-    obj = dataos.get_object_as_of(object_id, as_of, temporal_axis=temporal_axis)
+    obj = dataos.time_travel.get_object_as_of(object_id, as_of_timestamp=as_of, temporal_axis=temporal_axis)
     if not obj:
         raise HTTPException(status_code=404, detail=f"Object {object_id} not found as of {as_of}")
     return obj.to_dict()
@@ -313,7 +313,7 @@ async def time_travel_graph(
     as_of: str = FastQuery(..., description="Timestamp ISO string"),
     temporal_axis: str = "system_time"
 ):
-    graph = dataos.get_graph_as_of(as_of, temporal_axis=temporal_axis)
+    graph = dataos.time_travel.get_graph_as_of(as_of_timestamp=as_of, temporal_axis=temporal_axis)
     return graph
 
 
@@ -323,7 +323,7 @@ async def time_travel_changes(
     t2: str = FastQuery(..., description="End timestamp ISO"),
     temporal_axis: str = "system_time"
 ):
-    changes = dataos.get_changes_between(t1, t2, temporal_axis=temporal_axis)
+    changes = dataos.time_travel.changes_between(t1, t2, temporal_axis=temporal_axis)
     return changes
 
 
@@ -336,7 +336,7 @@ class ConflictResolutionRequest(BaseModel):
 @app.post("/api/sync/resolve_conflict", summary="Explicit Conflict Resolution (Rule #59)")
 async def resolve_conflict_api(req: ConflictResolutionRequest):
     try:
-        res = dataos.resolve_conflict(
+        res = dataos.sync.resolve_conflict(
             conflict_object_id=req.conflict_object_id,
             strategy=req.strategy,
             manual_properties=req.manual_properties
@@ -423,7 +423,7 @@ class MultiAgentPipelineRequest(BaseModel):
 
 @app.post("/api/agents/pipeline/research", summary="Run Composable Multi-Agent Research Pipeline (Rule #20)")
 async def run_multi_agent_pipeline_api(req: MultiAgentPipelineRequest):
-    res = dataos.run_multi_agent_pipeline(
+    res = dataos.multi_agent.run_end_to_end_research_pipeline(
         goal_prompt=req.goal_prompt,
         target_dataset_id=req.target_dataset_id,
         analysis_sql_or_python=req.analysis_sql_or_python,
@@ -437,7 +437,7 @@ async def recommend_connections_api(
     object_id: str,
     top_k: int = FastQuery(10, ge=1, le=100)
 ):
-    recs = dataos.recommend_connections(target_object_id=object_id, top_k=top_k)
+    recs = dataos.graph.recommendations(object_id, top_k=top_k)
     return {"target_object_id": object_id, "recommendations": recs}
 
 
@@ -446,21 +446,48 @@ async def recommend_datasets_api(
     object_id: str,
     top_k: int = FastQuery(5, ge=1, le=100)
 ):
-    recs = dataos.recommend_datasets(target_object_id=object_id, top_k=top_k)
-    return {"target_object_id": object_id, "recommended_datasets": recs}
+    obj = dataos.storage.get_object(object_id)
+    if not obj:
+        raise HTTPException(status_code=404, detail="Object not found")
+
+    properties = obj.properties if isinstance(obj.properties, dict) else {}
+    query = " ".join(
+        str(value).strip()
+        for value in (properties.get("filename"), properties.get("title"), properties.get("description"))
+        if isinstance(value, str) and value.strip()
+    )
+    if not query:
+        return {"target_object_id": object_id, "recommended_datasets": []}
+
+    candidates = dataos.search(query, top_k=min(100, top_k * 5))
+    datasets = [
+        item for item in candidates
+        if isinstance(item, dict)
+        and item.get("id") != object_id
+        and str(item.get("type", item.get("object_type", ""))).lower() in {"dataset", "data_set"}
+    ]
+    return {"target_object_id": object_id, "recommended_datasets": datasets[:top_k]}
 
 
 @app.post("/api/agents/execute", summary="Execute Agent Capability")
 async def execute_agent(req: AgentExecutionRequest):
-    agent = dataos.create_agent(req.agent_id)
-    res = agent.execute_capability(Capability(req.capability), req.params)
-    return res
+    # The current kernel has no authenticated general-purpose agent registry.
+    # Fail explicitly instead of dereferencing a nonexistent factory or exposing
+    # arbitrary capability execution through an unauthenticated endpoint.
+    raise HTTPException(
+        status_code=501,
+        detail="General agent execution is unavailable until an authenticated agent registry is implemented.",
+    )
 
 
 @app.post("/api/workflows/execute", summary="Execute Workflow DAG")
 async def execute_workflow(req: WorkflowExecutionRequest):
-    res = dataos.workflows.execute_workflow(req.definition, context_data=req.context)
-    return res
+    # There is no workflow engine registered on the current kernel. Do not turn
+    # this placeholder route into an opaque 500 or pretend the DAG ran.
+    raise HTTPException(
+        status_code=501,
+        detail="Workflow execution is unavailable until a validated workflow engine is registered.",
+    )
 
 
 # =============================================================================
@@ -472,8 +499,12 @@ async def detect_duplicates_api(
     object_id: Optional[str] = FastQuery(None, min_length=1, max_length=256),
     min_similarity: float = FastQuery(0.75, ge=0.0, le=1.0)
 ):
-    results = dataos.find_duplicates(target_object_id=object_id, min_similarity=min_similarity)
-    return {"total_matches": len(results), "duplicates": results}
+    # No duplicate-scoring engine is registered on the current kernel. A
+    # fabricated score would be unsafe for governance decisions.
+    raise HTTPException(
+        status_code=501,
+        detail="Duplicate detection is unavailable until a verified duplicate-scoring engine is registered.",
+    )
 
 
 @app.get("/api/governance/quota/{principal_id}", summary="Get Principal Quota & Usage Status (Rule #61)")
@@ -492,7 +523,7 @@ class IssueSharingTokenRequest(BaseModel):
 
 @app.post("/api/sharing/issue_token", summary="Issue Cryptographically Signed Subgraph Token (Rule #65)")
 async def issue_sharing_token_api(req: IssueSharingTokenRequest):
-    token = dataos.issue_sharing_token(
+    token = dataos.tokens.issue_token(
         issuer=req.issuer,
         subject_principal=req.subject_principal,
         subgraph_root_id=req.subgraph_root_id,
@@ -510,7 +541,7 @@ class VerifySharingTokenRequest(BaseModel):
 @app.post("/api/sharing/verify_token", summary="Verify and Decode Sharing Token (Rule #65)")
 async def verify_sharing_token_api(req: VerifySharingTokenRequest):
     try:
-        payload = dataos.verify_sharing_token(req.token)
+        payload = dataos.tokens.verify_and_decode_token(req.token)
         import dataclasses
         return {"status": "valid", "payload": dataclasses.asdict(payload)}
     except Exception as e:
@@ -522,7 +553,7 @@ async def federated_search_api(
     q: str = FastQuery(..., min_length=1, max_length=1000, description="Query string"),
     top_k: int = FastQuery(10, ge=1, le=100)
 ):
-    res = dataos.federated_search(query=q, top_k=top_k)
+    res = dataos.federation.federated_search(query=q, top_k=top_k)
     return res
 
 
@@ -576,17 +607,15 @@ async def ingest_text(
     content: str = Form(...),
     format_type: str = Form("text")
 ):
-    import tempfile
-    with tempfile.NamedTemporaryFile("w", delete=False, suffix=f"_{filename}", encoding="utf-8") as tmp:
-        tmp.write(content)
-        tmp_path = tmp.name
-
-    try:
-        res = dataos.ingest_file(tmp_path, discover_relations=True)
-        return res
-    finally:
-        if os.path.exists(tmp_path):
-            os.remove(tmp_path)
+    # The universal ingestion pipeline accepts in-memory content, avoiding
+    # temporary files and the removed DataOS.ingest_file convenience method.
+    ingest_filename = filename
+    if not os.path.splitext(ingest_filename)[1]:
+        normalized_format = format_type.strip().lower().lstrip(".")
+        extension = "txt" if normalized_format in {"text", "plain"} else normalized_format
+        if extension in {"txt", "md", "markdown", "csv", "tsv", "json", "py", "ipynb"}:
+            ingest_filename = f"{ingest_filename}.{extension}"
+    return dataos.ingest(content, filename=ingest_filename, discover_relations=True)
 
 
 @app.get("/api/io/export", summary="Export DataOS Graph")
