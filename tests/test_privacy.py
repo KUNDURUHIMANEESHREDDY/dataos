@@ -81,6 +81,10 @@ class TestEncryptionEngine(unittest.TestCase):
         with self.assertRaises(EncryptionError):
             self.engine.decrypt("xor:Zm9v")
 
+    def test_decrypt_dict_does_not_silence_legacy_ciphertext_failure(self):
+        with self.assertRaises(EncryptionError):
+            self.engine.decrypt_dict({"secret": "xor:Zm9v"}, fields=["secret"])
+
     def test_legacy_xor_decryption_requires_explicit_migration_opt_in(self):
         plaintext = "legacy data to migrate"
         key = self.engine._aes_key
