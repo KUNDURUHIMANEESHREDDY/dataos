@@ -16,6 +16,7 @@ fastapi>=0.110
 pydantic>=2.0
 uvicorn>=0.27
 requests>=2.31
+idna>=3.6
 
 # ── Optional: install only the backends you actually use ─────────────────────
 # SQLite is the default and needs nothing extra.
