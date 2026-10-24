@@ -22,7 +22,7 @@ class TestGovernanceAndFederation(unittest.TestCase):
         self.storage = SQLiteStorage(db_path=self.temp_db)
         self.deduplication = DuplicateDetectionEngine(self.storage)
         self.governor = ResourceGovernor()
-        self.token_manager = SubgraphTokenManager(secret_key="unit_test_secret_key")
+        self.token_manager = SubgraphTokenManager(secret_key="unit_test_secret_key_for_hmac_signing_2026")
         self.federation = DataOSFederationEngine(self.storage, local_instance_id="node_test_local")
 
     def tearDown(self):
@@ -152,6 +152,46 @@ class TestGovernanceAndFederation(unittest.TestCase):
         self.assertTrue(fed_res["total_matches"] >= 1)
         self.assertEqual(fed_res["results"][0]["source_instance"], "node_test_local")
         self.assertTrue(fed_res["results"][0]["is_local"])
+
+
+    def test_default_token_secret_is_random_and_not_the_published_constant(self):
+        previous_key = os.environ.pop("DATAOS_MASTER_KEY", None)
+        previous_env = os.environ.pop("DATAOS_ENV", None)
+        try:
+            manager = SubgraphTokenManager()
+            self.assertNotEqual(manager.secret_key, b"dataos_subgraph_master_secret_2026")
+            self.assertGreaterEqual(len(manager.secret_key), 32)
+            token = manager.issue_token(
+                issuer="test-issuer",
+                subject_principal="test-subject",
+                subgraph_root_id="root-1",
+                duration_seconds=60,
+            )
+            self.assertEqual(manager.verify_and_decode_token(token).subject_principal, "test-subject")
+        finally:
+            if previous_key is not None:
+                os.environ["DATAOS_MASTER_KEY"] = previous_key
+            if previous_env is not None:
+                os.environ["DATAOS_ENV"] = previous_env
+
+    def test_production_requires_configured_token_secret(self):
+        previous_key = os.environ.pop("DATAOS_MASTER_KEY", None)
+        previous_env = os.environ.get("DATAOS_ENV")
+        try:
+            os.environ["DATAOS_ENV"] = "production"
+            with self.assertRaisesRegex(RuntimeError, "DATAOS_MASTER_KEY"):
+                SubgraphTokenManager()
+        finally:
+            if previous_key is not None:
+                os.environ["DATAOS_MASTER_KEY"] = previous_key
+            if previous_env is not None:
+                os.environ["DATAOS_ENV"] = previous_env
+            else:
+                os.environ.pop("DATAOS_ENV", None)
+
+    def test_configured_token_secret_requires_minimum_length(self):
+        with self.assertRaisesRegex(ValueError, "at least 32"):
+            SubgraphTokenManager(secret_key="short-test-key")
 
 
 if __name__ == "__main__":
