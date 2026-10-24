@@ -21,9 +21,11 @@ from core.object.model import DataObject, ObjectType
 from core.relation.model import Relationship, RelationType
 from backend.knowledge_rag import create_knowledge_router
 from backend.cors_config import cors_middleware_options
+from engines.governance.deduplication import DuplicateDetectionEngine
 
 # Initialize single DataOS kernel
 dataos = DataOS(db_path="dataos.db", blob_dir=".dataos_blobs")
+duplicate_detection = DuplicateDetectionEngine(dataos.storage)
 
 app = FastAPI(
     title="DataOS Universal Data Operating System API",
@@ -498,12 +500,14 @@ async def detect_duplicates_api(
     object_id: Optional[str] = FastQuery(None, min_length=1, max_length=256),
     min_similarity: float = FastQuery(0.75, ge=0.0, le=1.0)
 ):
-    # No duplicate-scoring engine is registered on the current kernel. A
-    # fabricated score would be unsafe for governance decisions.
-    raise HTTPException(
-        status_code=501,
-        detail="Duplicate detection is unavailable until a verified duplicate-scoring engine is registered.",
+    # This is a GET endpoint: report candidate duplicates without mutating the
+    # graph. Explicit linking remains a separate, deliberate operation.
+    results = duplicate_detection.find_duplicates(
+        target_object_id=object_id,
+        min_similarity=min_similarity,
+        auto_link_graph=False,
     )
+    return {"total_matches": len(results), "duplicates": results}
 
 
 @app.get("/api/governance/quota/{principal_id}", summary="Get Principal Quota & Usage Status (Rule #61)")
