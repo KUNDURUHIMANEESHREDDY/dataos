@@ -34,12 +34,14 @@ app = FastAPI(
     version="1.0.0"
 )
 
+from backend.cors_config import parse_cors_origins
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=parse_cors_origins(os.getenv("DATAOS_CORS_ORIGINS")),
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type"],
 )
 
 
