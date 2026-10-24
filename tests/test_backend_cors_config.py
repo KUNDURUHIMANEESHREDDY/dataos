@@ -35,6 +35,8 @@ def test_normalizes_trailing_slash_and_deduplicates_origins():
         "ftp://example.com",
         "https://example .com",
         "https://example.com\\evil",
+        "http://example.com",
+        "http://api.example.com:8080",
     ],
 )
 def test_rejects_wildcard_and_malformed_origins(value):
