@@ -16,10 +16,12 @@ def configured_request_body_limit() -> int:
     invalid values fail startup rather than silently disabling the limit.
     """
     raw = os.getenv("DATAOS_MAX_REQUEST_BODY_BYTES", str(DEFAULT_MAX_REQUEST_BODY_BYTES))
-    try:
-        value = int(raw)
-    except (TypeError, ValueError) as exc:
-        raise RuntimeError("DATAOS_MAX_REQUEST_BODY_BYTES must be an integer") from exc
+    # Accept only ASCII decimal digits. int() also accepts signs, surrounding
+    # whitespace, and underscores, which make deployment configuration less
+    # predictable and can hide malformed environment values.
+    if not raw.isascii() or not raw.isdecimal():
+        raise RuntimeError("DATAOS_MAX_REQUEST_BODY_BYTES must be an integer")
+    value = int(raw)
     if not MIN_MAX_REQUEST_BODY_BYTES <= value <= MAX_MAX_REQUEST_BODY_BYTES:
         raise RuntimeError(
             "DATAOS_MAX_REQUEST_BODY_BYTES must be between "
@@ -36,7 +38,7 @@ class RequestBodyLimitMiddleware:
     """Enforce request size using both Content-Length and streamed byte counts."""
 
     def __init__(self, app, max_body_bytes: int = DEFAULT_MAX_REQUEST_BODY_BYTES):
-        if not isinstance(max_body_bytes, int) or max_body_bytes < 1:
+        if type(max_body_bytes) is not int or max_body_bytes < 1:
             raise ValueError("max_body_bytes must be a positive integer")
         self.app = app
         self.max_body_bytes = max_body_bytes
