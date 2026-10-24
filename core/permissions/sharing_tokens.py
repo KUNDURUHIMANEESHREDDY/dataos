@@ -64,8 +64,20 @@ class SubgraphTokenManager:
         """
         global _EPHEMERAL_SECRET_WARNING_EMITTED
 
-        configured_secret = secret_key if secret_key is not None else os.getenv("DATAOS_MASTER_KEY")
-        if not configured_secret:
+        if secret_key is not None:
+            if not isinstance(secret_key, str):
+                raise TypeError("secret_key must be a string.")
+            if not secret_key.strip():
+                raise ValueError("DATAOS_MASTER_KEY must not be empty or whitespace.")
+            configured_secret = secret_key
+        else:
+            configured_secret = os.getenv("DATAOS_MASTER_KEY")
+            if configured_secret == "":
+                configured_secret = None
+            elif configured_secret is not None and not configured_secret.strip():
+                raise ValueError("DATAOS_MASTER_KEY must not be empty or whitespace.")
+
+        if configured_secret is None:
             production_markers = ("DATAOS_ENV", "APP_ENV", "ENVIRONMENT")
             if any(os.getenv(name, "").strip().lower() in {"prod", "production"} for name in production_markers):
                 raise RuntimeError("DATAOS_MASTER_KEY must be configured in production.")
@@ -79,11 +91,6 @@ class SubgraphTokenManager:
                     stacklevel=2,
                 )
                 _EPHEMERAL_SECRET_WARNING_EMITTED = True
-
-        if not isinstance(configured_secret, str):
-            raise TypeError("DATAOS_MASTER_KEY must be a string.")
-        if not configured_secret.strip():
-            raise ValueError("DATAOS_MASTER_KEY must not be empty or whitespace.")
 
         encoded_secret = configured_secret.encode("utf-8")
         if len(encoded_secret) < 32:
