@@ -264,8 +264,7 @@ lacks `source`. The backend passes both, so those routes raise `TypeError` under
 The frontend reads `r.source_id` / `r.target_id` from relationship JSON, but `Relationship.to_dict()` emits
 `source` / `target`. Every graph edge renders as `undefined`.
 
-CORS is `allow_origins=["*"]` with `allow_credentials=True`, and no endpoint has auth despite `Depends` being
-imported.
+CORS now uses an explicit `DATAOS_CORS_ORIGINS` allowlist (defaulting to the local frontend origins), rejects wildcard or malformed origins, and does not enable credentialed cross-origin requests. Endpoint authentication is still absent despite `Depends` being imported; that remains a separate high-priority production blocker.
 
 ---
 
