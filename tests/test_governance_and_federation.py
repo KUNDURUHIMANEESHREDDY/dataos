@@ -176,18 +176,25 @@ class TestGovernanceAndFederation(unittest.TestCase):
 
     def test_production_requires_configured_token_secret(self):
         previous_key = os.environ.pop("DATAOS_MASTER_KEY", None)
-        previous_env = os.environ.get("DATAOS_ENV")
+        env_names = ("DATAOS_ENV", "APP_ENV", "ENVIRONMENT")
+        previous_env = {name: os.environ.get(name) for name in env_names}
         try:
-            os.environ["DATAOS_ENV"] = "production"
-            with self.assertRaisesRegex(RuntimeError, "DATAOS_MASTER_KEY"):
-                SubgraphTokenManager()
+            for name in env_names:
+                os.environ.pop(name, None)
+            for name in env_names:
+                with self.subTest(environment_variable=name):
+                    os.environ[name] = "production"
+                    with self.assertRaisesRegex(RuntimeError, "DATAOS_MASTER_KEY"):
+                        SubgraphTokenManager()
+                    os.environ.pop(name, None)
         finally:
             if previous_key is not None:
                 os.environ["DATAOS_MASTER_KEY"] = previous_key
-            if previous_env is not None:
-                os.environ["DATAOS_ENV"] = previous_env
-            else:
-                os.environ.pop("DATAOS_ENV", None)
+            for name, value in previous_env.items():
+                if value is not None:
+                    os.environ[name] = value
+                else:
+                    os.environ.pop(name, None)
 
     def test_configured_token_secret_requires_minimum_length(self):
         with self.assertRaisesRegex(ValueError, "at least 32"):
