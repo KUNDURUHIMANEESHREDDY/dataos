@@ -6,6 +6,7 @@ Validates encryption, selective sharing, tokens, and private execution contexts.
 import unittest
 import os
 import base64
+from unittest.mock import patch
 from infrastructure.privacy.encryption import EncryptionEngine, EncryptionError
 from infrastructure.privacy.sharing import (
     SelectiveSharingManager, SharingToken, SharingLevel, PrivateExecutionContext
@@ -105,6 +106,11 @@ class TestEncryptionEngine(unittest.TestCase):
     def test_empty_master_key_is_rejected(self):
         with self.assertRaises(EncryptionError):
             EncryptionEngine(master_key="   ")
+
+    def test_production_requires_persistent_master_key(self):
+        with patch.dict(os.environ, {"DATAOS_ENV": "production"}, clear=True):
+            with self.assertRaisesRegex(EncryptionError, "DATAOS_MASTER_KEY"):
+                EncryptionEngine()
 
 
 class TestSharingToken(unittest.TestCase):
