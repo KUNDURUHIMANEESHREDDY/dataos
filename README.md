@@ -345,3 +345,12 @@ of the product and dominates the repo's file count.
 
 ~181 Python files excluding `skills/`: `core/` 22, `engines/` 35, `infrastructure/` 36, `intelligence/` 20,
 `runtime/` 14, `tests/` 48, `backend/` 1, `cli/` 2.
+
+## Sharing-token signing key
+
+DataOS signs scoped sharing tokens with HMAC-SHA256. Never rely on a built-in signing secret.
+
+- Set `DATAOS_MASTER_KEY` to a randomly generated secret of at least 32 UTF-8 bytes through your deployment secret manager.
+- Set `DATAOS_ENV=production` in production deployments; startup also recognizes `APP_ENV` or `ENVIRONMENT` set to `production` and fails if `DATAOS_MASTER_KEY` is missing.
+- In non-production, an unset key produces a random process-local key and a warning. Tokens created with that fallback become invalid after a restart; this mode is not suitable for persistent sharing links.
+- Rotate any previously exposed key. Changing the key invalidates tokens signed with the previous value unless a deliberate key-rotation strategy is implemented.
