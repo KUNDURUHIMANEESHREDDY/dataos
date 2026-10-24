@@ -19,12 +19,14 @@ from pydantic import BaseModel, Field
 from dataos_system import DataOS
 from core.object.model import DataObject, ObjectType
 from core.relation.model import Relationship, RelationType
-from core.permissions.policy import Capability
 from backend.knowledge_rag import create_knowledge_router
 from backend.cors_config import cors_middleware_options
+from backend.request_limits import RequestBodyLimitMiddleware, configured_request_body_limit
+from engines.governance.deduplication import DuplicateDetectionEngine
 
 # Initialize single DataOS kernel
 dataos = DataOS(db_path="dataos.db", blob_dir=".dataos_blobs")
+duplicate_detection = DuplicateDetectionEngine(dataos.storage)
 
 app = FastAPI(
     title="DataOS Universal Data Operating System API",
@@ -33,6 +35,13 @@ app = FastAPI(
     All operations are deterministic, verifiable against real data, and fully traceable.
     """,
     version="1.0.0"
+)
+
+# Bound JSON and multipart requests before FastAPI parses their bodies.
+# Register the limiter first so CORS remains outermost and can decorate 400/413 responses.
+app.add_middleware(
+    RequestBodyLimitMiddleware,
+    max_body_bytes=configured_request_body_limit(),
 )
 
 app.add_middleware(
@@ -58,29 +67,29 @@ class ObjectCreateRequest(BaseModel):
 
 
 class RelationCreateRequest(BaseModel):
-    source_id: str
-    target_id: str
-    relation_type: str = "references"
-    confidence: float = 1.0
+    source_id: str = Field(min_length=1, max_length=256)
+    target_id: str = Field(min_length=1, max_length=256)
+    relation_type: str = Field(default="references", min_length=1, max_length=64)
+    confidence: float = Field(default=1.0, ge=0.0, le=1.0)
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
 
 class SQLQueryRequest(BaseModel):
-    query: str
-    agent_or_user: str = "api_user"
+    query: str = Field(min_length=1, max_length=100_000)
+    agent_or_user: str = Field(default="api_user", min_length=1, max_length=128)
 
 
 class PythonComputeRequest(BaseModel):
-    code: str
-    input_object_ids: List[str] = Field(default_factory=list)
-    agent_or_user: str = "api_user"
+    code: str = Field(min_length=1, max_length=50_000)
+    input_object_ids: List[str] = Field(default_factory=list, max_length=100)
+    agent_or_user: str = Field(default="api_user", min_length=1, max_length=128)
 
 
 class UnifiedQueryRequest(BaseModel):
-    query: str
-    query_type: str = "auto"
-    context_object_id: Optional[str] = None
-    agent_or_user: str = "api_user"
+    query: str = Field(min_length=1, max_length=100_000)
+    query_type: str = Field(default="auto", min_length=1, max_length=32)
+    context_object_id: Optional[str] = Field(default=None, max_length=256)
+    agent_or_user: str = Field(default="api_user", min_length=1, max_length=128)
 
 
 class QualityEvaluateRequest(BaseModel):
@@ -104,10 +113,10 @@ class WorkflowExecutionRequest(BaseModel):
 
 @app.get("/api/objects/", summary="List DataOS Objects")
 async def list_objects(
-    object_type: Optional[str] = None,
-    source: Optional[str] = None,
-    limit: int = 100,
-    offset: int = 0
+    object_type: Optional[str] = FastQuery(None, min_length=1, max_length=64),
+    source: Optional[str] = FastQuery(None, min_length=1, max_length=256),
+    limit: int = FastQuery(100, ge=1, le=500),
+    offset: int = FastQuery(0, ge=0, le=1_000_000)
 ):
     objs = dataos.storage.list_objects(object_type=object_type, source=source, limit=limit, offset=offset)
     return {"total": len(objs), "objects": [o.to_dict() for o in objs]}
@@ -149,11 +158,11 @@ async def delete_object(object_id: str, soft: bool = True):
 
 @app.get("/api/relationships/", summary="List Relationships")
 async def list_relationships(
-    source_id: Optional[str] = None,
-    target_id: Optional[str] = None,
-    relation_type: Optional[str] = None,
-    min_confidence: float = 0.0,
-    limit: int = 1000
+    source_id: Optional[str] = FastQuery(None, min_length=1, max_length=256),
+    target_id: Optional[str] = FastQuery(None, min_length=1, max_length=256),
+    relation_type: Optional[str] = FastQuery(None, min_length=1, max_length=64),
+    min_confidence: float = FastQuery(0.0, ge=0.0, le=1.0),
+    limit: int = FastQuery(1000, ge=1, le=1000)
 ):
     rels = dataos.storage.list_relationships(
         source_id=source_id,
@@ -167,7 +176,7 @@ async def list_relationships(
 
 @app.post("/api/relationships/", summary="Create Relationship")
 async def create_relationship(req: RelationCreateRequest):
-    rel = dataos.create_relationship(
+    rel = dataos.graph.create_relation(
         source_id=req.source_id,
         target_id=req.target_id,
         relation_type=req.relation_type,
@@ -178,28 +187,29 @@ async def create_relationship(req: RelationCreateRequest):
 
 
 @app.get("/api/graph/neighbors/{object_id}", summary="Get Object Neighbors")
-async def get_neighbors(object_id: str, direction: str = "both"):
-    neighbors = dataos.get_neighbors(object_id, direction=direction)
+async def get_neighbors(object_id: str, direction: str = FastQuery("both", pattern="^(outgoing|incoming|both)$")):
+    neighbors = dataos.graph.neighbors(object_id, direction=direction)
     return {"object_id": object_id, "total": len(neighbors), "neighbors": neighbors}
 
 
 @app.get("/api/graph/traverse/{object_id}", summary="Multi-Hop Graph Traversal")
-async def traverse_graph(object_id: str, max_hops: int = 3, min_confidence: float = 0.0):
-    traversal = dataos.graph.traverse(start_id=object_id, max_hops=max_hops, min_confidence=min_confidence)
+async def traverse_graph(object_id: str, max_hops: int = FastQuery(3, ge=1, le=10), min_confidence: float = FastQuery(0.0, ge=0.0, le=1.0)):
+    traversal = dataos.graph.engine.traverse(start_id=object_id, max_hops=max_hops, min_confidence=min_confidence)
     return traversal
 
 
 @app.get("/api/graph/analytics", summary="Graph Analytics & PageRank")
-async def graph_analytics(algorithm: str = "pagerank"):
+async def graph_analytics(algorithm: str = FastQuery("pagerank", pattern="^(pagerank|centrality|communities)$")):
+    engine = dataos.graph.analytics_engine
     if algorithm == "pagerank":
-        scores = dataos.graph_analytics.compute_pagerank()
+        scores = engine.compute_pagerank()
         return {"algorithm": "pagerank", "scores": scores}
     elif algorithm == "centrality":
-        deg = dataos.graph_analytics.compute_degree_centrality()
-        bc = dataos.graph_analytics.compute_betweenness_centrality()
+        deg = engine.compute_degree_centrality()
+        bc = engine.compute_betweenness_centrality()
         return {"degree_centrality": deg, "betweenness_centrality": bc}
     elif algorithm == "communities":
-        comms = dataos.graph_analytics.detect_communities()
+        comms = engine.detect_communities()
         return {"communities": comms}
     else:
         raise HTTPException(status_code=400, detail=f"Unsupported algorithm: {algorithm}")
@@ -211,25 +221,28 @@ async def graph_analytics(algorithm: str = "pagerank"):
 
 @app.post("/api/compute/sql", summary="Execute SQL Query")
 async def compute_sql(req: SQLQueryRequest):
-    res = dataos.execute_sql(req.query)
-    return res
+    return dataos.sql(req.query)
 
 
 @app.post("/api/compute/python", summary="Execute Python Sandbox")
 async def compute_python(req: PythonComputeRequest):
-    res = dataos.execute_python(req.code, input_object_ids=req.input_object_ids)
-    return res
+    return dataos.python(req.code, input_object_ids=req.input_object_ids)
 
 
 @app.post("/api/query/", summary="Unified Query Execution")
 async def query_unified(req: UnifiedQueryRequest):
-    res = dataos.query.execute_query(
-        query_text=req.query,
-        query_type=req.query_type,
-        context_object_id=req.context_object_id,
-        agent_or_user=req.agent_or_user
-    )
-    return res
+    query_type = req.query_type.strip().lower()
+    if query_type in {"auto", "ask", "natural_language"}:
+        return dataos.ask(req.query)
+    if query_type == "sql":
+        return dataos.sql(req.query)
+    if query_type in {"python", "code"}:
+        input_ids = [req.context_object_id] if req.context_object_id else []
+        return dataos.python(req.query, input_object_ids=input_ids)
+    if query_type in {"search", "semantic", "hybrid"}:
+        results = dataos.search(req.query, top_k=10)
+        return {"query": req.query, "total_matches": len(results), "results": results}
+    raise HTTPException(status_code=400, detail=f"Unsupported query_type: {query_type}")
 
 
 # =============================================================================
@@ -238,19 +251,27 @@ async def query_unified(req: UnifiedQueryRequest):
 
 @app.get("/api/search/", summary="Hybrid Search")
 async def hybrid_search(
-    q: str = FastQuery(..., description="Search query string"),
-    object_type: Optional[str] = None,
-    context_id: Optional[str] = None,
-    limit: int = 20
+    q: str = FastQuery(..., min_length=1, max_length=1000, description="Search query string"),
+    object_type: Optional[str] = FastQuery(None, min_length=1, max_length=64),
+    context_id: Optional[str] = FastQuery(None, min_length=1, max_length=256),
+    limit: int = FastQuery(20, ge=1, le=100)
 ):
-    results = dataos.search.search(query=q, object_type=object_type, context_object_id=context_id, limit=limit)
+    results = dataos.search(q, top_k=limit)
+    if object_type:
+        results = [item for item in results if item.get("type", item.get("object_type")) == object_type]
+    if context_id:
+        results = [
+            item for item in results
+            if item.get("context_id") == context_id
+            or (isinstance(item.get("metadata"), dict) and item["metadata"].get("context_id") == context_id)
+        ]
     return {"query": q, "total_matches": len(results), "results": results}
 
 
 @app.get("/api/vectors/search", summary="Persistent Vector Similarity Search (Rule #45)")
 async def search_vectors(
-    q: str = FastQuery(..., description="Semantic query string"),
-    top_k: int = 10
+    q: str = FastQuery(..., min_length=1, max_length=1000, description="Semantic query string"),
+    top_k: int = FastQuery(10, ge=1, le=100)
 ):
     results = dataos.search_vector(query_text=q, top_k=top_k)
     return {"query": q, "total_matches": len(results), "results": results}
@@ -258,7 +279,7 @@ async def search_vectors(
 
 @app.post("/api/vectors/recompute", summary="Recompute All Vector Embeddings (Rule #45)")
 async def recompute_vectors():
-    res = dataos.recompute_vector_index()
+    res = dataos.vector_index.recompute_all(dataos.storage)
     return res
 
 
@@ -267,7 +288,7 @@ async def ingest_notebook_api(
     filename: str = Form("analysis.ipynb"),
     content: str = Form(...)
 ):
-    res = dataos.ingest_notebook(notebook_json_str=content, filename=filename)
+    res = dataos.ingest(content, filename=filename, discover_relations=True)
     return res
 
 
@@ -276,7 +297,7 @@ async def extract_rich_document_api(
     filename: str = Form("paper.md"),
     content: str = Form(...)
 ):
-    res = dataos.ingest_rich_document(content_str=content, filename=filename)
+    res = dataos.ingest(content, filename=filename, discover_relations=True)
     return res
 
 
@@ -288,9 +309,9 @@ async def extract_rich_document_api(
 async def time_travel_object(
     object_id: str,
     as_of: str = FastQuery(..., description="Timestamp ISO string to travel to"),
-    temporal_axis: str = "system_time"
+    temporal_axis: str = FastQuery("system_time", pattern="^(system_time|valid_time|business_time)$", max_length=32)
 ):
-    obj = dataos.get_object_as_of(object_id, as_of, temporal_axis=temporal_axis)
+    obj = dataos.time_travel.get_object_as_of(object_id, as_of_timestamp=as_of, temporal_axis=temporal_axis)
     if not obj:
         raise HTTPException(status_code=404, detail=f"Object {object_id} not found as of {as_of}")
     return obj.to_dict()
@@ -301,7 +322,7 @@ async def time_travel_graph(
     as_of: str = FastQuery(..., description="Timestamp ISO string"),
     temporal_axis: str = "system_time"
 ):
-    graph = dataos.get_graph_as_of(as_of, temporal_axis=temporal_axis)
+    graph = dataos.time_travel.get_graph_as_of(as_of_timestamp=as_of, temporal_axis=temporal_axis)
     return graph
 
 
@@ -311,20 +332,20 @@ async def time_travel_changes(
     t2: str = FastQuery(..., description="End timestamp ISO"),
     temporal_axis: str = "system_time"
 ):
-    changes = dataos.get_changes_between(t1, t2, temporal_axis=temporal_axis)
+    changes = dataos.time_travel.changes_between(t1, t2, temporal_axis=temporal_axis)
     return changes
 
 
 class ConflictResolutionRequest(BaseModel):
-    conflict_object_id: str
-    strategy: str = "last_write_wins"
+    conflict_object_id: str = Field(min_length=1, max_length=256)
+    strategy: str = Field(default="last_write_wins", min_length=1, max_length=32)
     manual_properties: Optional[Dict[str, Any]] = None
 
 
 @app.post("/api/sync/resolve_conflict", summary="Explicit Conflict Resolution (Rule #59)")
 async def resolve_conflict_api(req: ConflictResolutionRequest):
     try:
-        res = dataos.resolve_conflict(
+        res = dataos.sync.resolve_conflict(
             conflict_object_id=req.conflict_object_id,
             strategy=req.strategy,
             manual_properties=req.manual_properties
@@ -387,7 +408,11 @@ async def evaluate_quality(object_id: str, req: QualityEvaluateRequest):
 # =============================================================================
 
 @app.get("/api/provenance/lineage/{object_id}", summary="Data Lineage Traversal")
-async def get_lineage(object_id: str, direction: str = "upstream", max_depth: int = 10):
+async def get_lineage(
+    object_id: str,
+    direction: str = FastQuery("upstream", pattern="^(upstream|downstream)$"),
+    max_depth: int = FastQuery(10, ge=1, le=20),
+):
     if direction == "upstream":
         return dataos.lineage.trace_upstream_lineage(object_id, max_depth=max_depth)
     else:
@@ -399,15 +424,15 @@ async def get_lineage(object_id: str, direction: str = "upstream", max_depth: in
 # =============================================================================
 
 class MultiAgentPipelineRequest(BaseModel):
-    goal_prompt: str
-    target_dataset_id: str
-    analysis_sql_or_python: str
-    quality_rules: Optional[List[Dict[str, Any]]] = None
+    goal_prompt: str = Field(min_length=1, max_length=20_000)
+    target_dataset_id: str = Field(min_length=1, max_length=256)
+    analysis_sql_or_python: str = Field(min_length=1, max_length=50_000)
+    quality_rules: Optional[List[Dict[str, Any]]] = Field(default=None, max_length=100)
 
 
 @app.post("/api/agents/pipeline/research", summary="Run Composable Multi-Agent Research Pipeline (Rule #20)")
 async def run_multi_agent_pipeline_api(req: MultiAgentPipelineRequest):
-    res = dataos.run_multi_agent_pipeline(
+    res = dataos.multi_agent.run_end_to_end_research_pipeline(
         goal_prompt=req.goal_prompt,
         target_dataset_id=req.target_dataset_id,
         analysis_sql_or_python=req.analysis_sql_or_python,
@@ -419,32 +444,59 @@ async def run_multi_agent_pipeline_api(req: MultiAgentPipelineRequest):
 @app.get("/api/recommendations/connections/{object_id}", summary="Graph Recommendation & Missing Link Discovery (Rule #57)")
 async def recommend_connections_api(
     object_id: str,
-    top_k: int = 10
+    top_k: int = FastQuery(10, ge=1, le=100)
 ):
-    recs = dataos.recommend_connections(target_object_id=object_id, top_k=top_k)
+    recs = dataos.graph.recommendations(object_id, top_k=top_k)
     return {"target_object_id": object_id, "recommendations": recs}
 
 
 @app.get("/api/recommendations/datasets/{object_id}", summary="Recommend Relevant Datasets (Rule #57)")
 async def recommend_datasets_api(
     object_id: str,
-    top_k: int = 5
+    top_k: int = FastQuery(5, ge=1, le=100)
 ):
-    recs = dataos.recommend_datasets(target_object_id=object_id, top_k=top_k)
-    return {"target_object_id": object_id, "recommended_datasets": recs}
+    obj = dataos.storage.get_object(object_id)
+    if not obj:
+        raise HTTPException(status_code=404, detail="Object not found")
+
+    properties = obj.properties if isinstance(obj.properties, dict) else {}
+    query = " ".join(
+        str(value).strip()
+        for value in (properties.get("filename"), properties.get("title"), properties.get("description"))
+        if isinstance(value, str) and value.strip()
+    )
+    if not query:
+        return {"target_object_id": object_id, "recommended_datasets": []}
+
+    candidates = dataos.search(query, top_k=min(100, top_k * 5))
+    datasets = [
+        item for item in candidates
+        if isinstance(item, dict)
+        and item.get("id") != object_id
+        and str(item.get("type", item.get("object_type", ""))).lower() in {"dataset", "data_set"}
+    ]
+    return {"target_object_id": object_id, "recommended_datasets": datasets[:top_k]}
 
 
 @app.post("/api/agents/execute", summary="Execute Agent Capability")
 async def execute_agent(req: AgentExecutionRequest):
-    agent = dataos.create_agent(req.agent_id)
-    res = agent.execute_capability(Capability(req.capability), req.params)
-    return res
+    # The current kernel has no authenticated general-purpose agent registry.
+    # Fail explicitly instead of dereferencing a nonexistent factory or exposing
+    # arbitrary capability execution through an unauthenticated endpoint.
+    raise HTTPException(
+        status_code=501,
+        detail="General agent execution is unavailable until an authenticated agent registry is implemented.",
+    )
 
 
 @app.post("/api/workflows/execute", summary="Execute Workflow DAG")
 async def execute_workflow(req: WorkflowExecutionRequest):
-    res = dataos.workflows.execute_workflow(req.definition, context_data=req.context)
-    return res
+    # There is no workflow engine registered on the current kernel. Do not turn
+    # this placeholder route into an opaque 500 or pretend the DAG ran.
+    raise HTTPException(
+        status_code=501,
+        detail="Workflow execution is unavailable until a validated workflow engine is registered.",
+    )
 
 
 # =============================================================================
@@ -453,10 +505,16 @@ async def execute_workflow(req: WorkflowExecutionRequest):
 
 @app.get("/api/governance/duplicates", summary="Fuzzy Duplicate Detection (Rule #58)")
 async def detect_duplicates_api(
-    object_id: Optional[str] = None,
-    min_similarity: float = 0.75
+    object_id: Optional[str] = FastQuery(None, min_length=1, max_length=256),
+    min_similarity: float = FastQuery(0.75, ge=0.0, le=1.0)
 ):
-    results = dataos.find_duplicates(target_object_id=object_id, min_similarity=min_similarity)
+    # This is a GET endpoint: report candidate duplicates without mutating the
+    # graph. Explicit linking remains a separate, deliberate operation.
+    results = duplicate_detection.find_duplicates(
+        target_object_id=object_id,
+        min_similarity=min_similarity,
+        auto_link_graph=False,
+    )
     return {"total_matches": len(results), "duplicates": results}
 
 
@@ -466,17 +524,17 @@ async def get_quota_status_api(principal_id: str):
 
 
 class IssueSharingTokenRequest(BaseModel):
-    issuer: str
-    subject_principal: str
-    subgraph_root_id: str
-    allowed_object_ids: Optional[List[str]] = None
-    allowed_capabilities: Optional[List[str]] = None
-    duration_seconds: Optional[int] = 3600
+    issuer: str = Field(min_length=1, max_length=128)
+    subject_principal: str = Field(min_length=1, max_length=128)
+    subgraph_root_id: str = Field(min_length=1, max_length=256)
+    allowed_object_ids: Optional[List[str]] = Field(default=None, max_length=1000)
+    allowed_capabilities: Optional[List[str]] = Field(default=None, max_length=100)
+    duration_seconds: int = Field(default=3600, ge=1, le=86400)
 
 
 @app.post("/api/sharing/issue_token", summary="Issue Cryptographically Signed Subgraph Token (Rule #65)")
 async def issue_sharing_token_api(req: IssueSharingTokenRequest):
-    token = dataos.issue_sharing_token(
+    token = dataos.tokens.issue_token(
         issuer=req.issuer,
         subject_principal=req.subject_principal,
         subgraph_root_id=req.subgraph_root_id,
@@ -494,7 +552,7 @@ class VerifySharingTokenRequest(BaseModel):
 @app.post("/api/sharing/verify_token", summary="Verify and Decode Sharing Token (Rule #65)")
 async def verify_sharing_token_api(req: VerifySharingTokenRequest):
     try:
-        payload = dataos.verify_sharing_token(req.token)
+        payload = dataos.tokens.verify_and_decode_token(req.token)
         import dataclasses
         return {"status": "valid", "payload": dataclasses.asdict(payload)}
     except Exception as e:
@@ -503,10 +561,10 @@ async def verify_sharing_token_api(req: VerifySharingTokenRequest):
 
 @app.get("/api/federation/search", summary="Federated Cross-Instance Search (Rule #64)")
 async def federated_search_api(
-    q: str = FastQuery(..., description="Query string"),
-    top_k: int = 10
+    q: str = FastQuery(..., min_length=1, max_length=1000, description="Query string"),
+    top_k: int = FastQuery(10, ge=1, le=100)
 ):
-    res = dataos.federated_search(query=q, top_k=top_k)
+    res = dataos.federation.federated_search(query=q, top_k=top_k)
     return res
 
 
@@ -560,17 +618,15 @@ async def ingest_text(
     content: str = Form(...),
     format_type: str = Form("text")
 ):
-    import tempfile
-    with tempfile.NamedTemporaryFile("w", delete=False, suffix=f"_{filename}", encoding="utf-8") as tmp:
-        tmp.write(content)
-        tmp_path = tmp.name
-
-    try:
-        res = dataos.ingest_file(tmp_path, discover_relations=True)
-        return res
-    finally:
-        if os.path.exists(tmp_path):
-            os.remove(tmp_path)
+    # The universal ingestion pipeline accepts in-memory content, avoiding
+    # temporary files and the removed DataOS.ingest_file convenience method.
+    ingest_filename = filename
+    if not os.path.splitext(ingest_filename)[1]:
+        normalized_format = format_type.strip().lower().lstrip(".")
+        extension = "txt" if normalized_format in {"text", "plain"} else normalized_format
+        if extension in {"txt", "md", "markdown", "csv", "tsv", "json", "py", "ipynb"}:
+            ingest_filename = f"{ingest_filename}.{extension}"
+    return dataos.ingest(content, filename=ingest_filename, discover_relations=True)
 
 
 @app.get("/api/io/export", summary="Export DataOS Graph")
@@ -593,7 +649,15 @@ async def export_graph(format: str = "json_ld"):
 
 @app.get("/api/catalog/health", summary="System Health & Catalog Overview")
 async def get_health_overview():
-    return dataos.get_system_health()
+    try:
+        dataos.storage.list_objects(limit=1, offset=0)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="DataOS storage unavailable") from exc
+    return {
+        "status": "operational",
+        "storage": "available",
+        "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    }
 
 
 @app.get("/health", summary="Basic Health Check")

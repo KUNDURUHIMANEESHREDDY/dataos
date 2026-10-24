@@ -13,6 +13,10 @@ authority over it.**
 
 ---
 
+## API request-size limit
+
+The FastAPI service enforces a streaming request-body limit before parsing JSON or multipart content. The default is 50 MiB. Set `DATAOS_MAX_REQUEST_BODY_BYTES` to an integer between 1 KiB and 256 MiB to match expected ingestion sizes. Invalid values fail startup rather than silently disabling the limit. Oversized requests return HTTP 413; malformed or conflicting `Content-Length` headers return HTTP 400.
+
 ## Current blockers
 
 ### ✅ Resolved
@@ -39,21 +43,13 @@ Six bugs that made the project unusable, fixed in `dab962b` and `4193152`:
 
 ### Still open
 
-#### 1. The FastAPI backend targets an API that no longer exists
+#### 1. The FastAPI backend still has incomplete endpoint contracts
 
-`backend/app.py` makes 52 `dataos.*` attribute accesses; only about 13 resolve. **Roughly 22 of ~35 endpoints
-return HTTP 500.** It was written against an older, richer `DataOS` and never updated.
+The current API-contract repair branch corrects several calls that targeted a removed `DataOS` interface: SQL/Python compute, unified query dispatch, hybrid search, relationship creation, graph neighbors/traversal/analytics, and catalog health. Regression tests now exercise those route-to-kernel contracts and request bounds.
 
-Broken calls include `dataos.execute_sql` (the real name is `DataOS.sql`), `dataos.execute_python` (`.python`),
-`dataos.ingest_file`, `dataos.get_object`, `dataos.graph.traverse` (use `dataos.graph.engine.traverse`),
-`dataos.create_agent`, `dataos.get_system_health` (no such method anywhere), `dataos.run_multi_agent_pipeline`,
-and `dataos.query.execute_query` (where `dataos.query` is a bound method, not a namespace).
+Remaining endpoints still need an inventory against the actual kernel before this backend can be considered complete. Known outstanding mismatches include `dataos.ingest_file`, `dataos.get_object`, `dataos.create_agent`, and `dataos.run_multi_agent_pipeline`. These are not marked fixed by the current PR.
 
-Working endpoints: `/api/objects` CRUD, `/api/relationships`, `/api/vectors/search`,
-`/api/provenance/lineage/{id}`, `/api/profiling/{id}`, `/api/quality/{id}`, `/api/objects/{id}/why`,
-`/api/objects/{id}/impact`, `/api/ask`, `/api/ingest/universal`, `/api/io/export`, `/health`.
-
-The CLI and `scenario_demo.py` show exactly how each missing call should be rewritten.
+The backend verification workflow runs the correctness suite, the 10-step scenario demo, CLI health smoke test, and a fail-closed aggregate. Passing that gate does not imply all API endpoints are functional or that a deployed service has been verified.
 
 #### 2. Prisma is dead weight
 
