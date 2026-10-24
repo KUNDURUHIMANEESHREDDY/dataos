@@ -151,6 +151,9 @@ def test_expensive_query_routes_publish_bounded_parameters():
     assert vector["top_k"]["minimum"] == 1
     assert vector["top_k"]["maximum"] == 100
 
+    neighbors = params("/api/graph/neighbors/{object_id}")
+    assert neighbors["direction"]["pattern"] == "^(outgoing|incoming|both)$"
+
     lineage = params("/api/provenance/lineage/{object_id}")
     assert lineage["direction"]["pattern"] == "^(upstream|downstream)$"
     assert lineage["max_depth"]["minimum"] == 1
