@@ -4,6 +4,8 @@ import ipaddress
 import re
 from urllib.parse import urlsplit
 
+import idna
+
 DEFAULT_DEV_ORIGINS = (
     "http://localhost:3000",
     "http://127.0.0.1:3000",
@@ -24,8 +26,12 @@ def _canonical_host(hostname: str) -> str:
             raise ValueError(f"Invalid IP address in CORS origin: {hostname!r}")
 
         try:
-            ascii_host = hostname.encode("idna").decode("ascii").lower()
-        except UnicodeError as exc:
+            # UTS #46 non-transitional processing matches modern browser URL
+            # host serialization (not Python's legacy IDNA 2003 codec).
+            ascii_host = idna.encode(
+                hostname, uts46=True, std3_rules=True
+            ).decode("ascii").lower()
+        except (idna.IDNAError, UnicodeError) as exc:
             raise ValueError(f"Invalid hostname in CORS origin: {hostname!r}") from exc
 
         # A trailing dot is valid DNS syntax and is preserved for exact origin
