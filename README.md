@@ -263,11 +263,14 @@ execution at 10s and 10 MB output.
 
 ## Configuration
 
-There is exactly **one environment variable** in the product: `DATAOS_MASTER_KEY`
-(`infrastructure/privacy/encryption.py:54`).
+Security-sensitive environment variables:
+
+- `DATAOS_MASTER_KEY`: persistent master secret for encryption. Supply it through deployment secret management; never commit it or log its value. An explicitly empty or whitespace-only value is rejected.
+- `DATAOS_ENV`: set to `production` or `prod` in production deployments. In those modes, startup fails if `DATAOS_MASTER_KEY` is absent rather than generating an ephemeral key. Without a production mode, an unset key permits an ephemeral development/test key; ciphertext created with it cannot be decrypted after process restart.
+- `DATAOS_CORS_ORIGINS`: comma-separated explicit browser-origin allowlist. Keep production origins HTTPS and do not use wildcard origins.
 
 Everything else is a constructor argument: `db_path="dataos.db"`, `blob_dir=".dataos_blobs"`, and
-`PostgresStorage`'s connection string (hardcoded default, no `DATABASE_URL` lookup).
+`PostgresStorage`'s connection string (the current implementation has no `DATABASE_URL` lookup).
 
 **No external service is required.** SQLite is the default. Postgres, S3, GCS, and Azure are optional and
 degrade gracefully — notably, `PostgresStorage` **silently falls back to an in-memory SQLite** if `psycopg2`
