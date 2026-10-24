@@ -29,6 +29,8 @@ def test_normalizes_trailing_slash_and_deduplicates_origins():
         "https://example.com#fragment",
         "https://example.com:not-a-port",
         "ftp://example.com",
+        "https://example .com",
+        "https://example.com\\evil",
     ],
 )
 def test_rejects_wildcard_and_malformed_origins(value):
