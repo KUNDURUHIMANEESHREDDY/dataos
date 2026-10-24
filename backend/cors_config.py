@@ -27,6 +27,9 @@ def parse_cors_origins(raw: str | None) -> list[str]:
                 "DATAOS_CORS_ORIGINS must list explicit origins; wildcard origins are forbidden"
             )
 
+        if any(char.isspace() for char in candidate) or "\\" in candidate:
+            raise ValueError(f"Invalid CORS origin: {candidate!r}")
+
         parsed = urlsplit(candidate)
         try:
             # Accessing .port validates that a supplied port is numeric and in range.
