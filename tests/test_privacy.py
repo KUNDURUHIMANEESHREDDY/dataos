@@ -5,7 +5,8 @@ Validates encryption, selective sharing, tokens, and private execution contexts.
 
 import unittest
 import os
-from infrastructure.privacy.encryption import EncryptionEngine
+import base64
+from infrastructure.privacy.encryption import EncryptionEngine, EncryptionError
 from infrastructure.privacy.sharing import (
     SelectiveSharingManager, SharingToken, SharingLevel, PrivateExecutionContext
 )
@@ -68,6 +69,38 @@ class TestEncryptionEngine(unittest.TestCase):
         ct2 = self.engine.encrypt("after rotation")
         pt2 = self.engine.decrypt(ct2)
         self.assertEqual(pt2, "after rotation")
+
+    def test_encryption_fails_closed_without_secure_backend(self):
+        self.engine._backend = None
+        with self.assertRaises(EncryptionError):
+            self.engine.encrypt("sensitive data")
+
+    def test_unknown_and_legacy_xor_ciphertexts_are_rejected_by_default(self):
+        with self.assertRaises(EncryptionError):
+            self.engine.decrypt("unknown:payload")
+        with self.assertRaises(EncryptionError):
+            self.engine.decrypt("xor:Zm9v")
+
+    def test_legacy_xor_decryption_requires_explicit_migration_opt_in(self):
+        plaintext = "legacy data to migrate"
+        key = self.engine._aes_key
+        raw = plaintext.encode()
+        encrypted = bytes(raw[i] ^ key[i % len(key)] for i in range(len(raw)))
+        legacy_ciphertext = "xor:" + base64.b64encode(encrypted).decode()
+
+        with self.assertRaises(EncryptionError):
+            self.engine.decrypt(legacy_ciphertext)
+
+        migration_engine = EncryptionEngine(
+            master_key="test_password_123",
+            allow_legacy_xor_decryption=True,
+        )
+        with self.assertWarns(RuntimeWarning):
+            self.assertEqual(migration_engine.decrypt(legacy_ciphertext), plaintext)
+
+    def test_empty_master_key_is_rejected(self):
+        with self.assertRaises(EncryptionError):
+            EncryptionEngine(master_key="   ")
 
 
 class TestSharingToken(unittest.TestCase):
