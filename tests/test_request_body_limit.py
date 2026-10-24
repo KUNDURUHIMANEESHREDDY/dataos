@@ -41,7 +41,11 @@ def request_messages(*chunks):
 
 async def invoke(middleware, scope, receive):
     sent = []
-    await middleware(scope, receive, sent.append)
+
+    async def send(message):
+        sent.append(message)
+
+    await middleware(scope, receive, send)
     return sent
 
 
