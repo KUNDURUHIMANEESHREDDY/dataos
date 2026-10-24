@@ -19,7 +19,6 @@ from pydantic import BaseModel, Field
 from dataos_system import DataOS
 from core.object.model import DataObject, ObjectType
 from core.relation.model import Relationship, RelationType
-from core.permissions.policy import Capability
 from backend.knowledge_rag import create_knowledge_router
 from backend.cors_config import cors_middleware_options
 
