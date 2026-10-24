@@ -145,6 +145,12 @@ def test_expensive_query_routes_publish_bounded_parameters():
     def params(path):
         return {item["name"]: item["schema"] for item in schema["paths"][path]["get"]["parameters"]}
 
+    def string_schema(parameters, name):
+        item = parameters[name]
+        if "anyOf" in item:
+            item = next(branch for branch in item["anyOf"] if branch.get("type") == "string")
+        return item
+
     vector = params("/api/vectors/search")
     assert vector["q"]["minLength"] == 1
     assert vector["q"]["maxLength"] == 1000
@@ -153,18 +159,22 @@ def test_expensive_query_routes_publish_bounded_parameters():
 
     relationships = params("/api/relationships/")
     for name in ("source_id", "target_id"):
-        assert relationships[name]["minLength"] == 1
-        assert relationships[name]["maxLength"] == 256
-    assert relationships["relation_type"]["minLength"] == 1
-    assert relationships["relation_type"]["maxLength"] == 64
+        field = string_schema(relationships, name)
+        assert field["minLength"] == 1
+        assert field["maxLength"] == 256
+    relation_type = string_schema(relationships, "relation_type")
+    assert relation_type["minLength"] == 1
+    assert relation_type["maxLength"] == 64
 
     search = params("/api/search/")
     assert search["q"]["minLength"] == 1
     assert search["q"]["maxLength"] == 1000
-    assert search["object_type"]["minLength"] == 1
-    assert search["object_type"]["maxLength"] == 64
-    assert search["context_id"]["minLength"] == 1
-    assert search["context_id"]["maxLength"] == 256
+    object_type = string_schema(search, "object_type")
+    assert object_type["minLength"] == 1
+    assert object_type["maxLength"] == 64
+    context_id = string_schema(search, "context_id")
+    assert context_id["minLength"] == 1
+    assert context_id["maxLength"] == 256
 
     neighbors = params("/api/graph/neighbors/{object_id}")
     assert neighbors["direction"]["pattern"] == "^(outgoing|incoming|both)$"
