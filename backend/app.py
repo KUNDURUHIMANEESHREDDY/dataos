@@ -179,7 +179,7 @@ async def create_relationship(req: RelationCreateRequest):
 
 
 @app.get("/api/graph/neighbors/{object_id}", summary="Get Object Neighbors")
-async def get_neighbors(object_id: str, direction: str = "both"):
+async def get_neighbors(object_id: str, direction: str = FastQuery("both", pattern="^(outgoing|incoming|both)$")):
     neighbors = dataos.graph.neighbors(object_id, direction=direction)
     return {"object_id": object_id, "total": len(neighbors), "neighbors": neighbors}
 
