@@ -66,7 +66,8 @@ class SubgraphTokenManager:
 
         configured_secret = secret_key if secret_key is not None else os.getenv("DATAOS_MASTER_KEY")
         if not configured_secret:
-            if os.getenv("DATAOS_ENV", "").strip().lower() in {"prod", "production"}:
+            production_markers = ("DATAOS_ENV", "APP_ENV", "ENVIRONMENT")
+            if any(os.getenv(name, "").strip().lower() in {"prod", "production"} for name in production_markers):
                 raise RuntimeError("DATAOS_MASTER_KEY must be configured in production.")
             configured_secret = secrets.token_urlsafe(32)
             if not _EPHEMERAL_SECRET_WARNING_EMITTED:
