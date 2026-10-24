@@ -13,6 +13,10 @@ authority over it.**
 
 ---
 
+## API request-size limit
+
+The FastAPI service enforces a streaming request-body limit before parsing JSON or multipart content. The default is 50 MiB. Set `DATAOS_MAX_REQUEST_BODY_BYTES` to an integer between 1 KiB and 256 MiB to match expected ingestion sizes. Invalid values fail startup rather than silently disabling the limit. Oversized requests return HTTP 413; malformed or conflicting `Content-Length` headers return HTTP 400.
+
 ## Current blockers
 
 ### ✅ Resolved
