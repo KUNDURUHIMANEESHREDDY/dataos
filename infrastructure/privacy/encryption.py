@@ -67,8 +67,13 @@ class EncryptionEngine:
             # permission to silently switch to a different encryption key.
             self._init_from_password(env_key)
         else:
-            # Generate ephemeral key (data won't persist across restarts).
-            # This is suitable only for local development/test data.
+            environment = os.environ.get("DATAOS_ENV", "").strip().lower()
+            if environment in {"production", "prod"}:
+                raise EncryptionError(
+                    "DATAOS_MASTER_KEY must be configured in production; refusing an ephemeral key"
+                )
+            # Generate an ephemeral key only for local development/test data.
+            # Ciphertext created with this key cannot be decrypted after restart.
             self._aes_key = os.urandom(32)
             self._try_init_fernet(self._aes_key)
 
