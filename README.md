@@ -120,6 +120,13 @@ Convenience methods that genuinely exist: `from_url`, `ingest`, `why`, `impact`,
 python -m uvicorn backend.app:app --reload    # port 8000, must run from repo root
 ```
 
+For direct browser-to-API development, set `DATAOS_CORS_ORIGINS` to a comma-separated
+list of exact origins (scheme, host, and optional port), for example
+`http://localhost:3000,http://127.0.0.1:3000`. Wildcards, paths, credentials in
+origins, query strings, and malformed values are rejected at startup. If the variable
+is unset, only the two local frontend origins are allowed; setting it to an empty
+string disables cross-origin access. The Next.js rewrite proxy remains same-origin.
+
 `backend/app.py` has no `__main__` block, so the uvicorn CLI is the only way to start it.
 
 ### Frontend
