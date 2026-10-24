@@ -205,8 +205,14 @@ class TestGovernanceAndFederation(unittest.TestCase):
             SubgraphTokenManager(secret_key=" " * 32)
 
     def test_configured_token_secret_requires_text(self):
-        with self.assertRaisesRegex(TypeError, "must be a string"):
-            SubgraphTokenManager(secret_key=b"x" * 32)
+        for invalid_secret in (b"x" * 32, 0, False):
+            with self.subTest(secret_type=type(invalid_secret).__name__):
+                with self.assertRaisesRegex(TypeError, "must be a string"):
+                    SubgraphTokenManager(secret_key=invalid_secret)
+
+    def test_explicit_empty_token_secret_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "empty or whitespace"):
+            SubgraphTokenManager(secret_key="")
 
 
 if __name__ == "__main__":
