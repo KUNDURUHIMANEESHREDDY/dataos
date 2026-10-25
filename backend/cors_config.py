@@ -77,8 +77,16 @@ def parse_cors_origins(raw: str | None) -> list[str]:
     """
     if raw is None:
         candidates = list(DEFAULT_DEV_ORIGINS)
+    elif not raw.strip():
+        # An explicitly blank value intentionally disables cross-origin access.
+        candidates = []
     else:
-        candidates = [item.strip() for item in raw.split(",") if item.strip()]
+        entries = raw.split(",")
+        if any(not item.strip() for item in entries):
+            raise ValueError(
+                "DATAOS_CORS_ORIGINS must not contain empty comma-separated entries"
+            )
+        candidates = [item.strip() for item in entries]
 
     origins: list[str] = []
     for candidate in candidates:
