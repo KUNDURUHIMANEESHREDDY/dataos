@@ -7,6 +7,7 @@ import unittest
 import os
 import base64
 import tempfile
+from concurrent.futures import Barrier, ThreadPoolExecutor
 from unittest.mock import patch
 from infrastructure.privacy.encryption import EncryptionEngine, EncryptionError
 from infrastructure.privacy.sharing import (
@@ -125,6 +126,32 @@ class TestEncryptionEngine(unittest.TestCase):
 
             with open(salt_path, "rb") as salt_file:
                 self.assertEqual(len(salt_file.read()), 16)
+
+    def test_concurrent_salt_initialization_converges_on_one_value(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            salt_path = os.path.join(temp_dir, "encryption_salt")
+            workers = 6
+            barrier = Barrier(workers)
+            real_link = os.link
+
+            def synchronized_link(source, destination):
+                # Make every worker finish writing its private candidate before
+                # any worker publishes, exercising the create-if-absent race.
+                barrier.wait(timeout=10)
+                return real_link(source, destination)
+
+            def load_salt(_):
+                engine = object.__new__(EncryptionEngine)
+                return EncryptionEngine._get_or_create_salt(engine)
+
+            with patch.dict(os.environ, {"DATAOS_ENCRYPTION_SALT_FILE": salt_path}):
+                with patch("infrastructure.privacy.encryption.os.link", side_effect=synchronized_link):
+                    with ThreadPoolExecutor(max_workers=workers) as pool:
+                        salts = list(pool.map(load_salt, range(workers)))
+
+            self.assertEqual(len(set(salts)), 1, "concurrent initializers must all use the published salt")
+            with open(salt_path, "rb") as salt_file:
+                self.assertEqual(salt_file.read(), salts[0])
 
     def test_corrupt_persistent_salt_fails_closed(self):
         with tempfile.TemporaryDirectory() as temp_dir:
