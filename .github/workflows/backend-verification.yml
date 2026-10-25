@@ -138,9 +138,12 @@ jobs:
     if: always()
     needs: [secret-scan, dependency-audit, sbom, codeql]
     runs-on: ubuntu-latest
-    timeout-minutes: 2
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      security-events: read
     steps:
-      - name: Fail closed on any security failure
+      - name: Fail closed on any security workflow failure
         env:
           SECRET_SCAN_RESULT: ${{ needs.secret-scan.result }}
           DEPENDENCY_AUDIT_RESULT: ${{ needs.dependency-audit.result }}
@@ -156,3 +159,18 @@ jobs:
           test "$DEPENDENCY_AUDIT_RESULT" = "success"
           test "$SBOM_RESULT" = "success"
           test "$CODEQL_RESULT" = "success"
+
+      - name: Fail on open critical/high code-scanning alerts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          count="$(gh api --paginate --slurp \
+            "repos/${GITHUB_REPOSITORY}/code-scanning/alerts?state=open&per_page=100" \
+            --jq '[.[][] | select(.rule.security_severity_level == "critical" or .rule.security_severity_level == "high")] | length')"
+          echo "Open critical/high code-scanning alerts: $count"
+          if [[ "$count" != "0" ]]; then
+            echo "::error::Found $count open critical/high code-scanning alert(s); triage and remediate before release."
+            exit 1
+          fi
