@@ -77,6 +77,8 @@ def test_canonicalizes_ipv6_and_browser_compatible_idn_hosts():
         "ftp://example.com",
         "https://example .com",
         "https://example.com\\evil",
+        "\x00https://example.com",
+        "https://example.com\x7f",
         "https://example.com,,https://other.example",
         ",https://example.com",
         "http://example.com",
