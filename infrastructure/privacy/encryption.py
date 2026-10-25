@@ -10,6 +10,7 @@ import json
 import base64
 import hashlib
 import secrets
+import tempfile
 from typing import Dict, Any, Optional, Tuple
 import warnings
 
@@ -81,16 +82,46 @@ class EncryptionEngine:
             self._try_init_fernet(self._aes_key)
 
     def _get_or_create_salt(self) -> bytes:
-        """Get or create a persistent salt file."""
-        salt_dir = os.path.expanduser("~/.dataos")
+        """Load or atomically initialize the stable 16-byte key-derivation salt.
+
+        Deployments may point DATAOS_ENCRYPTION_SALT_FILE at a persistent,
+        shared file. The salt is not secret, but changing or losing it makes
+        existing ciphertext derived from the same master password unreadable.
+        """
+        configured_path = os.environ.get("DATAOS_ENCRYPTION_SALT_FILE")
+        salt_path = os.path.abspath(os.path.expanduser(
+            configured_path or "~/.dataos/encryption_salt"
+        ))
+        salt_dir = os.path.dirname(salt_path)
         os.makedirs(salt_dir, exist_ok=True)
-        salt_path = os.path.join(salt_dir, "encryption_salt")
-        if os.path.exists(salt_path):
-            with open(salt_path, "rb") as f:
-                return f.read()
-        salt = os.urandom(16)
-        with open(salt_path, "wb") as f:
-            f.write(salt)
+
+        # Write the complete candidate to a private temporary file first, then
+        # publish it with a no-overwrite hard link. Concurrent processes that
+        # initialize the same path therefore converge on the first complete
+        # salt instead of racing to overwrite each other's key material.
+        fd, temp_path = tempfile.mkstemp(prefix=".encryption-salt-", dir=salt_dir)
+        candidate = os.urandom(16)
+        try:
+            with os.fdopen(fd, "wb") as salt_file:
+                salt_file.write(candidate)
+                salt_file.flush()
+                os.fsync(salt_file.fileno())
+            try:
+                os.link(temp_path, salt_path)
+                salt = candidate
+            except FileExistsError:
+                with open(salt_path, "rb") as salt_file:
+                    salt = salt_file.read()
+        finally:
+            try:
+                os.unlink(temp_path)
+            except FileNotFoundError:
+                pass
+
+        if len(salt) != 16:
+            raise EncryptionError(
+                "Encryption salt file must contain exactly 16 bytes; restore the persistent salt before starting"
+            )
         return salt
 
     def _try_init_fernet(self, key: bytes) -> None:
