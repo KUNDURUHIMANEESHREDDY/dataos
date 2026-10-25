@@ -1,11 +1,68 @@
 """Strict CORS origin configuration for the DataOS API."""
 
+import ipaddress
+import re
 from urllib.parse import urlsplit
+
+import idna
 
 DEFAULT_DEV_ORIGINS = (
     "http://localhost:3000",
     "http://127.0.0.1:3000",
 )
+
+_DNS_LABEL = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\Z")
+
+
+def _is_loopback_host(hostname: str) -> bool:
+    """Return whether a hostname is a loopback address or localhost name."""
+    normalized = hostname.rstrip(".").lower()
+    try:
+        return ipaddress.ip_address(normalized).is_loopback
+    except ValueError:
+        return normalized == "localhost" or normalized.endswith(".localhost")
+
+
+def _canonical_host(hostname: str) -> str:
+    """Return the URL-serialized, lower-case host or reject ambiguous forms."""
+    if not hostname or "%" in hostname:
+        raise ValueError("CORS origin host must not be empty or percent-encoded")
+
+    try:
+        address = ipaddress.ip_address(hostname)
+    except ValueError:
+        if ":" in hostname or all(char in "0123456789." for char in hostname):
+            raise ValueError(f"Invalid IP address in CORS origin: {hostname!r}")
+        # WHATWG URL parsing treats legacy numeric forms (127.1, 0177.0.0.1,
+        # 0x7f000001, and single-number IPv4) as IP addresses. Reject them
+        # instead of storing a hostname that browsers serialize differently.
+        if re.fullmatch(r"(?i)(?:0x[0-9a-f]+|[0-9]+)(?:\.(?:0x[0-9a-f]+|[0-9]+)){0,3}", hostname):
+            raise ValueError(f"Non-canonical IPv4-like host in CORS origin: {hostname!r}")
+
+        try:
+            # UTS #46 non-transitional processing matches modern browser URL
+            # host serialization (not Python's legacy IDNA 2003 codec).
+            ascii_host = idna.encode(
+                hostname, uts46=True, std3_rules=True
+            ).decode("ascii").lower()
+        except (idna.IDNAError, UnicodeError) as exc:
+            raise ValueError(f"Invalid hostname in CORS origin: {hostname!r}") from exc
+
+        # A trailing dot is valid DNS syntax and is preserved for exact origin
+        # matching, but empty/interior labels and malformed labels are rejected.
+        labels_host = ascii_host[:-1] if ascii_host.endswith(".") else ascii_host
+        labels = labels_host.split(".")
+        if (
+            not labels_host
+            or len(ascii_host) > 254
+            or any(not _DNS_LABEL.fullmatch(label) for label in labels)
+        ):
+            raise ValueError(f"Invalid hostname in CORS origin: {hostname!r}")
+        return ascii_host
+
+    if isinstance(address, ipaddress.IPv6Address):
+        return f"[{address.compressed}]"
+    return str(address)
 
 
 def parse_cors_origins(raw: str | None) -> list[str]:
@@ -13,12 +70,27 @@ def parse_cors_origins(raw: str | None) -> list[str]:
 
     None selects explicit local frontend origins for development. An empty
     string disables cross-origin access. Invalid configuration fails at startup
-    rather than silently widening the browser trust boundary.
+    rather than silently widening the browser trust boundary. Hostnames and
+    default ports are canonicalized so equivalent origins deduplicate and
+    match the browser's serialized Origin header. Cleartext HTTP is permitted
+    only for loopback development origins.
     """
     if raw is None:
         candidates = list(DEFAULT_DEV_ORIGINS)
+    elif not raw.strip():
+        # An explicitly blank value intentionally disables cross-origin access.
+        candidates = []
     else:
-        candidates = [item.strip() for item in raw.split(",") if item.strip()]
+        entries = raw.split(",")
+        # Keep the established convenience of one trailing comma, but reject
+        # leading or interior empty entries instead of silently dropping them.
+        if entries and not entries[-1].strip():
+            entries.pop()
+        if not entries or any(not item.strip() for item in entries):
+            raise ValueError(
+                "DATAOS_CORS_ORIGINS must not contain empty comma-separated entries"
+            )
+        candidates = [item.strip() for item in entries]
 
     origins: list[str] = []
     for candidate in candidates:
@@ -27,30 +99,46 @@ def parse_cors_origins(raw: str | None) -> list[str]:
                 "DATAOS_CORS_ORIGINS must list explicit origins; wildcard origins are forbidden"
             )
 
-        if any(char.isspace() for char in candidate) or "\\" in candidate:
+        # urlsplit strips some ASCII controls before parsing; reject them first
+        # so malformed configuration cannot normalize into a different origin.
+        if any(char.isspace() or ord(char) < 0x20 or ord(char) == 0x7F for char in candidate) or "\\" in candidate:
             raise ValueError(f"Invalid CORS origin: {candidate!r}")
 
-        parsed = urlsplit(candidate)
         try:
-            # Accessing .port validates that a supplied port is numeric and in range.
-            _ = parsed.port
+            parsed = urlsplit(candidate)
+            port = parsed.port
+            hostname = parsed.hostname
         except ValueError as exc:
             raise ValueError(f"Invalid CORS origin: {candidate!r}") from exc
 
+        scheme = parsed.scheme.lower()
         if (
-            parsed.scheme.lower() not in {"http", "https"}
-            or not parsed.hostname
+            scheme not in {"http", "https"}
+            or not hostname
             or parsed.username is not None
             or parsed.password is not None
             or parsed.path not in {"", "/"}
             or parsed.query
             or parsed.fragment
+            or "?" in candidate
+            or "#" in candidate
+            or parsed.netloc.endswith(":")
         ):
             raise ValueError(
                 f"Invalid CORS origin {candidate!r}; provide only scheme and host, with an optional port"
             )
 
-        origin = f"{parsed.scheme.lower()}://{parsed.netloc.lower()}"
+        if scheme == "http" and not _is_loopback_host(hostname):
+            raise ValueError(
+                f"Remote CORS origin {candidate!r} must use HTTPS; "
+                "HTTP is allowed only for loopback development"
+            )
+
+        host = _canonical_host(hostname)
+        if (scheme == "http" and port == 80) or (scheme == "https" and port == 443):
+            port = None
+        port_suffix = f":{port}" if port is not None else ""
+        origin = f"{scheme}://{host}{port_suffix}"
         if origin not in origins:
             origins.append(origin)
 
