@@ -61,23 +61,23 @@ class RelationCreateRequest(BaseModel):
     source_id: str
     target_id: str
     relation_type: str = "references"
-    confidence: float = 1.0
+    confidence: float = Field(default=1.0, ge=0.0, le=1.0)
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
 
 class SQLQueryRequest(BaseModel):
-    query: str
+    query: str = Field(min_length=1, max_length=20000)
     agent_or_user: str = "api_user"
 
 
 class PythonComputeRequest(BaseModel):
-    code: str
+    code: str = Field(min_length=1, max_length=100000)
     input_object_ids: List[str] = Field(default_factory=list)
     agent_or_user: str = "api_user"
 
 
 class UnifiedQueryRequest(BaseModel):
-    query: str
+    query: str = Field(min_length=1, max_length=20000)
     query_type: str = "auto"
     context_object_id: Optional[str] = None
     agent_or_user: str = "api_user"
@@ -526,17 +526,22 @@ async def get_quota_status_api(principal_id: str):
 
 
 class IssueSharingTokenRequest(BaseModel):
-    issuer: str
-    subject_principal: str
-    subgraph_root_id: str
-    allowed_object_ids: Optional[List[str]] = None
-    allowed_capabilities: Optional[List[str]] = None
-    duration_seconds: Optional[int] = 3600
+    issuer: str = Field(min_length=1, max_length=200)
+    subject_principal: str = Field(min_length=1, max_length=200)
+    subgraph_root_id: str = Field(min_length=1, max_length=200)
+    allowed_object_ids: Optional[List[str]] = Field(default=None, max_length=500)
+    allowed_capabilities: Optional[List[str]] = Field(default=None, max_length=50)
+    duration_seconds: int = Field(default=3600, ge=1, le=86400)
 
 
 @app.post("/api/sharing/issue_token", summary="Issue Cryptographically Signed Subgraph Token (Rule #65)")
 async def issue_sharing_token_api(req: IssueSharingTokenRequest):
-    if not 1 <= (req.duration_seconds or 0) <= 86400:
+    if not os.getenv("DATAOS_SHARING_TOKEN_SECRET"):
+        raise HTTPException(
+            status_code=503,
+            detail="Sharing tokens are disabled until DATAOS_SHARING_TOKEN_SECRET is configured.",
+        )
+    if not 1 <= req.duration_seconds <= 86400:
         raise HTTPException(status_code=422, detail="duration_seconds must be between 1 and 86400")
     token = dataos.tokens.issue_token(
         issuer=req.issuer,
@@ -555,6 +560,11 @@ class VerifySharingTokenRequest(BaseModel):
 
 @app.post("/api/sharing/verify_token", summary="Verify and Decode Sharing Token (Rule #65)")
 async def verify_sharing_token_api(req: VerifySharingTokenRequest):
+    if not os.getenv("DATAOS_SHARING_TOKEN_SECRET"):
+        raise HTTPException(
+            status_code=503,
+            detail="Sharing tokens are disabled until DATAOS_SHARING_TOKEN_SECRET is configured.",
+        )
     try:
         payload = dataos.tokens.verify_and_decode_token(req.token)
         import dataclasses
@@ -592,7 +602,7 @@ async def explain_object_impact(object_id: str):
 
 
 class AskDataOSRequest(BaseModel):
-    query: str
+    query: str = Field(min_length=1, max_length=20000)
 
 
 @app.post("/api/ask", summary="Ask DataOS Grounded System Query")
@@ -622,7 +632,7 @@ async def ingest_text(
     format_type: str = Form("text")
 ):
     # Ingest content directly; never construct a temporary path from client input.
-    safe_name = os.path.basename(filename.strip()) or "text.txt"
+    safe_name = os.path.basename(filename.strip().replace("\\", "/")) or "text.txt"
     if not os.path.splitext(safe_name)[1]:
         safe_name = f"{safe_name}.txt"
     return dataos.ingest(content, filename=safe_name, discover_relations=True)
