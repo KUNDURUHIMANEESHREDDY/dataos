@@ -33,6 +33,11 @@ def _canonical_host(hostname: str) -> str:
     except ValueError:
         if ":" in hostname or all(char in "0123456789." for char in hostname):
             raise ValueError(f"Invalid IP address in CORS origin: {hostname!r}")
+        # WHATWG URL parsing treats legacy numeric forms (127.1, 0177.0.0.1,
+        # 0x7f000001, and single-number IPv4) as IP addresses. Reject them
+        # instead of storing a hostname that browsers serialize differently.
+        if re.fullmatch(r"(?i)(?:0x[0-9a-f]+|[0-9]+)(?:\\.(?:0x[0-9a-f]+|[0-9]+)){0,3}", hostname):
+            raise ValueError(f"Non-canonical IPv4-like host in CORS origin: {hostname!r}")
 
         try:
             # UTS #46 non-transitional processing matches modern browser URL
