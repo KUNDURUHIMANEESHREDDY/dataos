@@ -158,6 +158,23 @@ def test_workflow_route_rejects_malformed_definition_and_duplicate_route_remains
     assert duplicate_exc.value.status_code == 501
 
 
+def test_workflow_route_rejects_overload_with_retry_after(monkeypatch):
+    # A saturated worker budget must fail fast instead of queueing more DAG work.
+    monkeypatch.setattr(
+        api,
+        "workflow_slots",
+        SimpleNamespace(acquire=lambda blocking=False: False, release=lambda: None),
+    )
+    request = api.WorkflowExecutionRequest(
+        definition={"nodes": {"n": {"action_type": "noop"}}}
+    )
+    with pytest.raises(HTTPException) as exc:
+        run(api.execute_workflow(request))
+    assert exc.value.status_code == 503
+    assert exc.value.headers["Retry-After"] == "1"
+    assert "capacity is full" in exc.value.detail
+
+
 def test_recommendation_routes_use_available_engines(monkeypatch):
     monkeypatch.setattr(api.dataos.graph, "recommendations", lambda object_id, top_k: [{"id": object_id, "top_k": top_k}])
     assert run(api.recommend_connections_api("obj-1", top_k=3)) == {
