@@ -59,6 +59,18 @@ class TestDualStorageBackends(unittest.TestCase):
         self.assertIsNotNone(rel_retrieved)
         self.assertEqual(rel_retrieved.confidence, 0.98)
 
+        low_confidence = store.save_relationship(Relationship(
+            source=obj.id, target=report_obj.id, relation_type=RelationType.REFERENCES.value, confidence=0.2
+        ))
+        high_confidence = store.save_relationship(Relationship(
+            source=obj.id, target=report_obj.id, relation_type=RelationType.REFERENCES.value, confidence=0.75
+        ))
+        self.assertEqual(store.count_relationships(source_id=obj.id, min_confidence=0.5), 2)
+        self.assertEqual(len(store.list_relationships(source_id=obj.id, min_confidence=0.5, limit=1, offset=0)), 1)
+        self.assertTrue(store.delete_relationship(high_confidence.id, soft=True))
+        self.assertEqual(store.count_relationships(source_id=obj.id, min_confidence=0.5), 1)
+        self.assertEqual(store.list_relationships(source_id=obj.id, min_confidence=0.5, limit=10), [rel_retrieved])
+
         # 3. Schema Lifecycle
         schema = store.save_schema(Schema(
             name="dataset.metrics.v1",

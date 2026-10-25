@@ -85,10 +85,40 @@ class StorageBackend(ABC):
         target_id: Optional[str] = None,
         relation_type: Optional[str] = None,
         min_confidence: float = 0.0,
-        limit: int = 1000
+        limit: int = 1000,
+        offset: int = 0
     ) -> List[Relationship]:
         """List relationships matching criteria."""
         pass
+
+    def count_relationships(
+        self,
+        source_id: Optional[str] = None,
+        target_id: Optional[str] = None,
+        relation_type: Optional[str] = None,
+        min_confidence: float = 0.0,
+    ) -> int:
+        """Count active matching relationships using bounded pages by default.
+
+        Storage backends should override this with COUNT(*) for efficient exact
+        totals. The fallback requires list_relationships to support offset.
+        """
+        total = 0
+        offset = 0
+        page_size = 500
+        while True:
+            page = self.list_relationships(
+                source_id=source_id,
+                target_id=target_id,
+                relation_type=relation_type,
+                min_confidence=min_confidence,
+                limit=page_size,
+                offset=offset,
+            )
+            total += len(page)
+            if len(page) < page_size:
+                return total
+            offset += len(page)
 
     @abstractmethod
     def delete_relationship(self, relation_id: str, soft: bool = True) -> bool:

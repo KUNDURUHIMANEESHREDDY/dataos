@@ -267,7 +267,7 @@ class CloudStorageBackend(StorageBackend):
             row = c.fetchone()
             return self._row_to_relationship(row) if row else None
 
-    def list_relationships(self, source_id=None, target_id=None, relation_type=None, min_confidence=0.0, limit=1000) -> List[Relationship]:
+    def list_relationships(self, source_id=None, target_id=None, relation_type=None, min_confidence=0.0, limit=1000, offset=0) -> List[Relationship]:
         """List Relationships with optional filters."""
         with self._lock:
             query = "SELECT * FROM relationships WHERE deleted_at IS NULL AND confidence >= ?"
@@ -281,11 +281,35 @@ class CloudStorageBackend(StorageBackend):
             if relation_type:
                 query += " AND relation_type = ?"
                 params.append(relation_type)
-            query += " LIMIT ?"
-            params.append(limit)
+            query += " ORDER BY confidence DESC, updated_at DESC LIMIT ? OFFSET ?"
+            params.extend([limit, offset])
             c = self._conn.cursor()
             c.execute(query, params)
             return [self._row_to_relationship(r) for r in c.fetchall()]
+
+    def count_relationships(
+        self,
+        source_id=None,
+        target_id=None,
+        relation_type=None,
+        min_confidence=0.0,
+    ) -> int:
+        """Count active relationships using the same predicates as list_relationships."""
+        with self._lock:
+            query = "SELECT COUNT(*) FROM relationships WHERE deleted_at IS NULL AND confidence >= ?"
+            params = [min_confidence]
+            if source_id:
+                query += " AND source_id = ?"
+                params.append(source_id)
+            if target_id:
+                query += " AND target_id = ?"
+                params.append(target_id)
+            if relation_type:
+                query += " AND relation_type = ?"
+                params.append(relation_type)
+            cursor = self._conn.cursor()
+            cursor.execute(query, params)
+            return int(cursor.fetchone()[0])
 
     def delete_relationship(self, relation_id: str, soft=True) -> bool:
         """Delete a Relationship by ID."""

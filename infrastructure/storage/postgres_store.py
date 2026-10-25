@@ -454,30 +454,37 @@ class PostgresStorage(StorageBackend):
                 created_at=r["created_at"], updated_at=r["updated_at"], deleted_at=r["deleted_at"]
             )
 
-    def delete_relationship(self, rel_id: str) -> bool:
-        """Delete a Relationship by ID."""
+    def delete_relationship(self, rel_id: str, soft: bool = True) -> bool:
+        """Delete or soft-delete a relationship, matching the StorageBackend contract."""
         if self._pg_conn and not self.mock_mode:
             with self._pg_conn.cursor() as cur:
-                cur.execute("DELETE FROM dataos_relationships WHERE id = %s", (rel_id,))
+                if soft:
+                    cur.execute("UPDATE dataos_relationships SET deleted_at = NOW() WHERE id = %s AND deleted_at IS NULL", (rel_id,))
+                else:
+                    cur.execute("DELETE FROM dataos_relationships WHERE id = %s", (rel_id,))
                 self._pg_conn.commit()
                 return cur.rowcount > 0
+        cur = self._fallback_db.cursor()
+        if soft:
+            cur.execute("UPDATE dataos_relationships SET deleted_at = CURRENT_TIMESTAMP WHERE id = ? AND deleted_at IS NULL", (rel_id,))
         else:
-            cur = self._fallback_db.cursor()
             cur.execute("DELETE FROM dataos_relationships WHERE id = ?", (rel_id,))
-            self._fallback_db.commit()
-            return cur.rowcount > 0
+        self._fallback_db.commit()
+        return cur.rowcount > 0
 
     def list_relationships(
         self,
         source_id: Optional[str] = None,
         target_id: Optional[str] = None,
         relation_type: Optional[str] = None,
-        limit: int = 1000
+        min_confidence: float = 0.0,
+        limit: int = 1000,
+        offset: int = 0,
     ) -> List[Relationship]:
-        """List Relationships with optional filters."""
+        """List active relationships with filters, stable ordering, and pagination."""
         if self._pg_conn and not self.mock_mode:
-            query = "SELECT * FROM dataos_relationships WHERE 1=1"
-            params = []
+            query = "SELECT * FROM dataos_relationships WHERE deleted_at IS NULL AND confidence >= %s"
+            params = [min_confidence]
             if source_id:
                 query += " AND source = %s"
                 params.append(source_id)
@@ -487,9 +494,8 @@ class PostgresStorage(StorageBackend):
             if relation_type:
                 query += " AND relation_type = %s"
                 params.append(relation_type)
-            query += " LIMIT %s"
-            params.append(limit)
-
+            query += " ORDER BY confidence DESC, updated_at DESC, id ASC LIMIT %s OFFSET %s"
+            params.extend([limit, offset])
             with self._pg_conn.cursor() as cur:
                 cur.execute(query, tuple(params))
                 rows = cur.fetchall()
@@ -501,32 +507,70 @@ class PostgresStorage(StorageBackend):
                     evidence=r[7] if isinstance(r[7], list) else json.loads(r[7]),
                     created_at=str(r[8]), updated_at=str(r[9]), deleted_at=str(r[10]) if r[10] else None
                 ) for r in rows]
-        else:
-            query = "SELECT * FROM dataos_relationships WHERE 1=1"
-            params = []
+
+        query = "SELECT * FROM dataos_relationships WHERE deleted_at IS NULL AND confidence >= ?"
+        params = [min_confidence]
+        if source_id:
+            query += " AND source = ?"
+            params.append(source_id)
+        if target_id:
+            query += " AND target = ?"
+            params.append(target_id)
+        if relation_type:
+            query += " AND relation_type = ?"
+            params.append(relation_type)
+        query += " ORDER BY confidence DESC, updated_at DESC, id ASC LIMIT ? OFFSET ?"
+        params.extend([limit, offset])
+        cur = self._fallback_db.cursor()
+        cur.execute(query, tuple(params))
+        rows = cur.fetchall()
+        return [Relationship(
+            id=r["id"], source=r["source"], target=r["target"], relation_type=r["relation_type"],
+            metadata=json.loads(r["metadata"]) if r["metadata"] else {},
+            confidence=r["confidence"],
+            provenance=json.loads(r["provenance"]) if r["provenance"] else {},
+            evidence=json.loads(r["evidence"]) if r["evidence"] else [],
+            created_at=r["created_at"], updated_at=r["updated_at"], deleted_at=r["deleted_at"]
+        ) for r in rows]
+
+    def count_relationships(
+        self,
+        source_id: Optional[str] = None,
+        target_id: Optional[str] = None,
+        relation_type: Optional[str] = None,
+        min_confidence: float = 0.0,
+    ) -> int:
+        """Count active relationships with the same predicates as list_relationships."""
+        if self._pg_conn and not self.mock_mode:
+            query = "SELECT COUNT(*) FROM dataos_relationships WHERE deleted_at IS NULL AND confidence >= %s"
+            params = [min_confidence]
             if source_id:
-                query += " AND source = ?"
+                query += " AND source = %s"
                 params.append(source_id)
             if target_id:
-                query += " AND target = ?"
+                query += " AND target = %s"
                 params.append(target_id)
             if relation_type:
-                query += " AND relation_type = ?"
+                query += " AND relation_type = %s"
                 params.append(relation_type)
-            query += " LIMIT ?"
-            params.append(limit)
+            with self._pg_conn.cursor() as cur:
+                cur.execute(query, tuple(params))
+                return int(cur.fetchone()[0])
 
-            cur = self._fallback_db.cursor()
-            cur.execute(query, tuple(params))
-            rows = cur.fetchall()
-            return [Relationship(
-                id=r["id"], source=r["source"], target=r["target"], relation_type=r["relation_type"],
-                metadata=json.loads(r["metadata"]) if r["metadata"] else {},
-                confidence=r["confidence"],
-                provenance=json.loads(r["provenance"]) if r["provenance"] else {},
-                evidence=json.loads(r["evidence"]) if r["evidence"] else [],
-                created_at=r["created_at"], updated_at=r["updated_at"], deleted_at=r["deleted_at"]
-            ) for r in rows]
+        query = "SELECT COUNT(*) FROM dataos_relationships WHERE deleted_at IS NULL AND confidence >= ?"
+        params = [min_confidence]
+        if source_id:
+            query += " AND source = ?"
+            params.append(source_id)
+        if target_id:
+            query += " AND target = ?"
+            params.append(target_id)
+        if relation_type:
+            query += " AND relation_type = ?"
+            params.append(relation_type)
+        cur = self._fallback_db.cursor()
+        cur.execute(query, tuple(params))
+        return int(cur.fetchone()[0])
 
     def get_version_history(self, object_id: str) -> List[Dict[str, Any]]:
         """Return version history for an object."""
