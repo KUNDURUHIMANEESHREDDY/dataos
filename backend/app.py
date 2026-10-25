@@ -15,6 +15,7 @@ from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Depends, Hea
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
+from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 
 from dataos_system import DataOS
@@ -539,7 +540,12 @@ async def execute_agent(req: AgentExecutionRequest):
 @app.post("/api/workflows/execute", summary="Execute a bounded built-in Workflow DAG")
 async def execute_workflow(req: WorkflowExecutionRequest):
     try:
-        return execute_safe_workflow(workflow_engine, req.definition, req.context)
+        # The DAG engine performs synchronous work and bounded retry sleeps.
+        # Run it in Starlette's worker pool so API requests and health checks
+        # are not blocked while a workflow is executing.
+        return await run_in_threadpool(
+            execute_safe_workflow, workflow_engine, req.definition, req.context
+        )
     except WorkflowRequestError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
