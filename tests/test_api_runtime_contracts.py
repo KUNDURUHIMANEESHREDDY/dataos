@@ -175,6 +175,28 @@ def test_workflow_route_rejects_overload_with_retry_after(monkeypatch):
     assert "capacity is full" in exc.value.detail
 
 
+def test_workflow_capacity_is_released_after_validation_error(monkeypatch):
+    class TrackingSlots:
+        active = False
+
+        def acquire(self, blocking=False):
+            if self.active:
+                return False
+            self.active = True
+            return True
+
+        def release(self):
+            assert self.active
+            self.active = False
+
+    slots = TrackingSlots()
+    monkeypatch.setattr(api, "workflow_slots", slots)
+    with pytest.raises(HTTPException) as exc:
+        run(api.execute_workflow(api.WorkflowExecutionRequest(definition={})))
+    assert exc.value.status_code == 422
+    assert slots.active is False
+
+
 def test_recommendation_routes_use_available_engines(monkeypatch):
     monkeypatch.setattr(api.dataos.graph, "recommendations", lambda object_id, top_k: [{"id": object_id, "top_k": top_k}])
     assert run(api.recommend_connections_api("obj-1", top_k=3)) == {
