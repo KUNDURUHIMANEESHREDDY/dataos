@@ -82,7 +82,11 @@ def parse_cors_origins(raw: str | None) -> list[str]:
         candidates = []
     else:
         entries = raw.split(",")
-        if any(not item.strip() for item in entries):
+        # Keep the established convenience of one trailing comma, but reject
+        # leading or interior empty entries instead of silently dropping them.
+        if entries and not entries[-1].strip():
+            entries.pop()
+        if not entries or any(not item.strip() for item in entries):
             raise ValueError(
                 "DATAOS_CORS_ORIGINS must not contain empty comma-separated entries"
             )
