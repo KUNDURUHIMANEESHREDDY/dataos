@@ -99,7 +99,9 @@ def parse_cors_origins(raw: str | None) -> list[str]:
                 "DATAOS_CORS_ORIGINS must list explicit origins; wildcard origins are forbidden"
             )
 
-        if any(char.isspace() for char in candidate) or "\\" in candidate:
+        # urlsplit strips some ASCII controls before parsing; reject them first
+        # so malformed configuration cannot normalize into a different origin.
+        if any(char.isspace() or ord(char) < 0x20 or ord(char) == 0x7F for char in candidate) or "\\" in candidate:
             raise ValueError(f"Invalid CORS origin: {candidate!r}")
 
         try:
