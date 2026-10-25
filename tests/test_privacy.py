@@ -110,6 +110,25 @@ class TestEncryptionEngine(unittest.TestCase):
         with self.assertRaises(EncryptionError):
             EncryptionEngine(master_key="   ")
 
+    def test_explicit_missing_key_file_fails_closed(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            missing_path = os.path.join(temp_dir, "missing.key")
+            with patch.dict(os.environ, {}, clear=True):
+                with self.assertRaisesRegex(EncryptionError, "regular non-symlink"):
+                    EncryptionEngine(key_file=missing_path)
+
+    def test_explicit_dangling_key_symlink_fails_closed(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            target_path = os.path.join(temp_dir, "missing-target.key")
+            key_path = os.path.join(temp_dir, "key-link")
+            try:
+                os.symlink(target_path, key_path)
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest(f"symlink creation is unavailable on this runner: {exc}")
+            with patch.dict(os.environ, {}, clear=True):
+                with self.assertRaisesRegex(EncryptionError, "regular non-symlink"):
+                    EncryptionEngine(key_file=key_path)
+
     def test_key_file_accepts_exact_32_byte_raw_key(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             key_path = os.path.join(temp_dir, "key.bin")
