@@ -72,8 +72,13 @@ class EncryptionEngine:
             # permission to silently switch to a different encryption key.
             self._init_from_password(env_key)
         else:
-            environment = os.environ.get("DATAOS_ENV", "").strip().lower()
-            if environment in {"production", "prod"}:
+            # Treat every supported deployment environment marker as authoritative.
+            # If any marker says production, never silently create an ephemeral key.
+            environments = {
+                os.environ.get(name, "").strip().lower()
+                for name in ("DATAOS_ENV", "APP_ENV", "ENVIRONMENT")
+            }
+            if environments.intersection({"production", "prod"}):
                 raise EncryptionError(
                     "DATAOS_MASTER_KEY must be configured in production; refusing an ephemeral key"
                 )
