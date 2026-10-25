@@ -200,13 +200,27 @@ class CloudStorageBackend(StorageBackend):
                 query += " AND type = ?"
                 params.append(object_type)
             if source:
-                query += " AND source = ?"
-                params.append(source)
+                query += " AND source LIKE ?"
+                params.append(f"%{source}%")
             query += " ORDER BY created_at DESC LIMIT ? OFFSET ?"
             params.extend([limit, offset])
             c = self._conn.cursor()
             c.execute(query, params)
             return [self._row_to_object(r) for r in c.fetchall()]
+
+    def count_objects(self, object_type=None, source=None) -> int:
+        """Count indexed objects using the same filters as list_objects."""
+        with self._lock:
+            query = "SELECT COUNT(*) FROM objects WHERE deleted_at IS NULL"
+            params = []
+            if object_type:
+                query += " AND type = ?"
+                params.append(object_type)
+            if source:
+                query += " AND source LIKE ?"
+                params.append(f"%{source}%")
+            row = self._conn.execute(query, params).fetchone()
+            return int(row[0])
 
     def delete_object(self, object_id: str, soft=True) -> bool:
         """Delete a DataObject by ID."""

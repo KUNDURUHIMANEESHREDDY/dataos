@@ -277,6 +277,28 @@ class SQLiteStorage(StorageBackend):
 
             return [self._row_to_object(r) for r in rows]
 
+    def count_objects(
+        self,
+        object_type: Optional[str] = None,
+        source: Optional[str] = None,
+    ) -> int:
+        """Count non-deleted objects matching the same filters as list_objects."""
+        with self._lock:
+            conn = self._get_connection()
+            try:
+                query = "SELECT COUNT(*) FROM objects WHERE deleted_at IS NULL"
+                params = []
+                if object_type:
+                    query += " AND type = ?"
+                    params.append(object_type)
+                if source:
+                    query += " AND source LIKE ?"
+                    params.append(f"%{source}%")
+                row = conn.execute(query, params).fetchone()
+                return int(row[0])
+            finally:
+                self._close(conn)
+
     def delete_object(self, object_id: str, soft: bool = True) -> bool:
         """Delete a DataObject by ID."""
         with self._lock:

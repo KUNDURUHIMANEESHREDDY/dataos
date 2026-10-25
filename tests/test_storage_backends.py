@@ -43,6 +43,12 @@ class TestDualStorageBackends(unittest.TestCase):
             type=ObjectType.REPORT.value,
             properties={"title": "Performance Report"}
         ))
+
+        # Counts describe the full filtered collection, not just the first page.
+        self.assertEqual(store.count_objects(), 2)
+        self.assertEqual(store.count_objects(object_type=ObjectType.DATASET.value), 1)
+        self.assertEqual(store.count_objects(source="internal"), 2)
+
         rel = store.save_relationship(Relationship(
             source=obj.id,
             target=report_obj.id,

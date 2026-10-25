@@ -110,7 +110,8 @@ async def list_objects(
     offset: int = FastQuery(default=0, ge=0, le=1_000_000)
 ):
     objs = dataos.storage.list_objects(object_type=object_type, source=source, limit=limit, offset=offset)
-    return {"total": len(objs), "objects": [o.to_dict() for o in objs]}
+    total = dataos.storage.count_objects(object_type=object_type, source=source)
+    return {"total": total, "objects": [o.to_dict() for o in objs]}
 
 
 @app.post("/api/objects/", summary="Create DataOS Object")

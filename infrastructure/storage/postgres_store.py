@@ -290,44 +290,104 @@ class PostgresStorage(StorageBackend):
             self._fallback_db.commit()
             return cur.rowcount > 0
 
-    def list_objects(self, object_type: Optional[str] = None, limit: int = 100, offset: int = 0) -> List[DataObject]:
-        """List DataObjects with optional filters."""
+    def count_objects(
+        self,
+        object_type: Optional[str] = None,
+        source: Optional[str] = None,
+    ) -> int:
+        """Count objects using the same type/source filters as list_objects."""
         if self._pg_conn and not self.mock_mode:
-            with self._pg_conn.cursor() as cur:
-                if object_type:
-                    cur.execute("SELECT * FROM dataos_objects WHERE type = %s LIMIT %s OFFSET %s", (object_type, limit, offset))
-                else:
-                    cur.execute("SELECT * FROM dataos_objects LIMIT %s OFFSET %s", (limit, offset))
-                rows = cur.fetchall()
-                return [DataObject.from_dict({
-                    "id": r[0], "type": r[1], "schema": r[2],
-                    "properties": r[3] if isinstance(r[3], dict) else json.loads(r[3]),
-                    "content": r[4] if (isinstance(r[4], (dict, list)) or r[4] is None) else json.loads(r[4]),
-                    "provenance": r[5] if isinstance(r[5], dict) else json.loads(r[5]),
-                    "permissions": r[6] if isinstance(r[6], dict) else json.loads(r[6]),
-                    "timestamps": r[7] if isinstance(r[7], dict) else json.loads(r[7]),
-                    "version": r[8], "source": r[9],
-                    "metadata": r[10] if isinstance(r[10], dict) else json.loads(r[10]),
-                    "indexes": r[11] if isinstance(r[11], dict) else json.loads(r[11])
-                }) for r in rows]
-        else:
-            cur = self._fallback_db.cursor()
+            clauses = []
+            params = []
             if object_type:
-                cur.execute("SELECT * FROM dataos_objects WHERE type = ? LIMIT ? OFFSET ?", (object_type, limit, offset))
-            else:
-                cur.execute("SELECT * FROM dataos_objects LIMIT ? OFFSET ?", (limit, offset))
-            rows = cur.fetchall()
+                clauses.append("type = %s")
+                params.append(object_type)
+            if source:
+                clauses.append("source ILIKE %s")
+                params.append(f"%{source}%")
+            query = "SELECT COUNT(*) FROM dataos_objects"
+            if clauses:
+                query += " WHERE " + " AND ".join(clauses)
+            with self._pg_conn.cursor() as cur:
+                cur.execute(query, tuple(params))
+                return int(cur.fetchone()[0])
+
+        clauses = []
+        params = []
+        if object_type:
+            clauses.append("type = ?")
+            params.append(object_type)
+        if source:
+            clauses.append("source LIKE ?")
+            params.append(f"%{source}%")
+        query = "SELECT COUNT(*) FROM dataos_objects"
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        row = self._fallback_db.execute(query, params).fetchone()
+        return int(row[0])
+
+    def list_objects(
+        self,
+        object_type: Optional[str] = None,
+        source: Optional[str] = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> List[DataObject]:
+        """List objects with optional type/source filters and stable ordering."""
+        if self._pg_conn and not self.mock_mode:
+            clauses = []
+            params = []
+            if object_type:
+                clauses.append("type = %s")
+                params.append(object_type)
+            if source:
+                clauses.append("source ILIKE %s")
+                params.append(f"%{source}%")
+            query = "SELECT * FROM dataos_objects"
+            if clauses:
+                query += " WHERE " + " AND ".join(clauses)
+            query += " ORDER BY id ASC LIMIT %s OFFSET %s"
+            params.extend([limit, offset])
+            with self._pg_conn.cursor() as cur:
+                cur.execute(query, tuple(params))
+                rows = cur.fetchall()
             return [DataObject.from_dict({
-                "id": r["id"], "type": r["type"], "schema": r["schema"],
-                "properties": json.loads(r["properties"]),
-                "content": json.loads(r["content"]) if r["content"] else None,
-                "provenance": json.loads(r["provenance"]),
-                "permissions": json.loads(r["permissions"]),
-                "timestamps": json.loads(r["timestamps"]),
-                "version": r["version"], "source": r["source"],
-                "metadata": json.loads(r["metadata"]) if r["metadata"] else {},
-                "indexes": json.loads(r["indexes"]) if r["indexes"] else {}
+                "id": r[0], "type": r[1], "schema": r[2],
+                "properties": r[3] if isinstance(r[3], dict) else json.loads(r[3]),
+                "content": r[4] if (isinstance(r[4], (dict, list)) or r[4] is None) else json.loads(r[4]),
+                "provenance": r[5] if isinstance(r[5], dict) else json.loads(r[5]),
+                "permissions": r[6] if isinstance(r[6], dict) else json.loads(r[6]),
+                "timestamps": r[7] if isinstance(r[7], dict) else json.loads(r[7]),
+                "version": r[8], "source": r[9],
+                "metadata": r[10] if isinstance(r[10], dict) else json.loads(r[10]),
+                "indexes": r[11] if isinstance(r[11], dict) else json.loads(r[11])
             }) for r in rows]
+
+        clauses = []
+        params = []
+        if object_type:
+            clauses.append("type = ?")
+            params.append(object_type)
+        if source:
+            clauses.append("source LIKE ?")
+            params.append(f"%{source}%")
+        query = "SELECT * FROM dataos_objects"
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY id ASC LIMIT ? OFFSET ?"
+        params.extend([limit, offset])
+        rows = self._fallback_db.execute(query, params).fetchall()
+        return [DataObject.from_dict({
+            "id": r["id"], "type": r["type"], "schema": r["schema"],
+            "properties": json.loads(r["properties"]),
+            "content": json.loads(r["content"]) if r["content"] else None,
+            "provenance": json.loads(r["provenance"]),
+            "permissions": json.loads(r["permissions"]),
+            "timestamps": json.loads(r["timestamps"]),
+            "version": r["version"], "source": r["source"],
+            "metadata": json.loads(r["metadata"]) if r["metadata"] else {},
+            "indexes": json.loads(r["indexes"]) if r["indexes"] else {}
+        }) for r in rows]
 
     def save_relationship(self, rel: Relationship) -> Relationship:
         """Save a Relationship to PostgreSQL."""

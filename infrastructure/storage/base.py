@@ -38,6 +38,31 @@ class StorageBackend(ABC):
         """List objects with optional filtering."""
         pass
 
+    def count_objects(
+        self,
+        object_type: Optional[str] = None,
+        source: Optional[str] = None,
+    ) -> int:
+        """Count matching objects. Database backends should override with COUNT(*).
+
+        The paginated fallback keeps third-party StorageBackend implementations
+        compatible while avoiding an unbounded single list request.
+        """
+        total = 0
+        offset = 0
+        page_size = 500
+        while True:
+            page = self.list_objects(
+                object_type=object_type,
+                source=source,
+                limit=page_size,
+                offset=offset,
+            )
+            total += len(page)
+            if len(page) < page_size:
+                return total
+            offset += len(page)
+
     @abstractmethod
     def delete_object(self, object_id: str, soft: bool = True) -> bool:
         """Delete an object (soft by default to preserve provenance)."""
