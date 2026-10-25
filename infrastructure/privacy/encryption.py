@@ -11,6 +11,7 @@ import base64
 import hashlib
 import secrets
 import tempfile
+import stat
 from typing import Dict, Any, Optional, Tuple
 import warnings
 
@@ -110,13 +111,61 @@ class EncryptionEngine:
                 os.link(temp_path, salt_path)
                 salt = candidate
             except FileExistsError:
-                with open(salt_path, "rb") as salt_file:
-                    salt = salt_file.read()
+                salt = self._read_existing_salt(salt_path)
         finally:
             try:
                 os.unlink(temp_path)
             except FileNotFoundError:
                 pass
+
+        if len(salt) != 16:
+            raise EncryptionError(
+                "Encryption salt file must contain exactly 16 bytes; restore the persistent salt before starting"
+            )
+        return salt
+
+    @staticmethod
+    def _read_existing_salt(salt_path: str) -> bytes:
+        """Read a bounded, regular salt file without following symlinks."""
+        nofollow = getattr(os, "O_NOFOLLOW", 0)
+        flags = os.O_RDONLY | nofollow | getattr(os, "O_BINARY", 0)
+        before = None
+        if not nofollow:
+            # Platforms without O_NOFOLLOW get a lstat/open/fstat identity
+            # check so a path swapped to a symlink is rejected.
+            try:
+                before = os.lstat(salt_path)
+            except OSError as exc:
+                raise EncryptionError("Encryption salt file must be a regular non-symlink file") from exc
+            if stat.S_ISLNK(before.st_mode):
+                raise EncryptionError("Encryption salt file must be a regular non-symlink file")
+
+        try:
+            fd = os.open(salt_path, flags)
+        except OSError as exc:
+            raise EncryptionError("Encryption salt file must be a regular non-symlink file") from exc
+
+        try:
+            metadata = os.fstat(fd)
+            if not stat.S_ISREG(metadata.st_mode):
+                raise EncryptionError("Encryption salt file must be a regular non-symlink file")
+            if before is not None:
+                try:
+                    current = os.lstat(salt_path)
+                except OSError as exc:
+                    raise EncryptionError("Encryption salt file changed while being opened") from exc
+                if (
+                    stat.S_ISLNK(current.st_mode)
+                    or (current.st_dev, current.st_ino) != (metadata.st_dev, metadata.st_ino)
+                ):
+                    raise EncryptionError("Encryption salt file changed while being opened")
+
+            with os.fdopen(fd, "rb") as salt_file:
+                fd = -1
+                salt = salt_file.read(17)
+        finally:
+            if fd != -1:
+                os.close(fd)
 
         if len(salt) != 16:
             raise EncryptionError(
