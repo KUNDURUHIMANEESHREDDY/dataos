@@ -106,8 +106,8 @@ class WorkflowExecutionRequest(BaseModel):
 async def list_objects(
     object_type: Optional[str] = None,
     source: Optional[str] = None,
-    limit: int = 100,
-    offset: int = 0
+    limit: int = FastQuery(default=100, ge=1, le=500),
+    offset: int = FastQuery(default=0, ge=0)
 ):
     objs = dataos.storage.list_objects(object_type=object_type, source=source, limit=limit, offset=offset)
     return {"total": len(objs), "objects": [o.to_dict() for o in objs]}
