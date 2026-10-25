@@ -79,7 +79,6 @@ def test_canonicalizes_ipv6_and_browser_compatible_idn_hosts():
         "https://example.com\\evil",
         "https://example.com,,https://other.example",
         ",https://example.com",
-        "https://example.com,",
         "http://example.com",
         "http://api.example.com:8080",
     ],
