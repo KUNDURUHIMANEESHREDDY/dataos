@@ -32,21 +32,28 @@ def test_relationship_list_total_counts_all_filtered_rows(monkeypatch, tmp_path)
     store = SQLiteStorage(str(tmp_path / "relationships.sqlite"))
     monkeypatch.setattr(api.dataos, "storage", store)
     try:
-        store.save_relationship(Relationship(source="source-a", target="target-1", relation_type="references", confidence=0.9))
-        store.save_relationship(Relationship(source="source-a", target="target-2", relation_type="references", confidence=0.8))
-        store.save_relationship(Relationship(source="source-a", target="target-3", relation_type="references", confidence=0.2))
-        store.save_relationship(Relationship(source="source-b", target="target-4", relation_type="references", confidence=0.95))
+        source_a = store.save_object(DataObject(type="dataset", source="api://source-a"))
+        source_b = store.save_object(DataObject(type="dataset", source="api://source-b"))
+        target_1 = store.save_object(DataObject(type="report", source="api://target-1"))
+        target_2 = store.save_object(DataObject(type="report", source="api://target-2"))
+        target_3 = store.save_object(DataObject(type="report", source="api://target-3"))
+        target_4 = store.save_object(DataObject(type="report", source="api://target-4"))
+
+        store.save_relationship(Relationship(source=source_a.id, target=target_1.id, relation_type="references", confidence=0.9))
+        store.save_relationship(Relationship(source=source_a.id, target=target_2.id, relation_type="references", confidence=0.8))
+        store.save_relationship(Relationship(source=source_a.id, target=target_3.id, relation_type="references", confidence=0.2))
+        store.save_relationship(Relationship(source=source_b.id, target=target_4.id, relation_type="references", confidence=0.95))
 
         response = asyncio.run(
-            api.list_relationships(source_id="source-a", min_confidence=0.5, limit=1, offset=0)
+            api.list_relationships(source_id=source_a.id, min_confidence=0.5, limit=1, offset=0)
         )
         assert response["total"] == 2
         assert len(response["relationships"]) == 1
 
-        visible = store.list_relationships(source_id="source-a", min_confidence=0.5, limit=1)
+        visible = store.list_relationships(source_id=source_a.id, min_confidence=0.5, limit=1)
         assert store.delete_relationship(visible[0].id, soft=True)
         after_delete = asyncio.run(
-            api.list_relationships(source_id="source-a", min_confidence=0.5, limit=1, offset=0)
+            api.list_relationships(source_id=source_a.id, min_confidence=0.5, limit=1, offset=0)
         )
         assert after_delete["total"] == 1
     finally:
