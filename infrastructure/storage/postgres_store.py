@@ -60,7 +60,8 @@ class PostgresStorage(StorageBackend):
                     version INT NOT NULL DEFAULT 1,
                     source TEXT,
                     metadata JSONB,
-                    indexes JSONB
+                    indexes JSONB,
+                    deleted_at TIMESTAMP WITH TIME ZONE
                 );
                 CREATE TABLE IF NOT EXISTS dataos_relationships (
                     id VARCHAR(255) PRIMARY KEY,
@@ -107,6 +108,8 @@ class PostgresStorage(StorageBackend):
                     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
                 );
             """)
+            # Additive migration for databases created by older versions.
+            cur.execute("ALTER TABLE dataos_objects ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMP WITH TIME ZONE")
             self._pg_conn.commit()
 
     def _init_sqlite_schema(self):
@@ -125,7 +128,8 @@ class PostgresStorage(StorageBackend):
                 version INTEGER NOT NULL DEFAULT 1,
                 source TEXT,
                 metadata TEXT,
-                indexes TEXT
+                indexes TEXT,
+                deleted_at TEXT
             );
         """)
         cur.execute("""
@@ -243,7 +247,7 @@ class PostgresStorage(StorageBackend):
         """Retrieve a DataObject by ID."""
         if self._pg_conn and not self.mock_mode:
             with self._pg_conn.cursor() as cur:
-                cur.execute("SELECT * FROM dataos_objects WHERE id = %s", (object_id,))
+                cur.execute("SELECT * FROM dataos_objects WHERE id = %s AND deleted_at IS NULL", (object_id,))
                 row = cur.fetchone()
                 if not row:
                     return None
@@ -261,7 +265,7 @@ class PostgresStorage(StorageBackend):
                 })
         else:
             cur = self._fallback_db.cursor()
-            cur.execute("SELECT * FROM dataos_objects WHERE id = ?", (object_id,))
+            cur.execute("SELECT * FROM dataos_objects WHERE id = ? AND deleted_at IS NULL", (object_id,))
             row = cur.fetchone()
             if not row:
                 return None
@@ -277,18 +281,30 @@ class PostgresStorage(StorageBackend):
                 "indexes": json.loads(row["indexes"]) if row["indexes"] else {}
             })
 
-    def delete_object(self, object_id: str) -> bool:
-        """Delete a DataObject by ID."""
+    def delete_object(self, object_id: str, soft: bool = True) -> bool:
+        """Delete or soft-delete a DataObject, matching the StorageBackend contract."""
         if self._pg_conn and not self.mock_mode:
             with self._pg_conn.cursor() as cur:
-                cur.execute("DELETE FROM dataos_objects WHERE id = %s", (object_id,))
+                if soft:
+                    cur.execute(
+                        "UPDATE dataos_objects SET deleted_at = NOW() WHERE id = %s AND deleted_at IS NULL",
+                        (object_id,),
+                    )
+                else:
+                    cur.execute("DELETE FROM dataos_objects WHERE id = %s", (object_id,))
                 self._pg_conn.commit()
                 return cur.rowcount > 0
+
+        cur = self._fallback_db.cursor()
+        if soft:
+            cur.execute(
+                "UPDATE dataos_objects SET deleted_at = CURRENT_TIMESTAMP WHERE id = ? AND deleted_at IS NULL",
+                (object_id,),
+            )
         else:
-            cur = self._fallback_db.cursor()
             cur.execute("DELETE FROM dataos_objects WHERE id = ?", (object_id,))
-            self._fallback_db.commit()
-            return cur.rowcount > 0
+        self._fallback_db.commit()
+        return cur.rowcount > 0
 
     def count_objects(
         self,
@@ -305,9 +321,9 @@ class PostgresStorage(StorageBackend):
             if source:
                 clauses.append("source ILIKE %s")
                 params.append(f"%{source}%")
-            query = "SELECT COUNT(*) FROM dataos_objects"
+            query = "SELECT COUNT(*) FROM dataos_objects WHERE deleted_at IS NULL"
             if clauses:
-                query += " WHERE " + " AND ".join(clauses)
+                query += " AND " + " AND ".join(clauses)
             with self._pg_conn.cursor() as cur:
                 cur.execute(query, tuple(params))
                 return int(cur.fetchone()[0])
@@ -343,9 +359,9 @@ class PostgresStorage(StorageBackend):
             if source:
                 clauses.append("source ILIKE %s")
                 params.append(f"%{source}%")
-            query = "SELECT * FROM dataos_objects"
+            query = "SELECT * FROM dataos_objects WHERE deleted_at IS NULL"
             if clauses:
-                query += " WHERE " + " AND ".join(clauses)
+                query += " AND " + " AND ".join(clauses)
             query += " ORDER BY id ASC LIMIT %s OFFSET %s"
             params.extend([limit, offset])
             with self._pg_conn.cursor() as cur:
