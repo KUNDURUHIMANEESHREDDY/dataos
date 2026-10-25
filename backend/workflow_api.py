@@ -73,7 +73,7 @@ def execute_safe_workflow(engine: Any, definition: Any, context: Any) -> dict[st
             raise WorkflowRequestError("per-node timeouts are not supported until runtime enforcement is available")
 
         action = node.get("action_type")
-        if action not in _ALLOWED_ACTIONS:
+        if not isinstance(action, str) or action not in _ALLOWED_ACTIONS:
             raise WorkflowRequestError(
                 f"node {node_id!r} action_type must be one of: {', '.join(sorted(_ALLOWED_ACTIONS))}"
             )
@@ -83,7 +83,12 @@ def execute_safe_workflow(engine: Any, definition: Any, context: Any) -> dict[st
             raise WorkflowRequestError(f"node {node_id!r} parameters must be an object")
         if action == "set_variable":
             variable_name = parameters.get("name")
-            if not isinstance(variable_name, str) or not variable_name or len(variable_name) > 128:
+            if (
+                not isinstance(variable_name, str)
+                or not variable_name
+                or len(variable_name) > 128
+                or variable_name == "execution_id"
+            ):
                 raise WorkflowRequestError(f"node {node_id!r} set_variable requires a name up to 128 characters")
         if action == "log":
             message = parameters.get("message", "")
@@ -119,7 +124,7 @@ def execute_safe_workflow(engine: Any, definition: Any, context: Any) -> dict[st
             operator = condition.get("operator", "==")
             if not isinstance(field, str) or not field or len(field) > 128:
                 raise WorkflowRequestError(f"node {node_id!r} condition field must be a non-empty string")
-            if operator not in _ALLOWED_CONDITIONS:
+            if not isinstance(operator, str) or operator not in _ALLOWED_CONDITIONS:
                 raise WorkflowRequestError(f"node {node_id!r} condition operator is unsupported")
             if operator == "in" and not isinstance(condition.get("value"), list):
                 raise WorkflowRequestError(f"node {node_id!r} 'in' condition requires a list value")
