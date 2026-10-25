@@ -427,7 +427,7 @@ class PostgresStorage(StorageBackend):
         """Retrieve a Relationship by ID."""
         if self._pg_conn and not self.mock_mode:
             with self._pg_conn.cursor() as cur:
-                cur.execute("SELECT * FROM dataos_relationships WHERE id = %s", (rel_id,))
+                cur.execute("SELECT * FROM dataos_relationships WHERE id = %s AND deleted_at IS NULL", (rel_id,))
                 r = cur.fetchone()
                 if not r:
                     return None
@@ -441,7 +441,7 @@ class PostgresStorage(StorageBackend):
                 )
         else:
             cur = self._fallback_db.cursor()
-            cur.execute("SELECT * FROM dataos_relationships WHERE id = ?", (rel_id,))
+            cur.execute("SELECT * FROM dataos_relationships WHERE id = ? AND deleted_at IS NULL", (rel_id,))
             r = cur.fetchone()
             if not r:
                 return None
