@@ -167,7 +167,7 @@ async def list_relationships(
 
 @app.post("/api/relationships/", summary="Create Relationship")
 async def create_relationship(req: RelationCreateRequest):
-    rel = dataos.create_relationship(
+    rel = dataos.graph.create_relation(
         source_id=req.source_id,
         target_id=req.target_id,
         relation_type=req.relation_type,
@@ -179,30 +179,36 @@ async def create_relationship(req: RelationCreateRequest):
 
 @app.get("/api/graph/neighbors/{object_id}", summary="Get Object Neighbors")
 async def get_neighbors(object_id: str, direction: str = "both"):
-    neighbors = dataos.get_neighbors(object_id, direction=direction)
+    neighbors = dataos.graph.neighbors(object_id, direction=direction)
     return {"object_id": object_id, "total": len(neighbors), "neighbors": neighbors}
 
 
 @app.get("/api/graph/traverse/{object_id}", summary="Multi-Hop Graph Traversal")
-async def traverse_graph(object_id: str, max_hops: int = 3, min_confidence: float = 0.0):
-    traversal = dataos.graph.traverse(start_id=object_id, max_hops=max_hops, min_confidence=min_confidence)
-    return traversal
+async def traverse_graph(
+    object_id: str,
+    max_hops: int = FastQuery(default=3, ge=1, le=10),
+    min_confidence: float = FastQuery(default=0.0, ge=0.0, le=1.0),
+):
+    return dataos.graph.engine.traverse(
+        start_id=object_id,
+        max_hops=max_hops,
+        min_confidence=min_confidence,
+    )
 
 
 @app.get("/api/graph/analytics", summary="Graph Analytics & PageRank")
 async def graph_analytics(algorithm: str = "pagerank"):
+    metrics = dataos.graph.analytics()
     if algorithm == "pagerank":
-        scores = dataos.graph_analytics.compute_pagerank()
-        return {"algorithm": "pagerank", "scores": scores}
-    elif algorithm == "centrality":
-        deg = dataos.graph_analytics.compute_degree_centrality()
-        bc = dataos.graph_analytics.compute_betweenness_centrality()
-        return {"degree_centrality": deg, "betweenness_centrality": bc}
-    elif algorithm == "communities":
-        comms = dataos.graph_analytics.detect_communities()
-        return {"communities": comms}
-    else:
-        raise HTTPException(status_code=400, detail=f"Unsupported algorithm: {algorithm}")
+        return {"algorithm": "pagerank", "scores": metrics["pagerank"]}
+    if algorithm == "centrality":
+        return {
+            "degree_centrality": metrics["degree_centrality"],
+            "betweenness_centrality": metrics["betweenness_centrality"],
+        }
+    if algorithm == "communities":
+        return {"communities": metrics["communities"]}
+    raise HTTPException(status_code=400, detail=f"Unsupported algorithm: {algorithm}")
 
 
 # =============================================================================
@@ -211,25 +217,39 @@ async def graph_analytics(algorithm: str = "pagerank"):
 
 @app.post("/api/compute/sql", summary="Execute SQL Query")
 async def compute_sql(req: SQLQueryRequest):
-    res = dataos.execute_sql(req.query)
+    res = dataos.sql(req.query)
     return res
 
 
 @app.post("/api/compute/python", summary="Execute Python Sandbox")
 async def compute_python(req: PythonComputeRequest):
-    res = dataos.execute_python(req.code, input_object_ids=req.input_object_ids)
+    res = dataos.python(req.code, input_object_ids=req.input_object_ids)
     return res
 
 
 @app.post("/api/query/", summary="Unified Query Execution")
 async def query_unified(req: UnifiedQueryRequest):
-    res = dataos.query.execute_query(
-        query_text=req.query,
-        query_type=req.query_type,
-        context_object_id=req.context_object_id,
-        agent_or_user=req.agent_or_user
+    query_type = req.query_type.strip().lower()
+    if query_type == "auto":
+        query_type = "sql" if req.query.lstrip().lower().startswith(("select ", "with ")) else "ask"
+
+    if query_type == "sql":
+        return dataos.sql(req.query)
+    if query_type == "python":
+        return dataos.python(req.query)
+    if query_type in {"ask", "natural_language"}:
+        return dataos.ask(req.query)
+    if query_type == "search":
+        results = dataos.search_engine.search(
+            query=req.query,
+            context_object_id=req.context_object_id,
+            limit=20,
+        )
+        return {"query": req.query, "total_matches": len(results), "results": results}
+    raise HTTPException(
+        status_code=400,
+        detail="Unsupported query_type. Use auto, sql, python, ask, or search.",
     )
-    return res
 
 
 # =============================================================================
@@ -241,16 +261,21 @@ async def hybrid_search(
     q: str = FastQuery(..., description="Search query string"),
     object_type: Optional[str] = None,
     context_id: Optional[str] = None,
-    limit: int = 20
+    limit: int = FastQuery(default=20, ge=1, le=100)
 ):
-    results = dataos.search.search(query=q, object_type=object_type, context_object_id=context_id, limit=limit)
+    results = dataos.search_engine.search(
+        query=q,
+        object_type=object_type,
+        context_object_id=context_id,
+        limit=limit,
+    )
     return {"query": q, "total_matches": len(results), "results": results}
 
 
 @app.get("/api/vectors/search", summary="Persistent Vector Similarity Search (Rule #45)")
 async def search_vectors(
     q: str = FastQuery(..., description="Semantic query string"),
-    top_k: int = 10
+    top_k: int = FastQuery(default=10, ge=1, le=100),
 ):
     results = dataos.search_vector(query_text=q, top_k=top_k)
     return {"query": q, "total_matches": len(results), "results": results}
@@ -258,8 +283,7 @@ async def search_vectors(
 
 @app.post("/api/vectors/recompute", summary="Recompute All Vector Embeddings (Rule #45)")
 async def recompute_vectors():
-    res = dataos.recompute_vector_index()
-    return res
+    return dataos.vector_index.recompute_all(dataos.storage)
 
 
 @app.post("/api/notebooks/ingest", summary="Ingest Jupyter Notebook DAG (Rule #51)")
@@ -267,8 +291,10 @@ async def ingest_notebook_api(
     filename: str = Form("analysis.ipynb"),
     content: str = Form(...)
 ):
-    res = dataos.ingest_notebook(notebook_json_str=content, filename=filename)
-    return res
+    try:
+        return dataos.ingest(content, filename=filename, discover_relations=True)
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=422, detail=f"Notebook ingestion failed: {exc}") from exc
 
 
 @app.post("/api/documents/extract_rich", summary="Extract Rich Document Tables & Citations (Rule #54)")
@@ -276,8 +302,10 @@ async def extract_rich_document_api(
     filename: str = Form("paper.md"),
     content: str = Form(...)
 ):
-    res = dataos.ingest_rich_document(content_str=content, filename=filename)
-    return res
+    try:
+        return dataos.ingest(content, filename=filename, discover_relations=True)
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=422, detail=f"Document ingestion failed: {exc}") from exc
 
 
 # =============================================================================
@@ -290,7 +318,9 @@ async def time_travel_object(
     as_of: str = FastQuery(..., description="Timestamp ISO string to travel to"),
     temporal_axis: str = "system_time"
 ):
-    obj = dataos.get_object_as_of(object_id, as_of, temporal_axis=temporal_axis)
+    if temporal_axis not in {"system_time", "validity_time"}:
+        raise HTTPException(status_code=400, detail="temporal_axis must be system_time or validity_time")
+    obj = dataos.time_travel.get_object_as_of(object_id, as_of, temporal_axis=temporal_axis)
     if not obj:
         raise HTTPException(status_code=404, detail=f"Object {object_id} not found as of {as_of}")
     return obj.to_dict()
@@ -301,7 +331,9 @@ async def time_travel_graph(
     as_of: str = FastQuery(..., description="Timestamp ISO string"),
     temporal_axis: str = "system_time"
 ):
-    graph = dataos.get_graph_as_of(as_of, temporal_axis=temporal_axis)
+    if temporal_axis not in {"system_time", "validity_time"}:
+        raise HTTPException(status_code=400, detail="temporal_axis must be system_time or validity_time")
+    graph = dataos.time_travel.get_graph_as_of(as_of, temporal_axis=temporal_axis)
     return graph
 
 
@@ -311,7 +343,9 @@ async def time_travel_changes(
     t2: str = FastQuery(..., description="End timestamp ISO"),
     temporal_axis: str = "system_time"
 ):
-    changes = dataos.get_changes_between(t1, t2, temporal_axis=temporal_axis)
+    if temporal_axis not in {"system_time", "validity_time"}:
+        raise HTTPException(status_code=400, detail="temporal_axis must be system_time or validity_time")
+    changes = dataos.time_travel.changes_between(t1, t2, temporal_axis=temporal_axis)
     return changes
 
 
@@ -324,7 +358,7 @@ class ConflictResolutionRequest(BaseModel):
 @app.post("/api/sync/resolve_conflict", summary="Explicit Conflict Resolution (Rule #59)")
 async def resolve_conflict_api(req: ConflictResolutionRequest):
     try:
-        res = dataos.resolve_conflict(
+        res = dataos.sync.resolve_conflict(
             conflict_object_id=req.conflict_object_id,
             strategy=req.strategy,
             manual_properties=req.manual_properties
@@ -407,11 +441,11 @@ class MultiAgentPipelineRequest(BaseModel):
 
 @app.post("/api/agents/pipeline/research", summary="Run Composable Multi-Agent Research Pipeline (Rule #20)")
 async def run_multi_agent_pipeline_api(req: MultiAgentPipelineRequest):
-    res = dataos.run_multi_agent_pipeline(
+    res = dataos.multi_agent.run_end_to_end_research_pipeline(
         goal_prompt=req.goal_prompt,
         target_dataset_id=req.target_dataset_id,
         analysis_sql_or_python=req.analysis_sql_or_python,
-        quality_rules=req.quality_rules
+        quality_rules=req.quality_rules,
     )
     return res
 
@@ -419,32 +453,56 @@ async def run_multi_agent_pipeline_api(req: MultiAgentPipelineRequest):
 @app.get("/api/recommendations/connections/{object_id}", summary="Graph Recommendation & Missing Link Discovery (Rule #57)")
 async def recommend_connections_api(
     object_id: str,
-    top_k: int = 10
+    top_k: int = FastQuery(default=10, ge=1, le=100),
 ):
-    recs = dataos.recommend_connections(target_object_id=object_id, top_k=top_k)
+    recs = dataos.graph.recommendations(object_id, top_k=top_k)
     return {"target_object_id": object_id, "recommendations": recs}
 
 
 @app.get("/api/recommendations/datasets/{object_id}", summary="Recommend Relevant Datasets (Rule #57)")
 async def recommend_datasets_api(
     object_id: str,
-    top_k: int = 5
+    top_k: int = FastQuery(default=5, ge=1, le=100),
 ):
-    recs = dataos.recommend_datasets(target_object_id=object_id, top_k=top_k)
+    target = dataos.storage.get_object(object_id)
+    if target is None:
+        raise HTTPException(status_code=404, detail="Object not found")
+    query = str(target.properties.get("filename") or target.properties.get("title") or target.type)
+    recs = dataos.search_engine.search(
+        query=query,
+        object_type="dataset",
+        context_object_id=object_id,
+        limit=top_k,
+    )
     return {"target_object_id": object_id, "recommended_datasets": recs}
 
 
 @app.post("/api/agents/execute", summary="Execute Agent Capability")
 async def execute_agent(req: AgentExecutionRequest):
-    agent = dataos.create_agent(req.agent_id)
-    res = agent.execute_capability(Capability(req.capability), req.params)
-    return res
+    agents = {
+        "agent_research": dataos.multi_agent.research_agent,
+        "agent_analysis": dataos.multi_agent.analysis_agent,
+        "agent_quality": dataos.multi_agent.quality_agent,
+        "agent_report": dataos.multi_agent.report_agent,
+    }
+    agent = agents.get(req.agent_id)
+    if agent is None:
+        raise HTTPException(status_code=404, detail="Unknown built-in agent")
+    try:
+        capability = Capability(req.capability)
+        return agent.execute_capability(capability, req.params)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid capability: {req.capability}") from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail="Agent capability is not permitted") from exc
 
 
 @app.post("/api/workflows/execute", summary="Execute Workflow DAG")
 async def execute_workflow(req: WorkflowExecutionRequest):
-    res = dataos.workflows.execute_workflow(req.definition, context_data=req.context)
-    return res
+    raise HTTPException(
+        status_code=501,
+        detail="Workflow DAG execution is not implemented in the current DataOS runtime.",
+    )
 
 
 # =============================================================================
@@ -456,8 +514,10 @@ async def detect_duplicates_api(
     object_id: Optional[str] = None,
     min_similarity: float = 0.75
 ):
-    results = dataos.find_duplicates(target_object_id=object_id, min_similarity=min_similarity)
-    return {"total_matches": len(results), "duplicates": results}
+    raise HTTPException(
+        status_code=501,
+        detail="Fuzzy duplicate detection is not implemented in the current DataOS runtime.",
+    )
 
 
 @app.get("/api/governance/quota/{principal_id}", summary="Get Principal Quota & Usage Status (Rule #61)")
@@ -476,13 +536,15 @@ class IssueSharingTokenRequest(BaseModel):
 
 @app.post("/api/sharing/issue_token", summary="Issue Cryptographically Signed Subgraph Token (Rule #65)")
 async def issue_sharing_token_api(req: IssueSharingTokenRequest):
-    token = dataos.issue_sharing_token(
+    if not 1 <= (req.duration_seconds or 0) <= 86400:
+        raise HTTPException(status_code=422, detail="duration_seconds must be between 1 and 86400")
+    token = dataos.tokens.issue_token(
         issuer=req.issuer,
         subject_principal=req.subject_principal,
         subgraph_root_id=req.subgraph_root_id,
         allowed_object_ids=req.allowed_object_ids,
         allowed_capabilities=req.allowed_capabilities,
-        duration_seconds=req.duration_seconds
+        duration_seconds=req.duration_seconds,
     )
     return {"token": token, "expires_in_seconds": req.duration_seconds}
 
@@ -494,7 +556,7 @@ class VerifySharingTokenRequest(BaseModel):
 @app.post("/api/sharing/verify_token", summary="Verify and Decode Sharing Token (Rule #65)")
 async def verify_sharing_token_api(req: VerifySharingTokenRequest):
     try:
-        payload = dataos.verify_sharing_token(req.token)
+        payload = dataos.tokens.verify_and_decode_token(req.token)
         import dataclasses
         return {"status": "valid", "payload": dataclasses.asdict(payload)}
     except Exception as e:
@@ -504,10 +566,9 @@ async def verify_sharing_token_api(req: VerifySharingTokenRequest):
 @app.get("/api/federation/search", summary="Federated Cross-Instance Search (Rule #64)")
 async def federated_search_api(
     q: str = FastQuery(..., description="Query string"),
-    top_k: int = 10
+    top_k: int = FastQuery(default=10, ge=1, le=100),
 ):
-    res = dataos.federated_search(query=q, top_k=top_k)
-    return res
+    return dataos.federation.federated_search(query=q, top_k=top_k)
 
 
 # =============================================================================
@@ -560,17 +621,11 @@ async def ingest_text(
     content: str = Form(...),
     format_type: str = Form("text")
 ):
-    import tempfile
-    with tempfile.NamedTemporaryFile("w", delete=False, suffix=f"_{filename}", encoding="utf-8") as tmp:
-        tmp.write(content)
-        tmp_path = tmp.name
-
-    try:
-        res = dataos.ingest_file(tmp_path, discover_relations=True)
-        return res
-    finally:
-        if os.path.exists(tmp_path):
-            os.remove(tmp_path)
+    # Ingest content directly; never construct a temporary path from client input.
+    safe_name = os.path.basename(filename.strip()) or "text.txt"
+    if not os.path.splitext(safe_name)[1]:
+        safe_name = f"{safe_name}.txt"
+    return dataos.ingest(content, filename=safe_name, discover_relations=True)
 
 
 @app.get("/api/io/export", summary="Export DataOS Graph")
@@ -593,12 +648,22 @@ async def export_graph(format: str = "json_ld"):
 
 @app.get("/api/catalog/health", summary="System Health & Catalog Overview")
 async def get_health_overview():
-    return dataos.get_system_health()
+    try:
+        # A bounded read verifies that the configured storage backend is reachable.
+        dataos.storage.list_objects(limit=1)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="DataOS storage is unavailable") from exc
+    return {
+        "status": "operational",
+        "storage_backend": type(dataos.storage).__name__,
+        "storage_reachable": True,
+        "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    }
 
 
 @app.get("/health", summary="Basic Health Check")
 async def health_check():
-    return {"status": "operational", "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat()}
+    return await get_health_overview()
 
 
 # =============================================================================
