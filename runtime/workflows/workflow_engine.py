@@ -181,8 +181,11 @@ class WorkflowEngine:
     Supports parallel execution, retry, conditions, and full state tracking.
     """
 
-    def __init__(self, storage=None):
+    def __init__(self, storage=None, max_history: int = 100):
+        if type(max_history) is not int or max_history < 1:
+            raise ValueError("max_history must be a positive integer")
         self.storage = storage
+        self._max_history = max_history
         self._executions: Dict[str, Dict[str, Any]] = {}
         self._lock = threading.Lock()
         self._action_handlers: Dict[str, Callable] = {}
@@ -310,6 +313,13 @@ class WorkflowEngine:
 
         with self._lock:
             self._executions[execution_id] = execution_result
+            # Keep only the most recent executions so an API-enabled process
+            # cannot accumulate an unbounded in-memory history over its lifetime.
+            while len(self._executions) > self._max_history:
+                oldest_id = next(iter(self._executions), None)
+                if oldest_id is None:
+                    break
+                self._executions.pop(oldest_id, None)
 
         return execution_result
 
