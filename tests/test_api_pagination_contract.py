@@ -13,3 +13,4 @@ def test_object_list_pagination_is_bounded_in_openapi():
     assert by_name["limit"]["schema"]["maximum"] == 500
     assert by_name["offset"]["in"] == "query"
     assert by_name["offset"]["schema"]["minimum"] == 0
+    assert by_name["offset"]["schema"]["maximum"] == 1_000_000
