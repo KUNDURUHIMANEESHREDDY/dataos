@@ -256,7 +256,13 @@ def test_non_api_health_path_remains_available_without_api_token(monkeypatch):
     monkeypatch.delenv("DATAOS_API_TOKEN", raising=False)
 
     assert api.require_production_api_token(_api_request("/health"), None) is None
-    assert any(
-        dependency.dependency is api.require_production_api_token
-        for dependency in api.app.dependencies
+
+    api_routes = [
+        route for route in api.app.routes
+        if getattr(route, "path", "").startswith("/api/")
+    ]
+    assert api_routes
+    assert all(
+        any(dependency.call is api.require_production_api_token for dependency in route.dependant.dependencies)
+        for route in api_routes
     )
