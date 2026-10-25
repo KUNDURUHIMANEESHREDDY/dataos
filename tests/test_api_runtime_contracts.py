@@ -144,10 +144,15 @@ def test_health_probe_returns_service_unavailable_when_storage_fails(monkeypatch
     assert exc.value.detail == "DataOS storage is unavailable"
 
 
-def test_unimplemented_workflow_and_duplicate_routes_return_501():
+def test_workflow_route_rejects_malformed_definition_and_duplicate_route_remains_unimplemented():
+    # The workflow endpoint is implemented: an empty definition is invalid input,
+    # so it must fail validation rather than claim the feature is unimplemented.
     with pytest.raises(HTTPException) as workflow_exc:
         run(api.execute_workflow(api.WorkflowExecutionRequest(definition={})))
-    assert workflow_exc.value.status_code == 501
+    assert workflow_exc.value.status_code == 422
+    assert "nodes" in workflow_exc.value.detail
+
+    # Duplicate detection is a separate, still-unimplemented feature.
     with pytest.raises(HTTPException) as duplicate_exc:
         run(api.detect_duplicates_api())
     assert duplicate_exc.value.status_code == 501
