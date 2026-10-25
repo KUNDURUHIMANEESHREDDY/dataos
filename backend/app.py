@@ -9,8 +9,9 @@ from __future__ import annotations
 import os
 import uuid
 import datetime
+import hmac
 from typing import Dict, Any, List, Optional
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Depends, Query as FastQuery
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Depends, Header, Request, Query as FastQuery
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
@@ -23,6 +24,40 @@ from core.permissions.policy import Capability
 from backend.knowledge_rag import create_knowledge_router
 from backend.cors_config import cors_middleware_options
 
+def require_production_api_token(request: Request, authorization: Optional[str] = Header(default=None)) -> None:
+    """Require a high-entropy bearer token for API routes in production.
+
+    All supported environment markers are checked so a conflicting development
+    marker cannot accidentally disable production authentication. The health
+    route outside /api remains available for liveness monitoring.
+    """
+    if not request.url.path.startswith("/api/"):
+        return
+
+    production_markers = (
+        os.getenv("DATAOS_ENV", ""),
+        os.getenv("APP_ENV", ""),
+        os.getenv("ENVIRONMENT", ""),
+    )
+    if not any(marker.strip().lower() in {"production", "prod"} for marker in production_markers):
+        return
+
+    expected = os.getenv("DATAOS_API_TOKEN", "")
+    if not expected or expected.strip() != expected or len(expected.encode("utf-8")) < 32:
+        raise HTTPException(
+            status_code=503,
+            detail="Production API authentication is unavailable; configure DATAOS_API_TOKEN with at least 32 UTF-8 bytes.",
+        )
+
+    scheme, separator, supplied = (authorization or "").partition(" ")
+    if not separator or scheme.lower() != "bearer" or not hmac.compare_digest(supplied, expected):
+        raise HTTPException(
+            status_code=401,
+            detail="A valid bearer token is required.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+
 # Initialize single DataOS kernel
 dataos = DataOS(db_path="dataos.db", blob_dir=".dataos_blobs")
 
@@ -32,7 +67,8 @@ app = FastAPI(
     API-first interface for DataOS — a universal, graph-based, computable data operating system.
     All operations are deterministic, verifiable against real data, and fully traceable.
     """,
-    version="1.0.0"
+    version="1.0.0",
+    dependencies=[Depends(require_production_api_token)],
 )
 
 app.add_middleware(
