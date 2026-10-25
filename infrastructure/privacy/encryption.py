@@ -40,7 +40,10 @@ class EncryptionEngine:
 
         if master_key is not None:
             self._init_from_password(master_key)
-        elif key_file and os.path.exists(key_file):
+        elif key_file is not None:
+            # An explicitly selected key file is authoritative. Missing paths,
+            # broken symlinks, and unreadable files must not silently fall back
+            # to an unrelated environment or ephemeral key.
             self._init_from_file(key_file)
         else:
             self._init_from_env()
