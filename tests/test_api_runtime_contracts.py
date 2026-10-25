@@ -6,6 +6,7 @@ import importlib
 
 import pytest
 from fastapi import HTTPException
+from starlette.requests import Request
 
 api = importlib.import_module("backend.app")
 
@@ -188,3 +189,74 @@ def test_sharing_duration_validation():
         api.IssueSharingTokenRequest(
             issuer="service", subject_principal="reader", subgraph_root_id="root", duration_seconds=90000
         )
+
+
+def _api_request(path, authorization=None):
+    headers = []
+    if authorization is not None:
+        headers.append((b"authorization", authorization.encode("utf-8")))
+    return Request({
+        "type": "http",
+        "http_version": "1.1",
+        "method": "GET",
+        "scheme": "http",
+        "path": path,
+        "raw_path": path.encode("utf-8"),
+        "query_string": b"",
+        "headers": headers,
+        "client": ("testclient", 12345),
+        "server": ("testserver", 80),
+    })
+
+
+def test_production_api_auth_fails_closed_without_or_with_weak_token(monkeypatch):
+    monkeypatch.setenv("DATAOS_ENV", "production")
+    monkeypatch.delenv("APP_ENV", raising=False)
+    monkeypatch.delenv("ENVIRONMENT", raising=False)
+    monkeypatch.delenv("DATAOS_API_TOKEN", raising=False)
+
+    with pytest.raises(HTTPException) as missing:
+        api.require_production_api_token(_api_request("/api/objects/"), None)
+    assert missing.value.status_code == 503
+
+    monkeypatch.setenv("DATAOS_API_TOKEN", "short")
+    with pytest.raises(HTTPException) as weak:
+        api.require_production_api_token(_api_request("/api/objects/"), None)
+    assert weak.value.status_code == 503
+
+
+def test_production_api_auth_rejects_invalid_bearer_and_accepts_valid_token(monkeypatch):
+    token = "test-only-token-with-at-least-32-bytes"
+    monkeypatch.setenv("DATAOS_ENV", "production")
+    monkeypatch.delenv("APP_ENV", raising=False)
+    monkeypatch.delenv("ENVIRONMENT", raising=False)
+    monkeypatch.setenv("DATAOS_API_TOKEN", token)
+
+    with pytest.raises(HTTPException) as invalid:
+        api.require_production_api_token(_api_request("/api/objects/"), "Bearer wrong")
+    assert invalid.value.status_code == 401
+    assert invalid.value.headers["WWW-Authenticate"] == "Bearer"
+
+    assert api.require_production_api_token(_api_request("/api/objects/"), f"Bearer {token}") is None
+
+
+def test_conflicting_environment_markers_cannot_disable_production_api_auth(monkeypatch):
+    monkeypatch.setenv("DATAOS_ENV", "development")
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.delenv("ENVIRONMENT", raising=False)
+    monkeypatch.delenv("DATAOS_API_TOKEN", raising=False)
+
+    with pytest.raises(HTTPException) as exc:
+        api.require_production_api_token(_api_request("/api/compute/python"), None)
+    assert exc.value.status_code == 503
+
+
+def test_non_api_health_path_remains_available_without_api_token(monkeypatch):
+    monkeypatch.setenv("DATAOS_ENV", "production")
+    monkeypatch.delenv("DATAOS_API_TOKEN", raising=False)
+
+    assert api.require_production_api_token(_api_request("/health"), None) is None
+    assert any(
+        dependency.dependency is api.require_production_api_token
+        for dependency in api.app.dependencies
+    )
