@@ -166,9 +166,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          count="$(gh api --paginate --slurp \
+          count="$(gh api --paginate --jq '.[].rule.security_severity_level' \
             "repos/${GITHUB_REPOSITORY}/code-scanning/alerts?state=open&per_page=100" \
-            --jq '[.[][] | select(.rule.security_severity_level == "critical" or .rule.security_severity_level == "high")] | length')"
+            | awk '$0 == "critical" || $0 == "high" { count++ } END { print count + 0 }')"
           echo "Open critical/high code-scanning alerts: $count"
           if [[ "$count" != "0" ]]; then
             echo "::error::Found $count open critical/high code-scanning alert(s); triage and remediate before release."
