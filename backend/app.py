@@ -50,7 +50,7 @@ def require_production_api_token(request: Request, authorization: Optional[str] 
         )
 
     scheme, separator, supplied = (authorization or "").partition(" ")
-    if not separator or scheme.lower() != "bearer" or not hmac.compare_digest(supplied, expected):
+    if not separator or scheme.lower() != "bearer" or not hmac.compare_digest(supplied.encode("utf-8"), expected.encode("utf-8")):
         raise HTTPException(
             status_code=401,
             detail="A valid bearer token is required.",
