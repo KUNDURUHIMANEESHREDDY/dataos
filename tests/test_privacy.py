@@ -163,6 +163,30 @@ class TestEncryptionEngine(unittest.TestCase):
                 with self.assertRaisesRegex(EncryptionError, "exactly 16 bytes"):
                     EncryptionEngine(master_key="stable_test_master_password")
 
+    def test_oversized_persistent_salt_fails_closed(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            salt_path = os.path.join(temp_dir, "encryption_salt")
+            with open(salt_path, "wb") as salt_file:
+                salt_file.write(b"x" * 17)
+            with patch.dict(os.environ, {"DATAOS_ENCRYPTION_SALT_FILE": salt_path}):
+                with self.assertRaisesRegex(EncryptionError, "exactly 16 bytes"):
+                    EncryptionEngine(master_key="stable_test_master_password")
+
+    def test_symlinked_persistent_salt_fails_closed(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            target_path = os.path.join(temp_dir, "external_salt")
+            salt_path = os.path.join(temp_dir, "encryption_salt")
+            with open(target_path, "wb") as salt_file:
+                salt_file.write(b"x" * 16)
+            try:
+                os.symlink(target_path, salt_path)
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest(f"symlink creation is unavailable on this runner: {exc}")
+
+            with patch.dict(os.environ, {"DATAOS_ENCRYPTION_SALT_FILE": salt_path}):
+                with self.assertRaisesRegex(EncryptionError, "regular non-symlink"):
+                    EncryptionEngine(master_key="stable_test_master_password")
+
 
 class TestSharingToken(unittest.TestCase):
 
