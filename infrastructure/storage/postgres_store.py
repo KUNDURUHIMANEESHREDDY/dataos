@@ -336,9 +336,9 @@ class PostgresStorage(StorageBackend):
         if source:
             clauses.append("source LIKE ?")
             params.append(f"%{source}%")
-        query = "SELECT COUNT(*) FROM dataos_objects"
+        query = "SELECT COUNT(*) FROM dataos_objects WHERE deleted_at IS NULL"
         if clauses:
-            query += " WHERE " + " AND ".join(clauses)
+            query += " AND " + " AND ".join(clauses)
         row = self._fallback_db.execute(query, params).fetchone()
         return int(row[0])
 
@@ -387,9 +387,9 @@ class PostgresStorage(StorageBackend):
         if source:
             clauses.append("source LIKE ?")
             params.append(f"%{source}%")
-        query = "SELECT * FROM dataos_objects"
+        query = "SELECT * FROM dataos_objects WHERE deleted_at IS NULL"
         if clauses:
-            query += " WHERE " + " AND ".join(clauses)
+            query += " AND " + " AND ".join(clauses)
         query += " ORDER BY id ASC LIMIT ? OFFSET ?"
         params.extend([limit, offset])
         rows = self._fallback_db.execute(query, params).fetchall()
