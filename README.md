@@ -80,6 +80,20 @@ completed and checked in GitHub Settings.
 
 ---
 
+## Runtime security configuration
+
+DataOS sharing-token signing has no built-in/default secret. Configure `DATAOS_SHARING_TOKEN_SECRET` with a randomly generated value of at least 32 UTF-8 bytes through your deployment secret manager before using `/api/sharing/issue_token` or `/api/sharing/verify_token`. If it is missing, the API returns HTTP 503 and token support remains disabled. Never commit the value to the repository or include it in logs.
+
+For local development, generate a value without printing it separately:
+
+```bash
+export DATAOS_SHARING_TOKEN_SECRET="$(python -c 'import secrets; print(secrets.token_urlsafe(48))')"
+```
+
+This secret protects sharing-token signatures only. It does **not** authenticate the rest of the FastAPI API. SQL/Python execution, writes, ingestion, and data-reading routes still need an explicit authentication/authorization boundary; do not expose the API to untrusted networks until that work is completed.
+
+---
+
 ## Quick start
 
 ```bash
