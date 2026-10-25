@@ -41,6 +41,23 @@ class TestSafeWorkflowAPI(unittest.TestCase):
                 {},
             )
 
+    def test_rejects_non_string_action_and_condition_operators(self):
+        with self.assertRaisesRegex(WorkflowRequestError, "action_type"):
+            execute_safe_workflow(
+                self.engine,
+                {"nodes": {"n": {"action_type": ["noop"]}}},
+                {},
+            )
+        with self.assertRaisesRegex(WorkflowRequestError, "condition operator"):
+            execute_safe_workflow(
+                self.engine,
+                {"nodes": {"n": {
+                    "action_type": "noop",
+                    "condition": {"field": "flag", "operator": [], "value": True},
+                }}},
+                {},
+            )
+
     def test_rejects_dags_over_node_budget(self):
         nodes = {f"n{i}": {"action_type": "noop"} for i in range(26)}
         with self.assertRaisesRegex(WorkflowRequestError, "1 to 25 nodes"):
