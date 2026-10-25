@@ -110,6 +110,47 @@ class TestEncryptionEngine(unittest.TestCase):
         with self.assertRaises(EncryptionError):
             EncryptionEngine(master_key="   ")
 
+    def test_key_file_accepts_exact_32_byte_raw_key(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            key_path = os.path.join(temp_dir, "key.bin")
+            with open(key_path, "wb") as key_file:
+                key_file.write(bytes(range(32)))
+            engine = EncryptionEngine(key_file=key_path)
+            ciphertext = engine.encrypt("key-file round trip")
+            self.assertEqual(engine.decrypt(ciphertext), "key-file round trip")
+
+    def test_key_file_accepts_bounded_utf8_passphrase(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            key_path = os.path.join(temp_dir, "key.txt")
+            salt_path = os.path.join(temp_dir, "salt.bin")
+            with open(key_path, "wb") as key_file:
+                key_file.write(b"test passphrase from file")
+            with patch.dict(os.environ, {"DATAOS_ENCRYPTION_SALT_FILE": salt_path}):
+                engine = EncryptionEngine(key_file=key_path)
+                ciphertext = engine.encrypt("passphrase-file round trip")
+                self.assertEqual(engine.decrypt(ciphertext), "passphrase-file round trip")
+
+    def test_oversized_key_file_fails_closed(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            key_path = os.path.join(temp_dir, "key.bin")
+            with open(key_path, "wb") as key_file:
+                key_file.write(b"x" * 4097)
+            with self.assertRaisesRegex(EncryptionError, "4 KiB limit"):
+                EncryptionEngine(key_file=key_path)
+
+    def test_symlinked_key_file_fails_closed(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            target_path = os.path.join(temp_dir, "target.key")
+            key_path = os.path.join(temp_dir, "key.bin")
+            with open(target_path, "wb") as key_file:
+                key_file.write(bytes(range(32)))
+            try:
+                os.symlink(target_path, key_path)
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest(f"symlink creation is unavailable on this runner: {exc}")
+            with self.assertRaisesRegex(EncryptionError, "regular non-symlink"):
+                EncryptionEngine(key_file=key_path)
+
     def test_production_requires_persistent_master_key_for_all_environment_markers(self):
         for marker in ("DATAOS_ENV", "APP_ENV", "ENVIRONMENT"):
             for value in ("production", "prod"):
