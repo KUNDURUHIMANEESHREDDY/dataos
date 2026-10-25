@@ -23,6 +23,8 @@ from core.relation.model import Relationship, RelationType
 from core.permissions.policy import Capability
 from backend.knowledge_rag import create_knowledge_router
 from backend.cors_config import cors_middleware_options
+from backend.workflow_api import WorkflowRequestError, execute_safe_workflow
+from runtime.workflows.workflow_engine import WorkflowEngine
 
 def require_production_api_token(request: Request, authorization: Optional[str] = Header(default=None)) -> None:
     """Require a high-entropy bearer token for API routes in production.
@@ -60,6 +62,7 @@ def require_production_api_token(request: Request, authorization: Optional[str] 
 
 # Initialize single DataOS kernel
 dataos = DataOS(db_path="dataos.db", blob_dir=".dataos_blobs")
+workflow_engine = WorkflowEngine(storage=dataos.storage)
 
 app = FastAPI(
     title="DataOS Universal Data Operating System API",
@@ -533,12 +536,12 @@ async def execute_agent(req: AgentExecutionRequest):
         raise HTTPException(status_code=403, detail="Agent capability is not permitted") from exc
 
 
-@app.post("/api/workflows/execute", summary="Execute Workflow DAG")
+@app.post("/api/workflows/execute", summary="Execute a bounded built-in Workflow DAG")
 async def execute_workflow(req: WorkflowExecutionRequest):
-    raise HTTPException(
-        status_code=501,
-        detail="Workflow DAG execution is not implemented in the current DataOS runtime.",
-    )
+    try:
+        return execute_safe_workflow(workflow_engine, req.definition, req.context)
+    except WorkflowRequestError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 # =============================================================================
