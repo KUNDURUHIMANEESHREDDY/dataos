@@ -193,7 +193,9 @@ class DataOS:
         self.time_travel = TimeTravelEngine(self.storage)
         self.sync = DistributedSyncEngine(self.storage)
         self.governor = ResourceGovernor()
-        self.tokens = SubgraphTokenManager()
+        self.tokens = SubgraphTokenManager(
+            secret_key=os.getenv("DATAOS_SHARING_TOKEN_SECRET") or "dataos_subgraph_master_secret_2026"
+        )
         self.federation = DataOSFederationEngine(self.storage)
         self.multi_agent = MultiAgentPipeline(self.storage)
         self.discovery = RelationshipDiscoveryEngine(self.storage)
