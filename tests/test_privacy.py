@@ -110,8 +110,20 @@ class TestEncryptionEngine(unittest.TestCase):
         with self.assertRaises(EncryptionError):
             EncryptionEngine(master_key="   ")
 
-    def test_production_requires_persistent_master_key(self):
-        with patch.dict(os.environ, {"DATAOS_ENV": "production"}, clear=True):
+    def test_production_requires_persistent_master_key_for_all_environment_markers(self):
+        for marker in ("DATAOS_ENV", "APP_ENV", "ENVIRONMENT"):
+            for value in ("production", "prod"):
+                with self.subTest(marker=marker, value=value):
+                    with patch.dict(os.environ, {marker: value}, clear=True):
+                        with self.assertRaisesRegex(EncryptionError, "DATAOS_MASTER_KEY"):
+                            EncryptionEngine()
+
+    def test_any_production_marker_overrides_nonproduction_marker(self):
+        with patch.dict(
+            os.environ,
+            {"DATAOS_ENV": "development", "APP_ENV": "production"},
+            clear=True,
+        ):
             with self.assertRaisesRegex(EncryptionError, "DATAOS_MASTER_KEY"):
                 EncryptionEngine()
 
