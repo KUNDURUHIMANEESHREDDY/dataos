@@ -55,14 +55,68 @@ class EncryptionEngine:
         self._try_init_fernet(key)
 
     def _init_from_file(self, key_file: str) -> None:
-        """Load key from file."""
-        with open(key_file, "rb") as f:
-            key = f.read()
+        """Load a bounded regular key file without following symbolic links."""
+        key = self._read_key_file(key_file)
         if len(key) == 32:
             self._aes_key = key
             self._try_init_fernet(key)
         else:
-            self._init_from_password(key.decode().strip())
+            try:
+                password = key.decode("utf-8").strip()
+            except UnicodeDecodeError as exc:
+                raise EncryptionError(
+                    "Encryption key file must contain 32 raw key bytes or a UTF-8 passphrase"
+                ) from exc
+            if not password:
+                raise EncryptionError("Encryption key file passphrase must not be empty")
+            self._init_from_password(password)
+
+    @staticmethod
+    def _read_key_file(key_path: str) -> bytes:
+        """Read at most 4 KiB from a regular key file, rejecting symlinks."""
+        nofollow = getattr(os, "O_NOFOLLOW", 0)
+        flags = os.O_RDONLY | nofollow | getattr(os, "O_BINARY", 0)
+        before = None
+        if not nofollow:
+            try:
+                before = os.lstat(key_path)
+            except OSError as exc:
+                raise EncryptionError("Encryption key file must be a regular non-symlink file") from exc
+            if stat.S_ISLNK(before.st_mode):
+                raise EncryptionError("Encryption key file must be a regular non-symlink file")
+
+        try:
+            fd = os.open(key_path, flags)
+        except OSError as exc:
+            raise EncryptionError("Encryption key file must be a regular non-symlink file") from exc
+
+        try:
+            metadata = os.fstat(fd)
+            if not stat.S_ISREG(metadata.st_mode):
+                raise EncryptionError("Encryption key file must be a regular non-symlink file")
+            if before is not None:
+                try:
+                    current = os.lstat(key_path)
+                except OSError as exc:
+                    raise EncryptionError("Encryption key file changed while being opened") from exc
+                if (
+                    stat.S_ISLNK(current.st_mode)
+                    or (current.st_dev, current.st_ino) != (metadata.st_dev, metadata.st_ino)
+                ):
+                    raise EncryptionError("Encryption key file changed while being opened")
+
+            with os.fdopen(fd, "rb") as key_file:
+                fd = -1
+                key = key_file.read(4097)
+        finally:
+            if fd != -1:
+                os.close(fd)
+
+        if len(key) > 4096:
+            raise EncryptionError("Encryption key file exceeds the 4 KiB limit")
+        if not key:
+            raise EncryptionError("Encryption key file must not be empty")
+        return key
 
     def _init_from_env(self) -> None:
         """Initialize from DATAOS_MASTER_KEY environment variable."""
