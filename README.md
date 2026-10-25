@@ -92,6 +92,19 @@ export DATAOS_SHARING_TOKEN_SECRET="$(python -c 'import secrets; print(secrets.t
 
 This secret protects sharing-token signatures only. It does **not** authenticate the rest of the FastAPI API. SQL/Python execution, writes, ingestion, and data-reading routes still need an explicit authentication/authorization boundary; do not expose the API to untrusted networks until that work is completed.
 
+### Production API authentication
+
+When any of `DATAOS_ENV`, `APP_ENV`, or `ENVIRONMENT` is set to `production` or `prod`, every `/api/*` route requires an `Authorization: Bearer …` header. Configure `DATAOS_API_TOKEN` as a high-entropy secret of at least 32 UTF-8 bytes through the deployment secret manager. If the token is absent, padded with accidental whitespace, or too short, API requests fail closed with HTTP 503; missing or incorrect bearer credentials return HTTP 401. Environment markers are checked independently, so a conflicting `development` marker does not disable the production guard. The non-`/api` health route remains available for liveness monitoring.
+
+Generate a token without committing or printing it to logs:
+
+```bash
+export DATAOS_API_TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe(48))')"
+```
+
+This is a single shared bearer-token boundary, not per-user identity or role-based authorization. Rotate it through secret management and do not expose it to browser bundles. If a public browser client needs access, place a properly authenticated backend-for-frontend or identity-aware gateway in front of DataOS rather than embedding this token in frontend code.
+
+
 ---
 
 ## Quick start
