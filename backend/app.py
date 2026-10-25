@@ -10,6 +10,7 @@ import os
 import uuid
 import datetime
 import hmac
+import threading
 from typing import Dict, Any, List, Optional
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Depends, Header, Request, Query as FastQuery
 from fastapi.middleware.cors import CORSMiddleware
@@ -64,6 +65,8 @@ def require_production_api_token(request: Request, authorization: Optional[str] 
 # Initialize single DataOS kernel
 dataos = DataOS(db_path="dataos.db", blob_dir=".dataos_blobs")
 workflow_engine = WorkflowEngine(storage=dataos.storage)
+# Bound concurrent synchronous DAG runs so API clients cannot exhaust the worker pool.
+workflow_slots = threading.BoundedSemaphore(value=4)
 
 app = FastAPI(
     title="DataOS Universal Data Operating System API",
@@ -539,15 +542,26 @@ async def execute_agent(req: AgentExecutionRequest):
 
 @app.post("/api/workflows/execute", summary="Execute a bounded built-in Workflow DAG")
 async def execute_workflow(req: WorkflowExecutionRequest):
-    try:
-        # The DAG engine performs synchronous work and bounded retry sleeps.
-        # Run it in Starlette's worker pool so API requests and health checks
-        # are not blocked while a workflow is executing.
-        return await run_in_threadpool(
-            execute_safe_workflow, workflow_engine, req.definition, req.context
+    # Do not queue an unbounded number of workflow requests behind the shared
+    # ASGI worker pool. Reject overload explicitly so clients can retry.
+    if not workflow_slots.acquire(blocking=False):
+        raise HTTPException(
+            status_code=503,
+            detail="Workflow execution capacity is full; retry shortly.",
+            headers={"Retry-After": "1"},
         )
-    except WorkflowRequestError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    try:
+        try:
+            # The DAG engine performs synchronous work and bounded retry sleeps.
+            # Run it in Starlette's worker pool so API requests and health checks
+            # are not blocked while a workflow is executing.
+            return await run_in_threadpool(
+                execute_safe_workflow, workflow_engine, req.definition, req.context
+            )
+        except WorkflowRequestError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+    finally:
+        workflow_slots.release()
 
 
 # =============================================================================
