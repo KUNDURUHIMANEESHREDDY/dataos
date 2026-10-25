@@ -7,7 +7,8 @@ import unittest
 import os
 import base64
 import tempfile
-from concurrent.futures import Barrier, ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
 from unittest.mock import patch
 from infrastructure.privacy.encryption import EncryptionEngine, EncryptionError
 from infrastructure.privacy.sharing import (
