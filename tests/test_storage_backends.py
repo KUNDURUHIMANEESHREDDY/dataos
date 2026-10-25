@@ -99,6 +99,25 @@ class TestDualStorageBackends(unittest.TestCase):
         self.assertTrue(len(history) >= 1)
         self.assertEqual(history[0]["version"], 1)
 
+        # Object deletion must honor the common storage contract in both
+        # PostgreSQL mode and its SQLite emulation.
+        temporary = store.save_object(DataObject(
+            type=ObjectType.DATASET.value,
+            properties={"name": "temporary"}
+        ))
+        self.assertTrue(store.delete_object(temporary.id, soft=False))
+        self.assertIsNone(store.get_object(temporary.id))
+        self.assertEqual(store.count_objects(), 2)
+
+        self.assertTrue(store.delete_object(obj.id, soft=True))
+        self.assertIsNone(store.get_object(obj.id))
+        self.assertEqual(store.count_objects(), 1)
+        self.assertEqual([item.id for item in store.list_objects(limit=10)], [report_obj.id])
+
+        self.assertTrue(store.delete_object(report_obj.id, soft=True))
+        self.assertEqual(store.count_objects(), 0)
+        self.assertEqual(store.list_objects(limit=10), [])
+
     def test_sqlite_storage_contract(self):
         self._test_backend_contract_parity(self.sqlite_store, "SQLiteStorage")
 
