@@ -345,3 +345,10 @@ of the product and dominates the repo's file count.
 
 ~181 Python files excluding `skills/`: `core/` 22, `engines/` 35, `infrastructure/` 36, `intelligence/` 20,
 `runtime/` 14, `tests/` 48, `backend/` 1, `cli/` 2.
+
+
+## API pagination contract
+
+- `GET /api/objects/` accepts `limit=1..500` and `offset=0..1,000,000`. Its `total` is the count of all active objects matching `object_type` and `source`, before page slicing.
+- `GET /api/relationships/` accepts `limit=1..1,000`, `offset=0..1,000,000`, and `min_confidence=0..1`. Its `total` counts all active relationships matching the filters before page slicing. Soft-deleted relationships are excluded consistently across built-in storage backends.
+- Built-in SQLite, PostgreSQL, and cloud-index backends use database-level counts. Third-party storage adapters should implement efficient count methods; the base interface provides a bounded-page fallback when listing supports offsets.
