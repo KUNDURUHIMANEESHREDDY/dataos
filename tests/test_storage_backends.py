@@ -62,6 +62,7 @@ class TestDualStorageBackends(unittest.TestCase):
         low_confidence = store.save_relationship(Relationship(
             source=obj.id, target=report_obj.id, relation_type=RelationType.REFERENCES.value, confidence=0.2
         ))
+        self.assertEqual(low_confidence.confidence, 0.2)
         high_confidence = store.save_relationship(Relationship(
             source=obj.id, target=report_obj.id, relation_type=RelationType.REFERENCES.value, confidence=0.75
         ))
