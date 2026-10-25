@@ -86,7 +86,7 @@ class TestSafeWorkflowAPI(unittest.TestCase):
             )
 
     def test_rejects_oversized_context(self):
-        with self.assertRaisesRegex(WorkflowRequestError, "128-byte limit"):
+        with self.assertRaisesRegex(WorkflowRequestError, "131072-byte limit"):
             execute_safe_workflow(
                 self.engine,
                 {"nodes": {"n": {"action_type": "noop"}}},
