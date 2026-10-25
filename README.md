@@ -266,6 +266,7 @@ execution at 10s and 10 MB output.
 Security-sensitive environment variables:
 
 - `DATAOS_MASTER_KEY`: persistent master secret for encryption. Supply it through deployment secret management; never commit it or log its value. An explicitly empty or whitespace-only value is rejected.
+- `DATAOS_ENCRYPTION_SALT_FILE`: optional path for the 16-byte key-derivation salt; defaults to `~/.dataos/encryption_salt`. The salt is not secret, but it **must be backed up and kept identical across restarts and replicas that share encrypted data**. Losing/changing it makes existing ciphertext derived from the same master key unreadable. Initialization writes the salt atomically and rejects malformed existing salt files.
 - `DATAOS_ENV`: set to `production` or `prod` in production deployments. In those modes, startup fails if `DATAOS_MASTER_KEY` is absent rather than generating an ephemeral key. Without a production mode, an unset key permits an ephemeral development/test key; ciphertext created with it cannot be decrypted after process restart.
 - `DATAOS_CORS_ORIGINS`: comma-separated explicit browser-origin allowlist. Keep production origins HTTPS and do not use wildcard origins.
 
