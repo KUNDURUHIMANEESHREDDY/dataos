@@ -6,8 +6,8 @@ graph**, and **first-class provenance** — every derived result traceable back 
 The design principle, stated in `context/ai-workflow-rules.md`: **AI is an operator over the graph, never an
 authority over it.**
 
-> ⚠️ **The library is real. The API layer is not.** ~180 Python files, 12 engine packages, and ~670 unit tests
-> form a coherent, substantial core. The package imports cleanly, **653 correctness tests pass**, the **CLI works
+> ⚠️ **The library is real. The API layer is not.** ~180 Python files, 12 engine packages, and a broad unit-test suite
+> form a coherent, substantial core. The package imports cleanly, the correctness suite is verified in CI, the **CLI works
 > end to end**, and **`scenario_demo.py` runs all 10 steps**. What remains broken is the FastAPI backend, which
 > still calls a `DataOS` API that no longer exists. See [Current blockers](#current-blockers).
 
@@ -103,7 +103,7 @@ pip install -r requirements.txt
 There is no `pyproject.toml`/`setup.py` — the package runs from the repo root.
 
 ```bash
-python -m pytest tests/ --ignore=tests/test_benchmarks.py   # 653 correctness tests
+python -m pytest tests/ --ignore=tests/test_benchmarks.py   # correctness suite (CI reports the current test count)
 python scenario_demo.py                                      # 10-step end-to-end demo
 python -m cli health                                         # CLI
 ```
