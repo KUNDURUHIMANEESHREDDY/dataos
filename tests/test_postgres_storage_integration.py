@@ -24,7 +24,8 @@ class TestLivePostgresObjectLifecycle(unittest.TestCase):
 
         # Simulate a database created by the pre-soft-delete schema. The store
         # initializer must add deleted_at without dropping or rewriting rows.
-        with psycopg2.connect(POSTGRES_URL) as connection:
+        connection = psycopg2.connect(POSTGRES_URL)
+        try:
             with connection.cursor() as cursor:
                 cursor.execute(
                     """
@@ -44,6 +45,9 @@ class TestLivePostgresObjectLifecycle(unittest.TestCase):
                     )
                     """
                 )
+            connection.commit()
+        finally:
+            connection.close()
 
         cls.store = PostgresStorage(connection_string=POSTGRES_URL, mock_mode=False)
         if cls.store.mock_mode or cls.store._pg_conn is None:
