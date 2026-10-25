@@ -6,6 +6,7 @@ Validates encryption, selective sharing, tokens, and private execution contexts.
 import unittest
 import os
 import base64
+import tempfile
 from unittest.mock import patch
 from infrastructure.privacy.encryption import EncryptionEngine, EncryptionError
 from infrastructure.privacy.sharing import (
@@ -111,6 +112,28 @@ class TestEncryptionEngine(unittest.TestCase):
         with patch.dict(os.environ, {"DATAOS_ENV": "production"}, clear=True):
             with self.assertRaisesRegex(EncryptionError, "DATAOS_MASTER_KEY"):
                 EncryptionEngine()
+
+    def test_configured_salt_path_is_stable_across_engine_instances(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            salt_path = os.path.join(temp_dir, "persistent", "encryption_salt")
+            env = {"DATAOS_ENCRYPTION_SALT_FILE": salt_path}
+            with patch.dict(os.environ, env):
+                first = EncryptionEngine(master_key="stable_test_master_password")
+                ciphertext = first.encrypt("replica-safe data")
+                second = EncryptionEngine(master_key="stable_test_master_password")
+                self.assertEqual(second.decrypt(ciphertext), "replica-safe data")
+
+            with open(salt_path, "rb") as salt_file:
+                self.assertEqual(len(salt_file.read()), 16)
+
+    def test_corrupt_persistent_salt_fails_closed(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            salt_path = os.path.join(temp_dir, "encryption_salt")
+            with open(salt_path, "wb") as salt_file:
+                salt_file.write(b"short")
+            with patch.dict(os.environ, {"DATAOS_ENCRYPTION_SALT_FILE": salt_path}):
+                with self.assertRaisesRegex(EncryptionError, "exactly 16 bytes"):
+                    EncryptionEngine(master_key="stable_test_master_password")
 
 
 class TestSharingToken(unittest.TestCase):
