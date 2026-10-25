@@ -69,6 +69,7 @@ class TestDualStorageBackends(unittest.TestCase):
         self.assertEqual(store.count_relationships(source_id=obj.id, min_confidence=0.5), 2)
         self.assertEqual(len(store.list_relationships(source_id=obj.id, min_confidence=0.5, limit=1, offset=0)), 1)
         self.assertTrue(store.delete_relationship(high_confidence.id, soft=True))
+        self.assertIsNone(store.get_relationship(high_confidence.id))
         self.assertEqual(store.count_relationships(source_id=obj.id, min_confidence=0.5), 1)
         self.assertEqual(store.list_relationships(source_id=obj.id, min_confidence=0.5, limit=10), [rel_retrieved])
 
