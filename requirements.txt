@@ -30,3 +30,4 @@ requests>=2.31
 # pyarrow>=15.0              # Parquet support
 # sentence-transformers>=3.0 # real embeddings; without it DataOS falls back to
 #                            # the built-in HashEmbeddingProvider (dimension=128)
+python-multipart>=0.0.20

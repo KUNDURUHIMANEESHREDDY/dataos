@@ -27,18 +27,25 @@ class PostgresStorage(StorageBackend):
         self._pg_conn = None
         self._fallback_db = None
 
-        # Check if psycopg/psycopg2 is available and connection succeeds
+        # Never silently downgrade a requested durable PostgreSQL store to
+        # ephemeral in-memory SQLite: callers could otherwise report successful
+        # writes that disappear when the process exits.
         if not self.mock_mode:
             try:
                 import psycopg2
                 self._pg_conn = psycopg2.connect(self.connection_string, connect_timeout=2)
                 self._init_postgres_schema()
-            except Exception:
-                # Resilient fallback: SQL-compatible emulation mode for environments without live Postgres
-                self.mock_mode = True
-                self._fallback_db = sqlite3.connect(":memory:", check_same_thread=False)
-                self._fallback_db.row_factory = sqlite3.Row
-                self._init_sqlite_schema()
+            except Exception as exc:
+                if self._pg_conn is not None:
+                    try:
+                        self._pg_conn.close()
+                    except Exception:
+                        pass
+                    self._pg_conn = None
+                raise RuntimeError(
+                    "PostgreSQL storage initialization failed; refusing to fall back to ephemeral SQLite. "
+                    "Use mock_mode=True only for tests."
+                ) from exc
         else:
             self._fallback_db = sqlite3.connect(":memory:", check_same_thread=False)
             self._fallback_db.row_factory = sqlite3.Row

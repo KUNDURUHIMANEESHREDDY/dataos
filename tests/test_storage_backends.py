@@ -6,6 +6,8 @@ Verifies contract parity between SQLiteStorage and PostgresStorage.
 import unittest
 import tempfile
 import os
+import types
+from unittest.mock import Mock, patch
 from core.object.model import DataObject, ObjectType
 from core.relation.model import Relationship, RelationType
 from core.schema.model import Schema
@@ -133,9 +135,27 @@ class TestDualStorageBackends(unittest.TestCase):
         dataos_pg = DataOS(storage_backend=self.postgres_store)
         self.assertIsInstance(dataos_pg.storage, PostgresStorage)
 
-        # 3. Initialize via connection URL
-        dataos_url = DataOS.from_url("postgresql://postgres:postgres@localhost:5432/dataos")
-        self.assertIsInstance(dataos_url.storage, PostgresStorage)
+        # 3. A requested PostgreSQL URL must fail closed if the connection
+        # cannot be established; it must never silently become ephemeral SQLite.
+        driver = types.ModuleType("psycopg2")
+        driver.connect = Mock(side_effect=OSError("connection refused"))
+        with patch.dict("sys.modules", {"psycopg2": driver}):
+            with self.assertRaisesRegex(RuntimeError, "refusing to fall back to ephemeral SQLite"):
+                DataOS.from_url("postgresql://postgres:postgres@db.invalid:5432/dataos")
+        driver.connect.assert_called_once()
+
+
+    def test_postgres_schema_failure_closes_connection_before_raising(self):
+        # A successful TCP connection followed by a schema error must not leak
+        # the partially initialized connection when the constructor fails.
+        connection = Mock()
+        driver = types.ModuleType("psycopg2")
+        driver.connect = Mock(return_value=connection)
+        with patch.dict("sys.modules", {"psycopg2": driver}):
+            with patch.object(PostgresStorage, "_init_postgres_schema", side_effect=ValueError("schema failure")):
+                with self.assertRaisesRegex(RuntimeError, "refusing to fall back to ephemeral SQLite"):
+                    PostgresStorage(connection_string="postgresql://user:password@db.invalid:5432/dataos")
+        connection.close.assert_called_once()
 
 
 if __name__ == "__main__":
