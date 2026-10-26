@@ -67,6 +67,36 @@ def test_compute_routes_call_real_kernel_methods(monkeypatch):
     }
 
 
+
+def test_python_compute_is_disabled_by_default_in_production(monkeypatch):
+    monkeypatch.setenv("DATAOS_ENV", "production")
+    monkeypatch.delenv("APP_ENV", raising=False)
+    monkeypatch.delenv("ENVIRONMENT", raising=False)
+    monkeypatch.delenv("DATAOS_ALLOW_PYTHON_COMPUTE", raising=False)
+
+    def should_not_execute(*args, **kwargs):
+        pytest.fail("Python execution must be rejected before reaching the runtime")
+
+    monkeypatch.setattr(api.dataos, "python", should_not_execute)
+    with pytest.raises(HTTPException) as direct_exc:
+        run(api.compute_python(api.PythonComputeRequest(code="print('blocked')")))
+    assert direct_exc.value.status_code == 403
+
+    with pytest.raises(HTTPException) as unified_exc:
+        run(api.query_unified(api.UnifiedQueryRequest(query="print('blocked')", query_type="python")))
+    assert unified_exc.value.status_code == 403
+
+
+def test_python_compute_requires_explicit_production_opt_in(monkeypatch):
+    monkeypatch.setenv("DATAOS_ENV", "production")
+    monkeypatch.delenv("APP_ENV", raising=False)
+    monkeypatch.delenv("ENVIRONMENT", raising=False)
+    monkeypatch.setenv("DATAOS_ALLOW_PYTHON_COMPUTE", "true")
+    monkeypatch.setattr(api.dataos, "python", lambda code, input_object_ids=None: {"executed": code})
+    result = run(api.compute_python(api.PythonComputeRequest(code="print(1)")))
+    assert result == {"executed": "print(1)"}
+
+
 def test_unified_query_auto_dispatches_sql_and_natural_language(monkeypatch):
     monkeypatch.setattr(api.dataos, "sql", lambda query: {"kind": "sql", "query": query})
     monkeypatch.setattr(api.dataos, "ask", lambda query: {"kind": "ask", "query": query})
