@@ -20,6 +20,22 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  workflow-lint:
+    name: Workflow YAML integrity
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install pinned YAML parser
+        run: python -m pip install --disable-pip-version-check PyYAML==6.0.2
+      - name: Reject invalid YAML and duplicate mapping keys
+        run: python scripts/check_workflow_yaml.py
+
   backend:
     name: Backend correctness and smoke tests
     runs-on: ubuntu-latest
@@ -242,7 +258,7 @@ jobs:
   backend-required:
     name: Backend required
     if: always()
-    needs: [backend, postgres-storage, security-required]
+    needs: [backend, postgres-storage, security-required, workflow-lint]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -251,12 +267,15 @@ jobs:
           BACKEND_RESULT: ${{ needs.backend.result }}
           POSTGRES_RESULT: ${{ needs.postgres-storage.result }}
           SECURITY_RESULT: ${{ needs.security-required.result }}
+          WORKFLOW_LINT_RESULT: ${{ needs.workflow-lint.result }}
         run: |
           set -euo pipefail
           echo "backend: $BACKEND_RESULT"
           echo "postgres-storage: $POSTGRES_RESULT"
           echo "security-required: $SECURITY_RESULT"
+          echo "workflow-lint: $WORKFLOW_LINT_RESULT"
           test "$BACKEND_RESULT" = "success"
           test "$POSTGRES_RESULT" = "success"
           test "$SECURITY_RESULT" = "success"
-          echo "Backend, live PostgreSQL, and security verification passed."
+          test "$WORKFLOW_LINT_RESULT" = "success"
+          echo "Backend, live PostgreSQL, security, and workflow integrity verification passed."
