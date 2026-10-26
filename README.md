@@ -381,3 +381,11 @@ of the product and dominates the repo's file count.
 - `GET /api/objects/` accepts `limit=1..500` and `offset=0..1,000,000`. Its `total` is the count of all active objects matching `object_type` and `source`, before page slicing.
 - `GET /api/relationships/` accepts `limit=1..1,000`, `offset=0..1,000,000`, and `min_confidence=0..1`. Its `total` counts all active relationships matching the filters before page slicing. Soft-deleted relationships are excluded consistently across built-in storage backends.
 - Built-in SQLite, PostgreSQL, and cloud-index backends use database-level counts. Third-party storage adapters should implement efficient count methods; the base interface provides a bounded-page fallback when listing supports offsets.
+
+
+
+## Safe Local File Ingestion
+
+The public ingestion pipeline treats string inputs as content, not filesystem paths. This prevents a client-supplied string from causing the server to read arbitrary local files. The scenario demo now reads its own trusted artifacts and passes their content with an explicit filename.
+
+For controlled local-file ingestion, configure `DATAOS_INGEST_ROOT` to an existing directory owned by the service and pass a `pathlib.Path` containing only a filename (for example, `Path("report.csv")`). The pipeline resolves that filename under the configured root and rejects directory traversal, absolute paths, symlinks that resolve outside the root, and path inputs when no trusted root is configured. Do not point this setting at a home directory, repository root, or directory containing credentials.
