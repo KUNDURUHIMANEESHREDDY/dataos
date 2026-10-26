@@ -56,23 +56,58 @@ class RichDocumentExtractor:
                 tables.append(parsed_tbl)
 
         # 2. Extract Figures: ![Caption](url_or_path)
-        fig_pattern = re.compile(r"!\[([^\]]*)\]\(([^)]+)\)")
+        # Parse delimiters with a forward-only scan instead of a backtracking regex.
+        # Document text is untrusted and may contain adversarially long malformed
+        # image markers; every cursor advance is monotonic, keeping this O(n).
         for line_num, line in enumerate(lines, 1):
-            for match in fig_pattern.finditer(line):
+            cursor = 0
+            while cursor < len(line):
+                marker = line.find("![", cursor)
+                if marker < 0:
+                    break
+                caption_start = marker + 2
+                caption_end = line.find("]", caption_start)
+                if caption_end < 0:
+                    break
+                if caption_end + 1 >= len(line) or line[caption_end + 1] != "(":
+                    cursor = caption_end + 1
+                    continue
+                target_start = caption_end + 2
+                target_end = line.find(")", target_start)
+                if target_end < 0:
+                    break
+                if target_end == target_start:
+                    cursor = target_end + 1
+                    continue
                 figures.append({
-                    "caption": match.group(1) or f"Figure at line {line_num}",
-                    "path": match.group(2),
+                    "caption": line[caption_start:caption_end] or f"Figure at line {line_num}",
+                    "path": line[target_start:target_end],
                     "line": line_num
                 })
+                cursor = target_end + 1
 
         # 3. Extract Footnotes / Citations: [^1]: Citation text or [1] Citation
-        footnote_pattern = re.compile(r"^\[\^?([0-9A-Za-z_-]+)\]:\s*(.+)$")
+        # Avoid overlapping whitespace and wildcard quantifiers on untrusted text.
         for line_num, line in enumerate(lines, 1):
-            fn_match = footnote_pattern.match(line.strip())
-            if fn_match:
+            stripped = line.strip()
+            if not stripped.startswith("["):
+                continue
+            delimiter = stripped.find("]:")
+            if delimiter < 2:
+                continue
+            key = stripped[1:delimiter]
+            if key.startswith("^"):
+                key = key[1:]
+            if not key or any(
+                not (char.isascii() and (char.isalnum() or char in "_-"))
+                for char in key
+            ):
+                continue
+            citation_text = stripped[delimiter + 2:].strip()
+            if citation_text:
                 citations.append({
-                    "key": fn_match.group(1),
-                    "text": fn_match.group(2),
+                    "key": key,
+                    "text": citation_text,
                     "line": line_num
                 })
 
