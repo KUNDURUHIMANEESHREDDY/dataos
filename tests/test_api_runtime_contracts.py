@@ -240,6 +240,31 @@ def test_duplicate_detection_route_rejects_unknown_object(monkeypatch):
     assert exc.value.status_code == 404
 
 
+def test_duplicate_detection_target_lookup_runs_in_threadpool(monkeypatch):
+    calls = []
+    target = object()
+
+    def get_object(object_id):
+        assert object_id == "known"
+        return target
+
+    original_run_in_threadpool = api.run_in_threadpool
+
+    async def tracking_run_in_threadpool(func, *args, **kwargs):
+        calls.append(func)
+        return await original_run_in_threadpool(func, *args, **kwargs)
+
+    monkeypatch.setattr(api.dataos.storage, "get_object", get_object)
+    monkeypatch.setattr(api.dataos.storage, "list_objects", lambda **kwargs: [])
+    monkeypatch.setattr(api.duplicate_detection_engine, "find_duplicates", lambda **kwargs: [])
+    monkeypatch.setattr(api, "run_in_threadpool", tracking_run_in_threadpool)
+
+    result = run(api.detect_duplicates_api(object_id="known"))
+
+    assert result["object_id"] == "known"
+    assert get_object in calls
+
+
 def test_duplicate_detection_route_validates_similarity_and_object_id():
     with pytest.raises(HTTPException) as similarity_exc:
         run(api.detect_duplicates_api(min_similarity=1.01))
