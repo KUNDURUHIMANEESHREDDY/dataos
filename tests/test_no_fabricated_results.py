@@ -17,7 +17,8 @@ from engines.compute.python_sandbox import PythonSandbox
 class TestNoFabricatedResults(unittest.TestCase):
 
     def setUp(self):
-        self.temp_db = tempfile.mktemp(suffix=".db")
+        fd, self.temp_db = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
         self.storage = SQLiteStorage(db_path=self.temp_db)
         self.grounding = GroundingEngine(self.storage)
         self.sql_engine = SQLExecutionEngine(self.storage)
