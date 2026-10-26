@@ -15,6 +15,8 @@ from core.object.model import DataObject
 from core.relation.model import Relationship, RelationType
 from infrastructure.storage.base import StorageBackend
 
+DEFAULT_DUPLICATE_SCAN_LIMIT = 1000
+
 
 def compute_levenshtein_distance(s1: str, s2: str) -> int:
     """Compute Levenshtein edit distance between two strings."""
@@ -92,7 +94,7 @@ class DuplicateDetectionEngine:
         - near_duplicate_minhash (high Jaccard overlap)
         - title_similar_levenshtein (high string similarity)
         """
-        all_objects = self.storage.list_objects(limit=1000)
+        all_objects = self.storage.list_objects(limit=DEFAULT_DUPLICATE_SCAN_LIMIT)
         results: List[Dict[str, Any]] = []
 
         target_pool = [self.storage.get_object(target_object_id)] if target_object_id else all_objects
