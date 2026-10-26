@@ -185,11 +185,29 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          count="$(gh api --paginate --jq '.[].rule.security_severity_level' \
-            "repos/${GITHUB_REPOSITORY}/code-scanning/alerts?state=open&per_page=100" \
-            | awk '$0 == "critical" || $0 == "high" { count++ } END { print count + 0 }')"
+          endpoint="repos/${GITHUB_REPOSITORY}/code-scanning/alerts?state=open&per_page=100"
+          alerts="$(gh api --paginate --jq '
+            .[]
+            | select(.state == "open" and
+                ((.rule.security_severity_level // "") == "critical" or
+                 (.rule.security_severity_level // "") == "high"))
+            | [
+                (.rule.security_severity_level // "unknown"),
+                (.rule.id // "unknown"),
+                (.most_recent_instance.location.path // "unknown"),
+                ((.most_recent_instance.location.start_line // 0) | tostring)
+              ]
+            | @tsv
+          ' "$endpoint")"
+          if [[ -n "$alerts" ]]; then
+            count="$(printf '%s\\n' "$alerts" | wc -l | tr -d ' ')"
+          else
+            count=0
+          fi
           echo "Open critical/high code-scanning alerts: $count"
           if [[ "$count" != "0" ]]; then
+            echo "Severity<TAB>Rule ID<TAB>Path<TAB>Line"
+            printf '%s\\n' "$alerts"
             echo "::error::Found $count open critical/high code-scanning alert(s); triage and remediate before release."
             exit 1
           fi
