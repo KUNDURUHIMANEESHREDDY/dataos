@@ -6,10 +6,7 @@ graph**, and **first-class provenance** — every derived result traceable back 
 The design principle, stated in `context/ai-workflow-rules.md`: **AI is an operator over the graph, never an
 authority over it.**
 
-> ⚠️ **The library is real. The API layer is not.** ~180 Python files, 12 engine packages, and a broad unit-test suite
-> form a coherent, substantial core. The package imports cleanly, the correctness suite is verified in CI, the **CLI works
-> end to end**, and **`scenario_demo.py` runs all 10 steps**. What remains broken is the FastAPI backend, which
-> still calls a `DataOS` API that no longer exists. See [Current blockers](#current-blockers).
+> **Backend status (PR branch):** the FastAPI-to-kernel contracts have been repaired for the supported routes, and the current PR head passed the backend verification workflow: 708 tests passed, 74/74 end-to-end invariants passed, and the configured secret scan, dependency audit, SBOM, CodeQL, and required aggregates succeeded. This is branch-level evidence, not a production-readiness claim. The main remaining risks are shared-token rather than per-user authorization, production key/salt management, Postgres parity, unused Prisma schema, and unverified frontend/release enforcement. See [Current blockers](#current-blockers).
 
 ---
 
@@ -39,21 +36,18 @@ Six bugs that made the project unusable, fixed in `dab962b` and `4193152`:
 
 ### Still open
 
-#### 1. The FastAPI backend targets an API that no longer exists
+#### 1. Production API authorization is not yet multi-user safe
 
-`backend/app.py` makes 52 `dataos.*` attribute accesses; only about 13 resolve. **Roughly 22 of ~35 endpoints
-return HTTP 500.** It was written against an older, richer `DataOS` and never updated.
+The current PR repairs the FastAPI-to-kernel method contracts and verifies the backend through the current CI suite. The old claim that roughly 22 endpoints are known to return HTTP 500 is stale and should not be used as the current status.
 
-Broken calls include `dataos.execute_sql` (the real name is `DataOS.sql`), `dataos.execute_python` (`.python`),
-`dataos.ingest_file`, `dataos.get_object`, `dataos.graph.traverse` (use `dataos.graph.engine.traverse`),
-`dataos.create_agent`, `dataos.get_system_health` (no such method anywhere), `dataos.run_multi_agent_pipeline`,
-and `dataos.query.execute_query` (where `dataos.query` is a bound method, not a namespace).
+Remaining authorization work is still material:
 
-Working endpoints: `/api/objects` CRUD, `/api/relationships`, `/api/vectors/search`,
-`/api/provenance/lineage/{id}`, `/api/profiling/{id}`, `/api/quality/{id}`, `/api/objects/{id}/why`,
-`/api/objects/{id}/impact`, `/api/ask`, `/api/ingest/universal`, `/api/io/export`, `/health`.
+- Production `/api/*` requests use a single shared bearer token; this is not per-user identity, role-based access control, or resource-level authorization.
+- The library's capability policy and grounding checks are not consistently enforced at the HTTP boundary.
+- Python compute is disabled by default in production unless `DATAOS_ALLOW_PYTHON_COMPUTE=true`; that opt-in does not prove the sandbox is safe.
+- Postgres backend parity and the frontend relationship field contract still require explicit regression coverage.
 
-The CLI and `scenario_demo.py` show exactly how each missing call should be rewritten.
+Treat these as release blockers until the corresponding API and deployment tests exist.
 
 #### 2. Prisma is dead weight
 
@@ -321,7 +315,7 @@ lacks `source`. The backend passes both, so those routes raise `TypeError` under
 The frontend reads `r.source_id` / `r.target_id` from relationship JSON, but `Relationship.to_dict()` emits
 `source` / `target`. Every graph edge renders as `undefined`.
 
-CORS now uses an explicit `DATAOS_CORS_ORIGINS` allowlist (defaulting to the local frontend origins), rejects wildcard or malformed origins, and does not enable credentialed cross-origin requests. Endpoint authentication is still absent despite `Depends` being imported; that remains a separate high-priority production blocker.
+CORS uses an explicit `DATAOS_CORS_ORIGINS` allowlist (defaulting to local frontend origins), rejects wildcard or malformed origins, and does not enable credentialed cross-origin requests. In production, `/api/*` routes require the configured shared bearer token; this is not per-user identity or resource-level authorization, which remains a high-priority production blocker.
 
 ---
 
@@ -337,7 +331,7 @@ python -m unittest discover -s tests
 python -m tests.benchmarks.run_all
 ```
 
-**Current result: 653 passed** excluding `tests/test_benchmarks.py`, which is a separate matter.
+**Current PR-head result (2026-10-26): 708 passed in the backend correctness suite and 74/74 end-to-end invariants verified**; the benchmark module remains outside this correctness gate.
 
 ### `test_benchmarks.py` is flaky
 
