@@ -65,6 +65,13 @@ def has_fail_closed_result_checks(job: dict, required_needs: set[str]) -> bool:
         if not isinstance(env, dict) or not isinstance(run, str):
             continue
 
+        # Only accept active standalone shell commands. A comment or echo that
+        # merely mentions the expected guard must not satisfy the release check.
+        active_commands = {
+            line.strip()
+            for line in run.splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        }
         for dependency in required_needs:
             variable = RESULT_ENV.get(dependency)
             expected_expression = f"${{{{ needs.{dependency}.result }}}}"
@@ -72,7 +79,7 @@ def has_fail_closed_result_checks(job: dict, required_needs: set[str]) -> bool:
             if (
                 variable is None
                 or env.get(variable) != expected_expression
-                or expected_guard not in run
+                or expected_guard not in active_commands
             ):
                 break
         else:
