@@ -33,11 +33,11 @@ def _aggregate(required_needs):
 
 
 ALERT_GATE_RUN = """
-gh api --paginate --jq 'select((.rule.security_severity_level // "") == "critical" or (.rule.security_severity_level // "") == "high")' "repos/${GITHUB_REPOSITORY}/code-scanning/alerts?state=open&per_page=100&${filter}"
+gh api --paginate --jq 'select((.rule.security_severity_level // "") == "critical" or (.rule.security_severity_level // "") == "high") | [((.number // 0) | tostring), (.rule.security_severity_level // "unknown")] | @tsv' "repos/${GITHUB_REPOSITORY}/code-scanning/alerts?state=open&per_page=100&${filter}"
 if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
-  alerts="$(fetch_alerts "pr=${PR_NUMBER}" | sort -u)"
+  alerts="$(fetch_alerts "pr=${PR_NUMBER}")"
 else
-  alerts="$(fetch_alerts "ref=refs/heads/${GITHUB_REF_NAME}" | sort -u)"
+  alerts="$(fetch_alerts "ref=refs/heads/${GITHUB_REF_NAME}")"
 fi
 if [[ "$count" != "0" ]]; then
   exit 1
@@ -109,6 +109,19 @@ class WorkflowYamlGateTests(unittest.TestCase):
         workflow = _valid_workflow()
         alert_step = workflow["jobs"]["security-required"]["steps"][-1]
         alert_step["run"] = alert_step["run"].replace("exit 1", "echo warning")
+        self.assertFalse(validate_gate_contract(Path("workflow.yml"), workflow))
+
+    def test_alert_gate_counts_by_stable_alert_number_without_lossy_deduplication(self):
+        workflow = _valid_workflow()
+        alert_step = workflow["jobs"]["security-required"]["steps"][-1]
+        self.assertTrue(validate_gate_contract(Path("workflow.yml"), workflow))
+        alert_step["run"] = alert_step["run"].replace("(.number // 0)", "(.rule.id // \"unknown\")")
+        self.assertFalse(validate_gate_contract(Path("workflow.yml"), workflow))
+
+    def test_alert_gate_deduplication_is_rejected(self):
+        workflow = _valid_workflow()
+        alert_step = workflow["jobs"]["security-required"]["steps"][-1]
+        alert_step["run"] = alert_step["run"].replace('alerts="$(fetch_alerts "pr=${PR_NUMBER}")"', 'alerts="$(fetch_alerts "pr=${PR_NUMBER}" | sort -u)"')
         self.assertFalse(validate_gate_contract(Path("workflow.yml"), workflow))
 
     def test_aggregate_without_always_condition_fails(self):
