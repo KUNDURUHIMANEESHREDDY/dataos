@@ -32,12 +32,36 @@ def _aggregate(required_needs):
     return {"if": "always()", "needs": list(required_needs), "steps": [{"env": env, "run": run}]}
 
 
+ALERT_GATE_RUN = """
+gh api --paginate --jq 'select((.rule.security_severity_level // "") == "critical" or (.rule.security_severity_level // "") == "high")' "repos/${GITHUB_REPOSITORY}/code-scanning/alerts?state=open&per_page=100&${filter}"
+if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
+  alerts="$(fetch_alerts "pr=${PR_NUMBER}" | sort -u)"
+else
+  alerts="$(fetch_alerts "ref=refs/heads/${GITHUB_REF_NAME}" | sort -u)"
+fi
+if [[ "$count" != "0" ]]; then
+  exit 1
+fi
+"""
+
+
 def _valid_workflow():
     security_needs = ["secret-scan", "dependency-audit", "sbom", "codeql"]
     backend_needs = ["backend", "postgres-storage", "security-required", "workflow-lint"]
+    security = _aggregate(security_needs)
+    security["steps"].append(
+        {
+            "name": "Fail on open critical/high code-scanning alerts",
+            "env": {
+                "GH_TOKEN": "${{ github.token }}",
+                "PR_NUMBER": "${{ github.event.pull_request.number }}",
+            },
+            "run": ALERT_GATE_RUN,
+        }
+    )
     return {
         "jobs": {
-            "security-required": _aggregate(security_needs),
+            "security-required": security,
             "backend-required": _aggregate(backend_needs),
         }
     }
@@ -69,6 +93,22 @@ class WorkflowYamlGateTests(unittest.TestCase):
     def test_missing_dependency_fails(self):
         workflow = _valid_workflow()
         workflow["jobs"]["backend-required"]["needs"].remove("postgres-storage")
+        self.assertFalse(validate_gate_contract(Path("workflow.yml"), workflow))
+
+
+    def test_missing_critical_high_alert_gate_fails(self):
+        workflow = _valid_workflow()
+        workflow["jobs"]["security-required"]["steps"] = [
+            step
+            for step in workflow["jobs"]["security-required"]["steps"]
+            if step.get("name") != "Fail on open critical/high code-scanning alerts"
+        ]
+        self.assertFalse(validate_gate_contract(Path("workflow.yml"), workflow))
+
+    def test_alert_gate_without_failing_on_nonzero_alerts_fails(self):
+        workflow = _valid_workflow()
+        alert_step = workflow["jobs"]["security-required"]["steps"][-1]
+        alert_step["run"] = alert_step["run"].replace("exit 1", "echo warning")
         self.assertFalse(validate_gate_contract(Path("workflow.yml"), workflow))
 
     def test_aggregate_without_always_condition_fails(self):
