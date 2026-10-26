@@ -74,6 +74,38 @@ class TestGovernanceAndFederation(unittest.TestCase):
                self.storage.list_relationships(target_id=obj_original.id, relation_type=RelationType.SIMILAR_TO.value)
         self.assertTrue(len(rels) >= 1)
 
+    def test_duplicate_detection_hashes_each_object_once(self):
+        """A catalog scan computes fallback hashes per object, not per pair."""
+        class TrackedObject:
+            def __init__(self, object_id, content, title):
+                self.id = object_id
+                self.content = content
+                self.metadata = {}
+                self.properties = {"title": title}
+                self.hash_calls = 0
+
+            def compute_hash(self):
+                self.hash_calls += 1
+                return f"hash-{self.id}"
+
+        class MemoryStorage:
+            def __init__(self, objects):
+                self.objects = objects
+
+            def list_objects(self, limit):
+                return self.objects[:limit]
+
+        objects = [
+            TrackedObject("object-a", "alpha content", "Alpha report"),
+            TrackedObject("object-b", "bravo content", "Bravo report"),
+            TrackedObject("object-c", "charlie content", "Charlie report"),
+        ]
+        engine = DuplicateDetectionEngine(MemoryStorage(objects))
+
+        engine.find_duplicates(min_similarity=1.0, auto_link_graph=False)
+
+        self.assertEqual([obj.hash_calls for obj in objects], [1, 1, 1])
+
     def test_resource_governance_and_rate_limiting(self):
         """Rule #61: Execution timeouts, query rate limits, and compute budgets."""
         quota = ResourceQuota(
