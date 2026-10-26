@@ -9,6 +9,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: dataos-backend-${{ github.workflow }}-${{ github.ref }}
@@ -42,15 +43,125 @@ jobs:
   backend-required:
     name: Backend required
     if: always()
-    needs: [backend]
+    needs: [backend, security-required]
     runs-on: ubuntu-latest
     steps:
       - name: Fail closed unless backend verification passed
         env:
           BACKEND_RESULT: ${{ needs.backend.result }}
+          SECURITY_RESULT: ${{ needs.security-required.result }}
         run: |
-          if [ "$BACKEND_RESULT" != "success" ]; then
-            echo "::error::Backend verification result was $BACKEND_RESULT"
+          set -euo pipefail
+          echo "backend: $BACKEND_RESULT"
+          echo "security-required: $SECURITY_RESULT"
+          test "$BACKEND_RESULT" = "success"
+          test "$SECURITY_RESULT" = "success"
+          echo "Backend and security verification passed."
+
+  secret-scan:
+    name: Git history secret scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v3
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  dependency-audit:
+    name: Python dependency audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - name: Install audit tool
+        run: python -m pip install --upgrade pip pip-audit
+      - name: Audit declared dependencies
+        run: pip-audit -r requirements.txt
+
+  sbom:
+    name: Generate Python dependency SBOM
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install CycloneDX tooling
+        run: python -m pip install --upgrade pip cyclonedx-bom
+      - name: Generate requirements SBOM
+        run: cyclonedx-py requirements requirements.txt --output-format JSON --output-file sbom.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dataos-python-sbom
+          path: sbom.json
+          if-no-files-found: error
+          retention-days: 30
+
+  codeql:
+    name: Python CodeQL
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: github/codeql-action/init@v3
+        with:
+          languages: python
+          build-mode: none
+      - uses: github/codeql-action/analyze@v3
+
+  security-required:
+    name: security-required
+    if: always()
+    needs: [secret-scan, dependency-audit, sbom, codeql]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      security-events: read
+    steps:
+      - name: Fail closed on any security workflow failure
+        env:
+          SECRET_SCAN_RESULT: ${{ needs.secret-scan.result }}
+          DEPENDENCY_AUDIT_RESULT: ${{ needs.dependency-audit.result }}
+          SBOM_RESULT: ${{ needs.sbom.result }}
+          CODEQL_RESULT: ${{ needs.codeql.result }}
+        run: |
+          set -euo pipefail
+          echo "secret-scan: $SECRET_SCAN_RESULT"
+          echo "dependency-audit: $DEPENDENCY_AUDIT_RESULT"
+          echo "sbom: $SBOM_RESULT"
+          echo "codeql: $CODEQL_RESULT"
+          test "$SECRET_SCAN_RESULT" = "success"
+          test "$DEPENDENCY_AUDIT_RESULT" = "success"
+          test "$SBOM_RESULT" = "success"
+          test "$CODEQL_RESULT" = "success"
+
+      - name: Fail on open critical/high code-scanning alerts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          count="$(gh api --paginate --jq '.[].rule.security_severity_level' \
+            "repos/${GITHUB_REPOSITORY}/code-scanning/alerts?state=open&per_page=100" \
+            | awk '$0 == "critical" || $0 == "high" { count++ } END { print count + 0 }')"
+          echo "Open critical/high code-scanning alerts: $count"
+          if [[ "$count" != "0" ]]; then
+            echo "::error::Found $count open critical/high code-scanning alert(s); triage and remediate before release."
             exit 1
           fi
-          echo "Backend correctness and smoke tests passed."

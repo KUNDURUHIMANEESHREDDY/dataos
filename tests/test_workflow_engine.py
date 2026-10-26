@@ -243,6 +243,20 @@ class TestWorkflowEngine(unittest.TestCase):
         found = self.engine.get_execution(r1["execution_id"])
         self.assertIsNotNone(found)
 
+    def test_execution_history_is_bounded(self):
+        engine = WorkflowEngine(max_history=2)
+        workflow = {"name": "history", "nodes": {"a": {"action_type": "noop"}}}
+        first = engine.execute(workflow)
+        engine.execute(workflow)
+        engine.execute(workflow)
+
+        self.assertEqual(len(engine.list_executions(limit=20)), 2)
+        self.assertIsNone(engine.get_execution(first["execution_id"]))
+
+    def test_history_limit_must_be_positive(self):
+        with self.assertRaises(ValueError):
+            WorkflowEngine(max_history=0)
+
     def test_stats(self):
         workflow = {"name": "s", "nodes": {"a": {"action_type": "noop"}}}
         self.engine.execute(workflow)
