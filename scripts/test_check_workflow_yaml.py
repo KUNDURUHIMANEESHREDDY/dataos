@@ -1,5 +1,6 @@
 """Regression tests for the fail-closed workflow validator."""
 
+from pathlib import Path
 import unittest
 
 import yaml
@@ -49,22 +50,31 @@ class WorkflowYamlGateTests(unittest.TestCase):
             yaml.load(source, Loader=UniqueKeyLoader)
 
     def test_valid_fail_closed_aggregates_pass(self):
-        self.assertTrue(validate_gate_contract(__import__("pathlib").Path("workflow.yml"), _valid_workflow()))
+        self.assertTrue(validate_gate_contract(Path("workflow.yml"), _valid_workflow()))
 
     def test_aggregate_with_dependencies_but_no_result_guards_fails(self):
         workflow = _valid_workflow()
         workflow["jobs"]["security-required"]["steps"][0]["run"] = "echo looks good"
-        self.assertFalse(validate_gate_contract(__import__("pathlib").Path("workflow.yml"), workflow))
+        self.assertFalse(validate_gate_contract(Path("workflow.yml"), workflow))
+
+    def test_comment_only_result_guards_fail(self):
+        workflow = _valid_workflow()
+        env = workflow["jobs"]["security-required"]["steps"][0]["env"]
+        workflow["jobs"]["security-required"]["steps"][0]["run"] = "\n".join(
+            f'# test "${variable}" = "success"'
+            for variable in env
+        )
+        self.assertFalse(validate_gate_contract(Path("workflow.yml"), workflow))
 
     def test_missing_dependency_fails(self):
         workflow = _valid_workflow()
         workflow["jobs"]["backend-required"]["needs"].remove("postgres-storage")
-        self.assertFalse(validate_gate_contract(__import__("pathlib").Path("workflow.yml"), workflow))
+        self.assertFalse(validate_gate_contract(Path("workflow.yml"), workflow))
 
     def test_aggregate_without_always_condition_fails(self):
         workflow = _valid_workflow()
         workflow["jobs"]["security-required"]["if"] = "success()"
-        self.assertFalse(validate_gate_contract(__import__("pathlib").Path("workflow.yml"), workflow))
+        self.assertFalse(validate_gate_contract(Path("workflow.yml"), workflow))
 
 
 if __name__ == "__main__":
