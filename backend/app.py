@@ -62,6 +62,33 @@ def require_production_api_token(request: Request, authorization: Optional[str] 
         )
 
 
+def require_python_compute_enabled() -> None:
+    """Require explicit opt-in before exposing Python execution in production.
+
+    The shared API bearer token is not a per-user authorization boundary, so
+    production deployments must deliberately enable this high-risk capability
+    after reviewing their sandbox and access controls. Development behavior is
+    unchanged.
+    """
+    production_markers = (
+        os.getenv("DATAOS_ENV", ""),
+        os.getenv("APP_ENV", ""),
+        os.getenv("ENVIRONMENT", ""),
+    )
+    if not any(marker.strip().lower() in {"production", "prod"} for marker in production_markers):
+        return
+    enabled = os.getenv("DATAOS_ALLOW_PYTHON_COMPUTE", "").strip().lower()
+    if enabled not in {"1", "true", "yes"}:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Python compute is disabled in production. Set "
+                "DATAOS_ALLOW_PYTHON_COMPUTE=true only after reviewing sandbox "
+                "isolation and access controls."
+            ),
+        )
+
+
 # Initialize single DataOS kernel
 dataos = DataOS(db_path="dataos.db", blob_dir=".dataos_blobs")
 workflow_engine = WorkflowEngine(storage=dataos.storage)
@@ -266,6 +293,7 @@ async def compute_sql(req: SQLQueryRequest):
 
 @app.post("/api/compute/python", summary="Execute Python Sandbox")
 async def compute_python(req: PythonComputeRequest):
+    require_python_compute_enabled()
     res = dataos.python(req.code, input_object_ids=req.input_object_ids)
     return res
 
@@ -279,6 +307,7 @@ async def query_unified(req: UnifiedQueryRequest):
     if query_type == "sql":
         return dataos.sql(req.query)
     if query_type == "python":
+        require_python_compute_enabled()
         return dataos.python(req.query)
     if query_type in {"ask", "natural_language"}:
         return dataos.ask(req.query)
