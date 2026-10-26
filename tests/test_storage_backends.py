@@ -106,5 +106,18 @@ class TestDualStorageBackends(unittest.TestCase):
         driver.connect.assert_called_once()
 
 
+    def test_postgres_schema_failure_closes_connection_before_raising(self):
+        # A successful TCP connection followed by a schema error must not leak
+        # the partially initialized connection when the constructor fails.
+        connection = Mock()
+        driver = types.ModuleType("psycopg2")
+        driver.connect = Mock(return_value=connection)
+        with patch.dict("sys.modules", {"psycopg2": driver}):
+            with patch.object(PostgresStorage, "_init_postgres_schema", side_effect=ValueError("schema failure")):
+                with self.assertRaisesRegex(RuntimeError, "refusing to fall back to ephemeral SQLite"):
+                    PostgresStorage(connection_string="postgresql://user:password@db.invalid:5432/dataos")
+        connection.close.assert_called_once()
+
+
 if __name__ == "__main__":
     unittest.main()
