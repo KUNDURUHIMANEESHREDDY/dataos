@@ -185,4 +185,5 @@ class DuplicateDetectionEngine:
                         ))
 
         results.sort(key=lambda x: x["similarity_score"], reverse=True)
+        return results
 
