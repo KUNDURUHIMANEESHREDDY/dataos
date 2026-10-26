@@ -217,6 +217,7 @@ jobs:
                   ((.rule.security_severity_level // "") == "critical" or
                    (.rule.security_severity_level // "") == "high"))
               | [
+                  ((.number // 0) | tostring),
                   (.rule.security_severity_level // "unknown"),
                   (.rule.id // "unknown"),
                   (.most_recent_instance.location.path // "unknown"),
@@ -233,22 +234,22 @@ jobs:
             fi
           }
           if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
-            alerts="$(fetch_alerts "pr=${PR_NUMBER}" | sort -u)"
+            alerts="$(fetch_alerts "pr=${PR_NUMBER}")"
             count="$(count_lines "$alerts")"
             echo "Open critical/high alerts associated with PR #${PR_NUMBER}: $count"
             if [[ "$count" != "0" ]]; then
-              echo "PR alerts (severity, rule, path, line):"
+              echo "PR alerts (number, severity, rule, path, line):"
               printf '%s\n' "$alerts"
               echo "::error::This PR has open critical/high code-scanning alerts."
               exit 1
             fi
             echo "No open critical/high alerts associated with this PR. Main-branch gate remains fail-closed until its total reaches zero."
           else
-            alerts="$(fetch_alerts "ref=refs/heads/${GITHUB_REF_NAME}" | sort -u)"
+            alerts="$(fetch_alerts "ref=refs/heads/${GITHUB_REF_NAME}")"
             count="$(count_lines "$alerts")"
             echo "Open critical/high code-scanning alerts on ${GITHUB_REF_NAME}: $count"
             if [[ "$count" != "0" ]]; then
-              echo "Open alerts (severity, rule, path, line):"
+              echo "Open alerts (number, severity, rule, path, line):"
               printf '%s\n' "$alerts"
               echo "::error::Found $count open critical/high code-scanning alert(s); triage and remediate before release."
               exit 1
