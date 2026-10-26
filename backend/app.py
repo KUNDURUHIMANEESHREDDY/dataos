@@ -620,7 +620,8 @@ async def detect_duplicates_api(
                 status_code=422,
                 detail="object_id must be a non-empty identifier of at most 200 characters.",
             )
-        if dataos.storage.get_object(object_id) is None:
+        target_object = await run_in_threadpool(dataos.storage.get_object, object_id)
+        if target_object is None:
             raise HTTPException(status_code=404, detail="Object not found.")
 
     if not 0.0 <= min_similarity <= 1.0:
