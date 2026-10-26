@@ -25,6 +25,7 @@ import subprocess
 import sys
 from collections.abc import Sequence
 from typing import Any
+from resource_name_utils import normalize_aiplatform_resource_name
 
 try:
   from google.cloud import aiplatform_v1beta1
@@ -93,18 +94,15 @@ def find_agent_via_cais(
         if asset_type == "aiplatform.googleapis.com/ReasoningEngine":
           print(f"FOUND via CAIS: Reasoning Engine in {location}")
           full_name = asset.get("name", "")
-          engine_id = full_name.split("/")[-1] if full_name else agent_name
+          resource_name = normalize_aiplatform_resource_name(full_name)
+          engine_id = resource_name.rsplit("/", 1)[-1] if resource_name else agent_name
 
           return {
               "runtime": "Vertex AI Reasoning Engine",
               "id": engine_id,
               "display_name": agent_name,
               "location": location,
-              "resource_name": (
-                  full_name.split("//aiplatform.googleapis.com/")[-1]
-                  if "//aiplatform.googleapis.com/" in full_name
-                  else full_name
-              ),
+              "resource_name": resource_name,
           }
         elif asset_type == "run.googleapis.com/Service":
           print(f"FOUND via CAIS: Cloud Run service in {location}")
