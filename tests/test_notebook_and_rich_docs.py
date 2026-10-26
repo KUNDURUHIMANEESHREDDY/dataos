@@ -139,6 +139,12 @@ Here are the evaluation results:
         self.assertEqual(extracted["figure_count"], 0)
         self.assertEqual(extracted["citation_count"], 0)
 
+        valid = RichDocumentExtractor.extract_markdown_tables_and_figures(
+            "![Architecture](images/arch.png)\\n[^1]: Source citation"
+        )
+        self.assertEqual(valid["figures"][0]["path"], "images/arch.png")
+        self.assertEqual(valid["citations"][0]["key"], "1")
+
     def test_persistent_vector_indexing_and_search(self):
         """Rule #45: Persistent vector index with cosine similarity search and recomputability."""
         # Create objects with distinct semantic domains
