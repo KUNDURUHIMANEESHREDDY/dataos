@@ -88,7 +88,7 @@ class TestGovernanceAndFederation(unittest.TestCase):
         ))
 
         self.assertEqual(compute_minhash_jaccard("", ""), 0.0)
-        self.assertEqual(compute_minhash_jaccard("   ", "\\t\\n"), 0.0)
+        self.assertEqual(compute_minhash_jaccard("   ", "\t\n"), 0.0)
 
         duplicates = self.deduplication.find_duplicates(
             min_similarity=0.75,
