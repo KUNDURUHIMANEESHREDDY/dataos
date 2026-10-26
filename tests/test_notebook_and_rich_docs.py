@@ -140,7 +140,7 @@ Here are the evaluation results:
         self.assertEqual(extracted["citation_count"], 0)
 
         valid = RichDocumentExtractor.extract_markdown_tables_and_figures(
-            "![Architecture](images/arch.png)\\n[^1]: Source citation"
+            "![Architecture](images/arch.png)\n[^1]: Source citation"
         )
         self.assertEqual(valid["figures"][0]["path"], "images/arch.png")
         self.assertEqual(valid["citations"][0]["key"], "1")
