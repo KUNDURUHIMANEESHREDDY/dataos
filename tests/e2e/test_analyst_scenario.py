@@ -25,7 +25,8 @@ from core.relation.model import Relationship, RelationType
 class TestAnalystScenario(unittest.TestCase):
 
     def setUp(self):
-        self.temp_db = tempfile.mktemp(suffix=".db")
+        fd, self.temp_db = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
         self.dataos = DataOS(db_path=self.temp_db)
 
     def tearDown(self):
