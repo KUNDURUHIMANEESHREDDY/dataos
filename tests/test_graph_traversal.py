@@ -16,7 +16,8 @@ from engines.graph.algorithms import GraphAnalyticsEngine
 class TestGraphTraversal(unittest.TestCase):
 
     def setUp(self):
-        self.temp_db = tempfile.mktemp(suffix=".db")
+        fd, self.temp_db = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
         self.storage = SQLiteStorage(db_path=self.temp_db)
         self.graph_engine = GraphEngine(self.storage)
         self.analytics_engine = GraphAnalyticsEngine(self.storage)
