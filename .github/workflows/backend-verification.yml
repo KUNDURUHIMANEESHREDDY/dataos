@@ -186,30 +186,56 @@ jobs:
         run: |
           set -euo pipefail
           endpoint="repos/${GITHUB_REPOSITORY}/code-scanning/alerts?state=open&per_page=100"
-          alerts="$(gh api --paginate --jq '
-            .[]
-            | select(.state == "open" and
-                ((.rule.security_severity_level // "") == "critical" or
-                 (.rule.security_severity_level // "") == "high"))
-            | [
-                (.rule.security_severity_level // "unknown"),
-                (.rule.id // "unknown"),
-                (.most_recent_instance.location.path // "unknown"),
-                ((.most_recent_instance.location.start_line // 0) | tostring)
-              ]
-            | @tsv
-          ' "$endpoint")"
-          if [[ -n "$alerts" ]]; then
-            count="$(printf '%s\n' "$alerts" | wc -l | tr -d ' ')"
+          fetch_alerts() {
+            local ref="$1"
+            gh api --paginate --jq '
+              .[]
+              | select(.state == "open" and
+                  ((.rule.security_severity_level // "") == "critical" or
+                   (.rule.security_severity_level // "") == "high"))
+              | [
+                  (.rule.security_severity_level // "unknown"),
+                  (.rule.id // "unknown"),
+                  (.most_recent_instance.location.path // "unknown"),
+                  ((.most_recent_instance.location.start_line // 0) | tostring)
+                ]
+              | @tsv
+            ' "${endpoint}&ref=${ref}"
+          }
+          count_lines() {
+            if [[ -n "$1" ]]; then
+              printf '%s\\n' "$1" | sed '/^$/d' | wc -l | tr -d ' '
+            else
+              printf '0'
+            fi
+          }
+          if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
+            base_ref="refs/heads/${GITHUB_BASE_REF}"
+            head_ref="refs/heads/${GITHUB_HEAD_REF}"
+            base_alerts="$(fetch_alerts "$base_ref" | sort -u)"
+            head_alerts="$(fetch_alerts "$head_ref" | sort -u)"
+            base_count="$(count_lines "$base_alerts")"
+            head_count="$(count_lines "$head_alerts")"
+            new_alerts="$(comm -13 <(printf '%s\\n' "$base_alerts" | sed '/^$/d') <(printf '%s\\n' "$head_alerts" | sed '/^$/d'))"
+            echo "Base critical/high alerts: $base_count"
+            echo "PR-head critical/high alerts: $head_count"
+            if [[ -n "$new_alerts" ]]; then
+              echo "New critical/high alerts introduced by this PR (severity, rule, path, line):"
+              printf '%s\\n' "$new_alerts"
+              echo "::error::This PR introduces critical/high code-scanning alerts."
+              exit 1
+            fi
+            echo "No new critical/high alerts versus base. Main-branch gate remains fail-closed until the total reaches zero."
           else
-            count=0
-          fi
-          echo "Open critical/high code-scanning alerts: $count"
-          if [[ "$count" != "0" ]]; then
-            echo "Severity<TAB>Rule ID<TAB>Path<TAB>Line"
-            printf '%s\n' "$alerts"
-            echo "::error::Found $count open critical/high code-scanning alert(s); triage and remediate before release."
-            exit 1
+            alerts="$(fetch_alerts "refs/heads/${GITHUB_REF_NAME}" | sort -u)"
+            count="$(count_lines "$alerts")"
+            echo "Open critical/high code-scanning alerts on ${GITHUB_REF_NAME}: $count"
+            if [[ "$count" != "0" ]]; then
+              echo "Open alerts (severity, rule, path, line):"
+              printf '%s\\n' "$alerts"
+              echo "::error::Found $count open critical/high code-scanning alert(s); triage and remediate before release."
+              exit 1
+            fi
           fi
 
   backend-required:
