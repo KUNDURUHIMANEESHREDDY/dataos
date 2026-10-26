@@ -296,9 +296,11 @@ current core/API controls, not every optional provider's configuration.
 Storage defaults remain constructor arguments: `db_path="dataos.db"`, `blob_dir=".dataos_blobs`, and
 `PostgresStorage`'s connection string (currently no `DATABASE_URL` lookup).
 
-**No external service is required.** SQLite is the default. Postgres, S3, GCS, and Azure are optional and
-degrade gracefully — notably, `PostgresStorage` **silently falls back to an in-memory SQLite** if `psycopg2`
-fails to connect (`postgres_store.py:31-41`), which means a misconfigured Postgres looks like a working one.
+**No external service is required for the default SQLite store.** Postgres, S3, GCS, and Azure are optional.
+A requested PostgreSQL store now **fails closed** if the driver, connection, or schema initialization fails; it
+does not silently downgrade to ephemeral in-memory SQLite. That avoids reporting successful writes to a temporary
+store when the operator configured durable PostgreSQL. `mock_mode=True` is explicit SQLite emulation for tests
+only; do not use it as a production fallback.
 
 **By default no LLM is wired in.** `MultiAgentPipeline` defaults to `MockDeterministicProvider`, a
 string-templating stub. Embeddings default to `HashEmbeddingProvider(dimension=128)` — a feature hash, not a
