@@ -74,6 +74,32 @@ class TestGovernanceAndFederation(unittest.TestCase):
                self.storage.list_relationships(target_id=obj_original.id, relation_type=RelationType.SIMILAR_TO.value)
         self.assertTrue(len(rels) >= 1)
 
+    def test_empty_content_does_not_match_other_empty_documents(self):
+        """Blank payloads provide no evidence that two different objects are duplicates."""
+        first = self.storage.save_object(DataObject(
+            type="document",
+            properties={"title": "Invoice for January"},
+            content="",
+        ))
+        second = self.storage.save_object(DataObject(
+            type="document",
+            properties={"title": "Engineering design"},
+            content="",
+        ))
+
+        self.assertEqual(compute_minhash_jaccard("", ""), 0.0)
+        self.assertEqual(compute_minhash_jaccard("   ", "\\t\\n"), 0.0)
+
+        duplicates = self.deduplication.find_duplicates(
+            min_similarity=0.75,
+            auto_link_graph=False,
+        )
+        pair_ids = {first.id, second.id}
+        self.assertFalse(
+            any({item["object_a_id"], item["object_b_id"]} == pair_ids for item in duplicates),
+            "unrelated empty documents must not be reported as duplicates",
+        )
+
     def test_duplicate_detection_hashes_each_object_once(self):
         """A catalog scan computes fallback hashes per object, not per pair."""
         class TrackedObject:
