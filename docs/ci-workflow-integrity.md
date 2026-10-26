@@ -2,7 +2,7 @@
 
 The backend verification workflow runs `scripts/check_workflow_yaml.py` as a required release-gate dependency.
 
-The checker parses every `.yml` and `.yaml` file under `.github/workflows/` with a pinned PyYAML version and rejects duplicate mapping keys. This is important because duplicate YAML keys can silently override an earlier `needs`, `run`, or job definition and change the effective release policy without an obvious syntax error.
+The checker parses every `.yml` and `.yaml` file under `.github/workflows/` with a pinned PyYAML version and rejects duplicate mapping keys. It also asserts that `security-required` depends on all four security jobs and that `backend-required` depends on backend tests, PostgreSQL integration, security, and workflow lint. Both aggregates must use `if: always()` so they run and fail closed when a prerequisite fails, is skipped, or is cancelled. Duplicate YAML keys can otherwise silently override an earlier `needs`, `run`, or job definition.
 
 Run it locally after installing the same parser version used by CI:
 
