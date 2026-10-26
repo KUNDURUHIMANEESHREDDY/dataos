@@ -211,7 +211,7 @@ jobs:
           }
           if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
             base_ref="refs/heads/${GITHUB_BASE_REF}"
-            head_ref="refs/heads/${GITHUB_HEAD_REF}"
+            head_ref="$GITHUB_REF" # pull_request analyses are indexed at refs/pull/<number>/merge
             base_alerts="$(fetch_alerts "$base_ref" | sort -u)"
             head_alerts="$(fetch_alerts "$head_ref" | sort -u)"
             base_count="$(count_lines "$base_alerts")"
