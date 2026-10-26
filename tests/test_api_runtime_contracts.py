@@ -174,7 +174,7 @@ def test_health_probe_returns_service_unavailable_when_storage_fails(monkeypatch
     assert exc.value.detail == "DataOS storage is unavailable"
 
 
-def test_workflow_route_rejects_malformed_definition_and_duplicate_route_remains_unimplemented():
+def test_workflow_route_rejects_malformed_definition():
     # The workflow endpoint is implemented: an empty definition is invalid input,
     # so it must fail validation rather than claim the feature is unimplemented.
     with pytest.raises(HTTPException) as workflow_exc:
@@ -182,10 +182,57 @@ def test_workflow_route_rejects_malformed_definition_and_duplicate_route_remains
     assert workflow_exc.value.status_code == 422
     assert "nodes" in workflow_exc.value.detail
 
-    # Duplicate detection is a separate, still-unimplemented feature.
-    with pytest.raises(HTTPException) as duplicate_exc:
-        run(api.detect_duplicates_api())
-    assert duplicate_exc.value.status_code == 501
+
+def test_duplicate_detection_route_returns_candidates_without_graph_mutation(monkeypatch):
+    matches = [{
+        "object_a_id": "a",
+        "object_b_id": "b",
+        "similarity_score": 1.0,
+        "method": "exact_hash",
+        "is_exact_duplicate": True,
+    }]
+    called = {}
+
+    def find_duplicates(**kwargs):
+        called.update(kwargs)
+        return matches
+
+    monkeypatch.setattr(api.duplicate_detection_engine, "find_duplicates", find_duplicates)
+    result = run(api.detect_duplicates_api(min_similarity=0.8))
+
+    assert result == {
+        "object_id": None,
+        "min_similarity": 0.8,
+        "total": 1,
+        "duplicates": matches,
+    }
+    assert called == {
+        "target_object_id": None,
+        "min_similarity": 0.8,
+        "auto_link_graph": False,
+    }
+
+
+def test_duplicate_detection_route_rejects_unknown_object(monkeypatch):
+    monkeypatch.setattr(api.dataos.storage, "get_object", lambda object_id: None)
+    monkeypatch.setattr(
+        api.duplicate_detection_engine,
+        "find_duplicates",
+        lambda **kwargs: pytest.fail("must not scan when target object does not exist"),
+    )
+    with pytest.raises(HTTPException) as exc:
+        run(api.detect_duplicates_api(object_id="missing"))
+    assert exc.value.status_code == 404
+
+
+def test_duplicate_detection_route_validates_similarity_and_object_id():
+    with pytest.raises(HTTPException) as similarity_exc:
+        run(api.detect_duplicates_api(min_similarity=1.01))
+    assert similarity_exc.value.status_code == 422
+
+    with pytest.raises(HTTPException) as object_exc:
+        run(api.detect_duplicates_api(object_id="   "))
+    assert object_exc.value.status_code == 422
 
 
 def test_workflow_route_rejects_overload_with_retry_after(monkeypatch):
