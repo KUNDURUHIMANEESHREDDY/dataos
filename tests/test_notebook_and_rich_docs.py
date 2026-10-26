@@ -134,7 +134,7 @@ Here are the evaluation results:
         malformed_images = "![" * 5000
         malformed_footnote = "[^" + ("1" * 5000) + "]:" + (" " * 5000)
         extracted = RichDocumentExtractor.extract_markdown_tables_and_figures(
-            malformed_images + "\\n" + malformed_footnote
+            malformed_images + "\n" + malformed_footnote
         )
         self.assertEqual(extracted["figure_count"], 0)
         self.assertEqual(extracted["citation_count"], 0)
