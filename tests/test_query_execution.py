@@ -43,6 +43,24 @@ class TestQueryExecution(unittest.TestCase):
         eng_row = next(r for r in res["results"] if r["department"] == "Eng")
         self.assertEqual(eng_row["avg_sal"], 115000.0)
 
+    def test_sql_engine_rejects_mutating_sql(self):
+        """User SQL must not attach files, alter schema, or inspect PRAGMAs."""
+        for query in (
+            "ATTACH DATABASE ':memory:' AS injected",
+            "CREATE TABLE injected (id INTEGER)",
+            "PRAGMA database_list",
+        ):
+            with self.subTest(query=query):
+                result = self.query_engine.execute_query(query, query_type="sql")
+                self.assertFalse(result["success"])
+                self.assertTrue(result["error"])
+
+        safe_result = self.query_engine.execute_query(
+            "SELECT COUNT(*) AS count FROM employees", query_type="sql"
+        )
+        self.assertTrue(safe_result["success"])
+        self.assertEqual(safe_result["results"][0]["count"], 3)
+
     def test_python_query_execution(self):
         """Verify Python execution."""
         code = "results['total_eng_salary'] = int(dfs['employees'][dfs['employees']['department'] == 'Eng']['salary'].sum())"
