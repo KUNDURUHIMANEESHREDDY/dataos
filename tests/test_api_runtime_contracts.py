@@ -275,6 +275,13 @@ def test_duplicate_detection_route_validates_similarity_and_object_id():
     assert object_exc.value.status_code == 422
 
 
+@pytest.mark.parametrize("threshold", [float("nan"), float("inf"), float("-inf")])
+def test_duplicate_detection_rejects_non_finite_similarity_threshold(threshold):
+    with pytest.raises(HTTPException) as exc:
+        run(api.detect_duplicates_api(min_similarity=threshold))
+    assert exc.value.status_code == 422
+
+
 def test_workflow_route_rejects_overload_with_retry_after(monkeypatch):
     # A saturated worker budget must fail fast instead of queueing more DAG work.
     monkeypatch.setattr(
