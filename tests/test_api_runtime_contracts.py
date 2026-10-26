@@ -198,13 +198,14 @@ def test_duplicate_detection_route_returns_candidates_without_graph_mutation(mon
         return matches
 
     monkeypatch.setattr(api.duplicate_detection_engine, "find_duplicates", find_duplicates)
-    monkeypatch.setattr(api.dataos.storage, "count_objects", lambda: 2)
+    monkeypatch.setattr(api.dataos.storage, "list_objects", lambda **kwargs: [object(), object()])
     result = run(api.detect_duplicates_api(min_similarity=0.8))
 
     assert result == {
         "object_id": None,
         "min_similarity": 0.8,
-        "catalog_objects": 2,
+        "catalog_objects_observed": 2,
+        "catalog_count_capped": False,
         "scanned_objects": 2,
         "truncated": False,
         "total": 1,
@@ -218,10 +219,11 @@ def test_duplicate_detection_route_returns_candidates_without_graph_mutation(mon
 
 
 def test_duplicate_detection_route_reports_when_catalog_scan_is_truncated(monkeypatch):
-    monkeypatch.setattr(api.dataos.storage, "count_objects", lambda: 1200)
+    monkeypatch.setattr(api.dataos.storage, "list_objects", lambda **kwargs: list(range(1001)))
     monkeypatch.setattr(api.duplicate_detection_engine, "find_duplicates", lambda **kwargs: [])
     result = run(api.detect_duplicates_api())
-    assert result["catalog_objects"] == 1200
+    assert result["catalog_objects_observed"] == 1001
+    assert result["catalog_count_capped"] is True
     assert result["scanned_objects"] == 1000
     assert result["truncated"] is True
 
