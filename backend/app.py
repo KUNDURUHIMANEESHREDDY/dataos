@@ -23,7 +23,7 @@ from dataos_system import DataOS
 from core.object.model import DataObject, ObjectType
 from core.relation.model import Relationship, RelationType
 from core.permissions.policy import Capability
-from engines.governance.deduplication import DuplicateDetectionEngine
+from engines.governance.deduplication import DEFAULT_DUPLICATE_SCAN_LIMIT, DuplicateDetectionEngine
 from backend.knowledge_rag import create_knowledge_router
 from backend.cors_config import cors_middleware_options
 from backend.workflow_api import WorkflowRequestError, execute_safe_workflow
@@ -629,6 +629,7 @@ async def detect_duplicates_api(
             detail="min_similarity must be between 0.0 and 1.0.",
         )
 
+    catalog_object_count = await run_in_threadpool(dataos.storage.count_objects)
     duplicates = await run_in_threadpool(
         duplicate_detection_engine.find_duplicates,
         target_object_id=object_id,
@@ -639,6 +640,9 @@ async def detect_duplicates_api(
     return {
         "object_id": object_id,
         "min_similarity": min_similarity,
+        "catalog_objects": catalog_object_count,
+        "scanned_objects": min(catalog_object_count, DEFAULT_DUPLICATE_SCAN_LIMIT),
+        "truncated": catalog_object_count > DEFAULT_DUPLICATE_SCAN_LIMIT,
         "total": len(duplicates),
         "duplicates": duplicates,
     }
