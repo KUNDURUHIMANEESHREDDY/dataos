@@ -97,41 +97,63 @@ class DuplicateDetectionEngine:
         all_objects = self.storage.list_objects(limit=DEFAULT_DUPLICATE_SCAN_LIMIT)
         results: List[Dict[str, Any]] = []
 
-        target_pool = [self.storage.get_object(target_object_id)] if target_object_id else all_objects
-        target_pool = [o for o in target_pool if o is not None]
+        target_object = self.storage.get_object(target_object_id) if target_object_id else None
+        target_pool = [target_object] if target_object_id else all_objects
+        target_pool = [obj for obj in target_pool if obj is not None]
+
+        # Resolve each object's hash/content/title once. dict.get(key, obj.compute_hash())
+        # evaluates compute_hash even when the key exists, and doing that inside the
+        # pairwise loop makes hashing O(n^2) for a catalog scan.
+        objects_by_id = {obj.id: obj for obj in all_objects}
+        for obj in target_pool:
+            objects_by_id[obj.id] = obj
+
+        comparison_data: Dict[str, Dict[str, Any]] = {}
+        for object_id, obj in objects_by_id.items():
+            metadata = obj.metadata or {}
+            properties = obj.properties or {}
+            content = str(obj.content)
+            content_hash = (
+                metadata["content_hash"]
+                if "content_hash" in metadata
+                else obj.compute_hash()
+            )
+            comparison_data[object_id] = {
+                "content": content,
+                "normalized_content": content.strip(),
+                "content_hash": content_hash,
+                "title": properties.get("title") or properties.get("filename", ""),
+                "properties": properties,
+            }
 
         for i, obj_a in enumerate(target_pool):
             search_pool = all_objects[i + 1:] if not target_object_id else all_objects
+            data_a = comparison_data[obj_a.id]
 
             for obj_b in search_pool:
                 if obj_a.id == obj_b.id:
                     continue
 
-                # 1. Exact Content / Hash Check
-                content_a = str(obj_a.content).strip()
-                content_b = str(obj_b.content).strip()
-                
-                hash_a = obj_a.metadata.get("content_hash", obj_a.compute_hash())
-                hash_b = obj_b.metadata.get("content_hash", obj_b.compute_hash())
-                
+                data_b = comparison_data[obj_b.id]
+                content_a = data_a["normalized_content"]
+                content_b = data_b["normalized_content"]
+                hash_a = data_a["content_hash"]
+                hash_b = data_b["content_hash"]
+
                 is_exact = (hash_a == hash_b) or (bool(content_a) and content_a == content_b)
                 method = "exact_hash" if is_exact else None
                 sim_score = 1.0 if is_exact else 0.0
 
                 # 2. MinHash Jaccard Check on Content
                 if not is_exact:
-                    content_a = str(obj_a.content)
-                    content_b = str(obj_b.content)
-                    jaccard_sim = compute_minhash_jaccard(content_a, content_b)
-                    
+                    jaccard_sim = compute_minhash_jaccard(data_a["content"], data_b["content"])
                     if jaccard_sim >= min_similarity:
                         sim_score = jaccard_sim
                         method = "minhash_jaccard"
 
                 # 3. Levenshtein Check on Titles / Filenames
-                title_a = obj_a.properties.get("title") or obj_a.properties.get("filename", "")
-                title_b = obj_b.properties.get("title") or obj_b.properties.get("filename", "")
-                
+                title_a = data_a["title"]
+                title_b = data_b["title"]
                 if title_a and title_b:
                     lev_sim = compute_levenshtein_similarity(title_a, title_b)
                     if lev_sim > sim_score and lev_sim >= min_similarity:
@@ -139,11 +161,13 @@ class DuplicateDetectionEngine:
                         method = "levenshtein_title"
 
                 if sim_score >= min_similarity:
+                    properties_a = data_a["properties"]
+                    properties_b = data_b["properties"]
                     duplicate_entry = {
                         "object_a_id": obj_a.id,
                         "object_b_id": obj_b.id,
-                        "object_a_name": obj_a.properties.get("filename", obj_a.properties.get("title", obj_a.id[:8])),
-                        "object_b_name": obj_b.properties.get("filename", obj_b.properties.get("title", obj_b.id[:8])),
+                        "object_a_name": properties_a.get("filename", properties_a.get("title", obj_a.id[:8])),
+                        "object_b_name": properties_b.get("filename", properties_b.get("title", obj_b.id[:8])),
                         "similarity_score": sim_score,
                         "method": method,
                         "is_exact_duplicate": is_exact
@@ -161,4 +185,4 @@ class DuplicateDetectionEngine:
                         ))
 
         results.sort(key=lambda x: x["similarity_score"], reverse=True)
-        return results
+
