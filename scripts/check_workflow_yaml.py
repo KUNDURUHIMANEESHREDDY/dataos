@@ -43,8 +43,45 @@ UniqueKeyLoader.add_constructor(
 )
 
 
+RESULT_ENV = {
+    "secret-scan": "SECRET_SCAN_RESULT",
+    "dependency-audit": "DEPENDENCY_AUDIT_RESULT",
+    "sbom": "SBOM_RESULT",
+    "codeql": "CODEQL_RESULT",
+    "backend": "BACKEND_RESULT",
+    "postgres-storage": "POSTGRES_RESULT",
+    "security-required": "SECURITY_RESULT",
+    "workflow-lint": "WORKFLOW_LINT_RESULT",
+}
+
+
+def has_fail_closed_result_checks(job: dict, required_needs: set[str]) -> bool:
+    """Require every prerequisite result to be explicitly checked for success."""
+    for step in job.get("steps", []):
+        if not isinstance(step, dict):
+            continue
+        env = step.get("env")
+        run = step.get("run")
+        if not isinstance(env, dict) or not isinstance(run, str):
+            continue
+
+        for dependency in required_needs:
+            variable = RESULT_ENV.get(dependency)
+            expected_expression = f"${{{{ needs.{dependency}.result }}}}"
+            expected_guard = f'test "${variable}" = "success"'
+            if (
+                variable is None
+                or env.get(variable) != expected_expression
+                or expected_guard not in run
+            ):
+                break
+        else:
+            return True
+    return False
+
+
 def validate_gate_contract(path: Path, workflow: object) -> bool:
-    """Ensure release aggregates cannot silently omit a required verification job."""
+    """Ensure release aggregates both depend on and fail closed for required jobs."""
     if not isinstance(workflow, dict):
         print(f"FAIL: {path}: workflow root must be a mapping", file=sys.stderr)
         return False
@@ -89,8 +126,15 @@ def validate_gate_contract(path: Path, workflow: object) -> bool:
             )
             ok = False
 
+        if not has_fail_closed_result_checks(job, required_needs):
+            print(
+                f"FAIL: {path}: {job_id!r} must explicitly require success for every prerequisite result",
+                file=sys.stderr,
+            )
+            ok = False
+
     if ok:
-        print(f"PASS: {path}: required release-gate dependencies are intact")
+        print(f"PASS: {path}: required release-gate dependencies and fail-closed checks are intact")
     return ok
 
 
