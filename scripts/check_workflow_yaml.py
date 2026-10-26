@@ -97,6 +97,7 @@ def has_critical_high_alert_gate(job: dict) -> bool:
         'fetch_alerts "ref=refs/heads/${GITHUB_REF_NAME}"',
         '== "critical"',
         '== "high"',
+        '.number // 0',
         'if [[ "$count" != "0" ]]',
         "exit 1",
     )
@@ -114,7 +115,7 @@ def has_critical_high_alert_gate(job: dict) -> bool:
             or env.get("PR_NUMBER") != "${{ github.event.pull_request.number }}"
         ):
             continue
-        if all(fragment in run for fragment in required_fragments):
+        if all(fragment in run for fragment in required_fragments) and "sort -u" not in run:
             return True
     return False
 
