@@ -102,6 +102,8 @@ Generate a token without committing or printing it to logs:
 export DATAOS_API_TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe(48))')"
 ```
 
+Python execution is a separate high-risk capability. In production, both `/api/compute/python` and unified-query `query_type=python` are disabled unless `DATAOS_ALLOW_PYTHON_COMPUTE=true` is explicitly configured. Keep it disabled unless the execution sandbox and access controls have been reviewed. This flag is an opt-in, not proof that the sandbox is safe.
+
 This is a single shared bearer-token boundary, not per-user identity or role-based authorization. Rotate it through secret management and do not expose it to browser bundles. If a public browser client needs access, place a properly authenticated backend-for-frontend or identity-aware gateway in front of DataOS rather than embedding this token in frontend code.
 
 
@@ -290,11 +292,15 @@ execution at 10s and 10 MB output.
 
 ## Configuration
 
-There is exactly **one environment variable** in the product: `DATAOS_MASTER_KEY`
-(`infrastructure/privacy/encryption.py:54`).
+Core encryption reads `DATAOS_MASTER_KEY` (`infrastructure/privacy/encryption.py:54`). The FastAPI
+deployment layer also reads environment markers (`DATAOS_ENV`, `APP_ENV`, `ENVIRONMENT`), the production
+API bearer secret (`DATAOS_API_TOKEN`), CORS configuration (`DATAOS_CORS_ORIGINS`), sharing-token secret
+(`DATAOS_SHARING_TOKEN_SECRET`), and the high-risk Python-compute opt-in
+(`DATAOS_ALLOW_PYTHON_COMPUTE`). Check the relevant module before deploying; this list describes the
+current core/API controls, not every optional provider's configuration.
 
-Everything else is a constructor argument: `db_path="dataos.db"`, `blob_dir=".dataos_blobs"`, and
-`PostgresStorage`'s connection string (hardcoded default, no `DATABASE_URL` lookup).
+Storage defaults remain constructor arguments: `db_path="dataos.db"`, `blob_dir=".dataos_blobs`, and
+`PostgresStorage`'s connection string (currently no `DATABASE_URL` lookup).
 
 **No external service is required.** SQLite is the default. Postgres, S3, GCS, and Azure are optional and
 degrade gracefully — notably, `PostgresStorage` **silently falls back to an in-memory SQLite** if `psycopg2`
