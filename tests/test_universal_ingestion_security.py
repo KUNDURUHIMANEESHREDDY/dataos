@@ -39,7 +39,7 @@ class TestUniversalIngestionSecurity(unittest.TestCase):
             self.assertEqual(result["status"], "ingested")
             self.assertEqual(result["filename"], "safe.csv")
 
-            with self.assertRaisesRegex(ValueError, "basename"):
+            with self.assertRaisesRegex(ValueError, "filename"):
                 pipeline.ingest(Path("../outside.csv"), filename="outside.csv")
 
     def test_string_paths_are_content_not_filesystem_reads(self):
