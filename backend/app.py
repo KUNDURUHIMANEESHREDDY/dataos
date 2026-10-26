@@ -23,6 +23,7 @@ from dataos_system import DataOS
 from core.object.model import DataObject, ObjectType
 from core.relation.model import Relationship, RelationType
 from core.permissions.policy import Capability
+from engines.governance.deduplication import DuplicateDetectionEngine
 from backend.knowledge_rag import create_knowledge_router
 from backend.cors_config import cors_middleware_options
 from backend.workflow_api import WorkflowRequestError, execute_safe_workflow
@@ -92,6 +93,7 @@ def require_python_compute_enabled() -> None:
 # Initialize single DataOS kernel
 dataos = DataOS(db_path="dataos.db", blob_dir=".dataos_blobs")
 workflow_engine = WorkflowEngine(storage=dataos.storage)
+duplicate_detection_engine = DuplicateDetectionEngine(storage=dataos.storage)
 # Bound concurrent synchronous DAG runs so API clients cannot exhaust the worker pool.
 workflow_slots = threading.BoundedSemaphore(value=4)
 
@@ -609,12 +611,37 @@ async def execute_workflow(req: WorkflowExecutionRequest):
 @app.get("/api/governance/duplicates", summary="Fuzzy Duplicate Detection (Rule #58)")
 async def detect_duplicates_api(
     object_id: Optional[str] = None,
-    min_similarity: float = 0.75
+    min_similarity: float = 0.75,
 ):
-    raise HTTPException(
-        status_code=501,
-        detail="Fuzzy duplicate detection is not implemented in the current DataOS runtime.",
+    """Return duplicate candidates without mutating the graph from a GET request."""
+    if object_id is not None:
+        if not object_id.strip() or object_id != object_id.strip() or len(object_id) > 200:
+            raise HTTPException(
+                status_code=422,
+                detail="object_id must be a non-empty identifier of at most 200 characters.",
+            )
+        if dataos.storage.get_object(object_id) is None:
+            raise HTTPException(status_code=404, detail="Object not found.")
+
+    if not 0.0 <= min_similarity <= 1.0:
+        raise HTTPException(
+            status_code=422,
+            detail="min_similarity must be between 0.0 and 1.0.",
+        )
+
+    duplicates = await run_in_threadpool(
+        duplicate_detection_engine.find_duplicates,
+        target_object_id=object_id,
+        min_similarity=min_similarity,
+        # This is a read-only GET contract. Graph linking is a separate mutation.
+        auto_link_graph=False,
     )
+    return {
+        "object_id": object_id,
+        "min_similarity": min_similarity,
+        "total": len(duplicates),
+        "duplicates": duplicates,
+    }
 
 
 @app.get("/api/governance/quota/{principal_id}", summary="Get Principal Quota & Usage Status (Rule #61)")
