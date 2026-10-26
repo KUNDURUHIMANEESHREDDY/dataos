@@ -629,7 +629,14 @@ async def detect_duplicates_api(
             detail="min_similarity must be between 0.0 and 1.0.",
         )
 
-    catalog_object_count = await run_in_threadpool(dataos.storage.count_objects)
+    # Probe only one object beyond the engine's cap; avoid counting the whole
+    # catalog on every request just to disclose whether the result is truncated.
+    catalog_probe = await run_in_threadpool(
+        dataos.storage.list_objects,
+        limit=DEFAULT_DUPLICATE_SCAN_LIMIT + 1,
+    )
+    catalog_objects_observed = len(catalog_probe)
+    catalog_count_capped = catalog_objects_observed > DEFAULT_DUPLICATE_SCAN_LIMIT
     duplicates = await run_in_threadpool(
         duplicate_detection_engine.find_duplicates,
         target_object_id=object_id,
@@ -640,9 +647,10 @@ async def detect_duplicates_api(
     return {
         "object_id": object_id,
         "min_similarity": min_similarity,
-        "catalog_objects": catalog_object_count,
-        "scanned_objects": min(catalog_object_count, DEFAULT_DUPLICATE_SCAN_LIMIT),
-        "truncated": catalog_object_count > DEFAULT_DUPLICATE_SCAN_LIMIT,
+        "catalog_objects_observed": catalog_objects_observed,
+        "catalog_count_capped": catalog_count_capped,
+        "scanned_objects": min(catalog_objects_observed, DEFAULT_DUPLICATE_SCAN_LIMIT),
+        "truncated": catalog_count_capped,
         "total": len(duplicates),
         "duplicates": duplicates,
     }
