@@ -52,6 +52,8 @@ def compute_levenshtein_similarity(s1: str, s2: str) -> float:
 def get_k_shingles(text: str, k: int = 3) -> Set[str]:
     """Extract character k-shingles from text."""
     clean = re.sub(r"\s+", " ", text.strip().lower())
+    if not clean:
+        return set()
     if len(clean) < k:
         return {clean}
     return {clean[i:i + k] for i in range(len(clean) - k + 1)}
@@ -64,8 +66,8 @@ def compute_minhash_jaccard(text1: str, text2: str, num_perm: int = 64) -> float
     shingles1 = get_k_shingles(text1)
     shingles2 = get_k_shingles(text2)
 
-    if not shingles1 and not shingles2:
-        return 1.0
+    # Empty content carries no evidence of similarity. Treating two empty
+    # shingle sets as identical makes unrelated blank documents look like matches.
     if not shingles1 or not shingles2:
         return 0.0
 
