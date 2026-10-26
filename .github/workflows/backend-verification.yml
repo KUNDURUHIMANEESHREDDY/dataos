@@ -200,14 +200,14 @@ jobs:
             | @tsv
           ' "$endpoint")"
           if [[ -n "$alerts" ]]; then
-            count="$(printf '%s\\n' "$alerts" | wc -l | tr -d ' ')"
+            count="$(printf '%s\n' "$alerts" | wc -l | tr -d ' ')"
           else
             count=0
           fi
           echo "Open critical/high code-scanning alerts: $count"
           if [[ "$count" != "0" ]]; then
             echo "Severity<TAB>Rule ID<TAB>Path<TAB>Line"
-            printf '%s\\n' "$alerts"
+            printf '%s\n' "$alerts"
             echo "::error::Found $count open critical/high code-scanning alert(s); triage and remediate before release."
             exit 1
           fi
