@@ -14,7 +14,8 @@ from engines.query.query_engine import UnifiedQueryEngine
 class TestQueryExecution(unittest.TestCase):
 
     def setUp(self):
-        self.temp_db = tempfile.mktemp(suffix=".db")
+        fd, self.temp_db = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
         self.storage = SQLiteStorage(db_path=self.temp_db)
         self.query_engine = UnifiedQueryEngine(self.storage)
 
