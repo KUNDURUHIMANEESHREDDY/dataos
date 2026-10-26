@@ -176,11 +176,12 @@ class WorkflowExecutionRequest(BaseModel):
 async def list_objects(
     object_type: Optional[str] = None,
     source: Optional[str] = None,
-    limit: int = 100,
-    offset: int = 0
+    limit: int = FastQuery(default=100, ge=1, le=500),
+    offset: int = FastQuery(default=0, ge=0, le=1_000_000)
 ):
     objs = dataos.storage.list_objects(object_type=object_type, source=source, limit=limit, offset=offset)
-    return {"total": len(objs), "objects": [o.to_dict() for o in objs]}
+    total = dataos.storage.count_objects(object_type=object_type, source=source)
+    return {"total": total, "objects": [o.to_dict() for o in objs]}
 
 
 @app.post("/api/objects/", summary="Create DataOS Object")
@@ -222,17 +223,25 @@ async def list_relationships(
     source_id: Optional[str] = None,
     target_id: Optional[str] = None,
     relation_type: Optional[str] = None,
-    min_confidence: float = 0.0,
-    limit: int = 1000
+    min_confidence: float = FastQuery(default=0.0, ge=0.0, le=1.0),
+    limit: int = FastQuery(default=1000, ge=1, le=1000),
+    offset: int = FastQuery(default=0, ge=0, le=1_000_000),
 ):
     rels = dataos.storage.list_relationships(
         source_id=source_id,
         target_id=target_id,
         relation_type=relation_type,
         min_confidence=min_confidence,
-        limit=limit
+        limit=limit,
+        offset=offset,
     )
-    return {"total": len(rels), "relationships": [r.to_dict() for r in rels]}
+    total = dataos.storage.count_relationships(
+        source_id=source_id,
+        target_id=target_id,
+        relation_type=relation_type,
+        min_confidence=min_confidence,
+    )
+    return {"total": total, "relationships": [r.to_dict() for r in rels]}
 
 
 @app.post("/api/relationships/", summary="Create Relationship")

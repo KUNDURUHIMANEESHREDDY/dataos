@@ -277,6 +277,28 @@ class SQLiteStorage(StorageBackend):
 
             return [self._row_to_object(r) for r in rows]
 
+    def count_objects(
+        self,
+        object_type: Optional[str] = None,
+        source: Optional[str] = None,
+    ) -> int:
+        """Count non-deleted objects matching the same filters as list_objects."""
+        with self._lock:
+            conn = self._get_connection()
+            try:
+                query = "SELECT COUNT(*) FROM objects WHERE deleted_at IS NULL"
+                params = []
+                if object_type:
+                    query += " AND type = ?"
+                    params.append(object_type)
+                if source:
+                    query += " AND source LIKE ?"
+                    params.append(f"%{source}%")
+                row = conn.execute(query, params).fetchone()
+                return int(row[0])
+            finally:
+                self._close(conn)
+
     def delete_object(self, object_id: str, soft: bool = True) -> bool:
         """Delete a DataObject by ID."""
         with self._lock:
@@ -352,7 +374,8 @@ class SQLiteStorage(StorageBackend):
         target_id: Optional[str] = None,
         relation_type: Optional[str] = None,
         min_confidence: float = 0.0,
-        limit: int = 1000
+        limit: int = 1000,
+        offset: int = 0
     ) -> List[Relationship]:
         """List Relationships with optional filters."""
         with self._lock:
@@ -371,14 +394,41 @@ class SQLiteStorage(StorageBackend):
                 query += " AND relation_type = ?"
                 params.append(relation_type)
 
-            query += " ORDER BY confidence DESC, updated_at DESC LIMIT ?"
-            params.append(limit)
+            query += " ORDER BY confidence DESC, updated_at DESC LIMIT ? OFFSET ?"
+            params.extend([limit, offset])
 
             cursor.execute(query, params)
             rows = cursor.fetchall()
             self._close(conn)
 
             return [self._row_to_relationship(r) for r in rows]
+
+    def count_relationships(
+        self,
+        source_id: Optional[str] = None,
+        target_id: Optional[str] = None,
+        relation_type: Optional[str] = None,
+        min_confidence: float = 0.0,
+    ) -> int:
+        """Count active relationships with the same filters as list_relationships."""
+        with self._lock:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            query = "SELECT COUNT(*) FROM relationships WHERE deleted_at IS NULL AND confidence >= ?"
+            params = [min_confidence]
+            if source_id:
+                query += " AND source_id = ?"
+                params.append(source_id)
+            if target_id:
+                query += " AND target_id = ?"
+                params.append(target_id)
+            if relation_type:
+                query += " AND relation_type = ?"
+                params.append(relation_type)
+            cursor.execute(query, params)
+            total = int(cursor.fetchone()[0])
+            self._close(conn)
+            return total
 
     def delete_relationship(self, relation_id: str, soft: bool = True) -> bool:
         """Delete a Relationship by ID."""
