@@ -121,7 +121,7 @@ class WorkflowYamlGateTests(unittest.TestCase):
     def test_alert_gate_deduplication_is_rejected(self):
         workflow = _valid_workflow()
         alert_step = workflow["jobs"]["security-required"]["steps"][-1]
-        alert_step["run"] = alert_step["run"].replace('alerts="$(fetch_alerts "pr=${PR_NUMBER}")"', 'alerts="$(fetch_alerts "pr=${PR_NUMBER}" | sort -u)"')
+        alert_step["run"] = alert_step["run"].replace('fetch_alerts "ref=refs/pull/${PR_NUMBER}/merge"', 'fetch_alerts "ref=refs/pull/${PR_NUMBER}/merge" | sort -u')
         self.assertFalse(validate_gate_contract(Path("workflow.yml"), workflow))
 
 
