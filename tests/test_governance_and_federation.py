@@ -100,6 +100,26 @@ class TestGovernanceAndFederation(unittest.TestCase):
             "unrelated empty documents must not be reported as duplicates",
         )
 
+    def test_duplicate_detection_bounds_results_and_reports_total_matches(self):
+        """The API can retain top matches without allocating an unbounded result list."""
+        for content in ("alpha", "bravo", "charlie"):
+            self.storage.save_object(DataObject(
+                type="document",
+                properties={"title": "Shared report"},
+                content=content,
+            ))
+
+        matches, total = self.deduplication.find_duplicates(
+            min_similarity=0.99,
+            auto_link_graph=False,
+            max_results=1,
+            return_metadata=True,
+        )
+
+        self.assertEqual(total, 3)
+        self.assertEqual(len(matches), 1)
+        self.assertEqual(matches[0]["similarity_score"], 1.0)
+
     def test_duplicate_detection_hashes_each_object_once(self):
         """A catalog scan computes fallback hashes per object, not per pair."""
         class TrackedObject:

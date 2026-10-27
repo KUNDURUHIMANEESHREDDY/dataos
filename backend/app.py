@@ -23,7 +23,11 @@ from dataos_system import DataOS
 from core.object.model import DataObject, ObjectType
 from core.relation.model import Relationship, RelationType
 from core.permissions.policy import Capability
-from engines.governance.deduplication import DEFAULT_DUPLICATE_SCAN_LIMIT, DuplicateDetectionEngine
+from engines.governance.deduplication import (
+    DEFAULT_DUPLICATE_RESULT_LIMIT,
+    DEFAULT_DUPLICATE_SCAN_LIMIT,
+    DuplicateDetectionEngine,
+)
 from backend.knowledge_rag import create_knowledge_router
 from backend.cors_config import cors_middleware_options
 from backend.workflow_api import WorkflowRequestError, execute_safe_workflow
@@ -638,12 +642,15 @@ async def detect_duplicates_api(
     )
     catalog_objects_observed = len(catalog_probe)
     catalog_count_capped = catalog_objects_observed > DEFAULT_DUPLICATE_SCAN_LIMIT
-    duplicates = await run_in_threadpool(
+    duplicates, total_matches = await run_in_threadpool(
         duplicate_detection_engine.find_duplicates,
         target_object_id=object_id,
         min_similarity=min_similarity,
         # This is a read-only GET contract. Graph linking is a separate mutation.
         auto_link_graph=False,
+        # Bound retained candidates and response size even when many pairs match.
+        max_results=DEFAULT_DUPLICATE_RESULT_LIMIT,
+        return_metadata=True,
     )
     return {
         "object_id": object_id,
@@ -652,7 +659,9 @@ async def detect_duplicates_api(
         "catalog_count_capped": catalog_count_capped,
         "scanned_objects": min(catalog_objects_observed, DEFAULT_DUPLICATE_SCAN_LIMIT),
         "truncated": catalog_count_capped,
-        "total": len(duplicates),
+        "result_limit": DEFAULT_DUPLICATE_RESULT_LIMIT,
+        "results_truncated": total_matches > len(duplicates),
+        "total": total_matches,
         "duplicates": duplicates,
     }
 

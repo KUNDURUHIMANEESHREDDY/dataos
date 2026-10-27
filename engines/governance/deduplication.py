@@ -9,13 +9,15 @@ Implements:
 
 from __future__ import annotations
 import hashlib
+import heapq
 import re
-from typing import Dict, Any, List, Set, Tuple, Optional
+from typing import Dict, Any, List, Set, Tuple, Optional, Union
 from core.object.model import DataObject
 from core.relation.model import Relationship, RelationType
 from infrastructure.storage.base import StorageBackend
 
 DEFAULT_DUPLICATE_SCAN_LIMIT = 1000
+DEFAULT_DUPLICATE_RESULT_LIMIT = 1000
 
 
 def compute_levenshtein_distance(s1: str, s2: str) -> int:
@@ -87,17 +89,31 @@ class DuplicateDetectionEngine:
         self,
         target_object_id: Optional[str] = None,
         min_similarity: float = 0.75,
-        auto_link_graph: bool = True
-    ) -> List[Dict[str, Any]]:
+        auto_link_graph: bool = True,
+        max_results: Optional[int] = None,
+        return_metadata: bool = False,
+    ) -> Union[List[Dict[str, Any]], Tuple[List[Dict[str, Any]], int]]:
         """
         Detect duplicates against a target object or across the entire catalog.
         Categorizes matches into:
         - exact_hash (1.0 similarity)
         - near_duplicate_minhash (high Jaccard overlap)
         - title_similar_levenshtein (high string similarity)
+
+        max_results bounds retained/returned candidates, not pair comparisons or
+        optional graph-link side effects. return_metadata adds the exact match count
+        so API callers can signal truncation without retaining every result in memory.
         """
+        if max_results is not None and (
+            isinstance(max_results, bool) or not isinstance(max_results, int) or max_results < 1
+        ):
+            raise ValueError("max_results must be a positive integer or None")
+
         all_objects = self.storage.list_objects(limit=DEFAULT_DUPLICATE_SCAN_LIMIT)
         results: List[Dict[str, Any]] = []
+        result_heap: List[Tuple[float, int, Dict[str, Any]]] = []
+        matches_seen = 0
+        sequence = 0
 
         target_object = self.storage.get_object(target_object_id) if target_object_id else None
         target_pool = [target_object] if target_object_id else all_objects
@@ -174,7 +190,18 @@ class DuplicateDetectionEngine:
                         "method": method,
                         "is_exact_duplicate": is_exact
                     }
-                    results.append(duplicate_entry)
+                    matches_seen += 1
+                    if max_results is None:
+                        results.append(duplicate_entry)
+                    else:
+                        # Keep only the best bounded set; negative sequence numbers
+                        # preserve earlier candidates when similarity scores tie.
+                        candidate = (float(sim_score), -sequence, duplicate_entry)
+                        if len(result_heap) < max_results:
+                            heapq.heappush(result_heap, candidate)
+                        elif candidate[:2] > result_heap[0][:2]:
+                            heapq.heapreplace(result_heap, candidate)
+                        sequence += 1
 
                     # Auto-link candidate duplicates in the graph (Rule #58)
                     if auto_link_graph:
@@ -186,6 +213,18 @@ class DuplicateDetectionEngine:
                             metadata={"method": method, "is_exact": is_exact}
                         ))
 
-        results.sort(key=lambda x: x["similarity_score"], reverse=True)
+        if max_results is not None:
+            results = [
+                entry
+                for _, _, entry in sorted(
+                    result_heap,
+                    key=lambda item: (-item[0], -item[1]),
+                )
+            ]
+        else:
+            results.sort(key=lambda x: x["similarity_score"], reverse=True)
+
+        if return_metadata:
+            return results, matches_seen
         return results
 
