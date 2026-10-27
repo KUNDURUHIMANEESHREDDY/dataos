@@ -234,16 +234,16 @@ jobs:
             fi
           }
           if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
-            alerts="$(fetch_alerts "pr=${PR_NUMBER}")"
+            alerts="$(fetch_alerts "ref=refs/pull/${PR_NUMBER}/merge")"
             count="$(count_lines "$alerts")"
-            echo "Open critical/high alerts associated with PR #${PR_NUMBER}: $count"
+            echo "Open critical/high alerts associated with PR #${PR_NUMBER} merge ref: $count"
             if [[ "$count" != "0" ]]; then
               echo "PR alerts (number, severity, rule, path, line):"
               printf '%s\n' "$alerts"
               echo "::error::This PR has open critical/high code-scanning alerts."
               exit 1
             fi
-            echo "No open critical/high alerts associated with this PR. Main-branch gate remains fail-closed until its total reaches zero."
+            echo "No open critical/high alerts associated with this PR merge ref. Main-branch gate remains fail-closed until its total reaches zero."
           else
             alerts="$(fetch_alerts "ref=refs/heads/${GITHUB_REF_NAME}")"
             count="$(count_lines "$alerts")"

@@ -93,7 +93,7 @@ def has_critical_high_alert_gate(job: dict) -> bool:
     required_fragments = (
         'code-scanning/alerts?state=open&per_page=100',
         'gh api --paginate --jq',
-        'fetch_alerts "pr=${PR_NUMBER}"',
+        'fetch_alerts "ref=refs/pull/${PR_NUMBER}/merge"',
         'fetch_alerts "ref=refs/heads/${GITHUB_REF_NAME}"',
         '== "critical"',
         '== "high"',

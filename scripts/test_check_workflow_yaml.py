@@ -35,7 +35,7 @@ def _aggregate(required_needs):
 ALERT_GATE_RUN = """
 gh api --paginate --jq 'select((.rule.security_severity_level // "") == "critical" or (.rule.security_severity_level // "") == "high") | [((.number // 0) | tostring), (.rule.security_severity_level // "unknown")] | @tsv' "repos/${GITHUB_REPOSITORY}/code-scanning/alerts?state=open&per_page=100&${filter}"
 if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
-  alerts="$(fetch_alerts "pr=${PR_NUMBER}")"
+  alerts="$(fetch_alerts "ref=refs/pull/${PR_NUMBER}/merge")"
 else
   alerts="$(fetch_alerts "ref=refs/heads/${GITHUB_REF_NAME}")"
 fi
@@ -122,6 +122,18 @@ class WorkflowYamlGateTests(unittest.TestCase):
         workflow = _valid_workflow()
         alert_step = workflow["jobs"]["security-required"]["steps"][-1]
         alert_step["run"] = alert_step["run"].replace('alerts="$(fetch_alerts "pr=${PR_NUMBER}")"', 'alerts="$(fetch_alerts "pr=${PR_NUMBER}" | sort -u)"')
+        self.assertFalse(validate_gate_contract(Path("workflow.yml"), workflow))
+
+
+    def test_alert_gate_uses_pull_request_merge_ref_filter(self):
+        workflow = _valid_workflow()
+        alert_step = workflow["jobs"]["security-required"]["steps"][-1]
+        self.assertIn('fetch_alerts "ref=refs/pull/${PR_NUMBER}/merge"', alert_step["run"])
+        self.assertNotIn('fetch_alerts "pr=${PR_NUMBER}"', alert_step["run"])
+        alert_step["run"] = alert_step["run"].replace(
+            'fetch_alerts "ref=refs/pull/${PR_NUMBER}/merge"',
+            'fetch_alerts "pr=${PR_NUMBER}"',
+        )
         self.assertFalse(validate_gate_contract(Path("workflow.yml"), workflow))
 
     def test_aggregate_without_always_condition_fails(self):
