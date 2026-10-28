@@ -21,7 +21,8 @@ from engines.search.vector_index import PersistentVectorIndex, TFIDFVectorEmbedd
 class TestNotebookAndRichDocs(unittest.TestCase):
 
     def setUp(self):
-        self.temp_db = tempfile.mktemp(suffix=".db")
+        fd, self.temp_db = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
         self.storage = SQLiteStorage(db_path=self.temp_db)
         self.vector_index = PersistentVectorIndex(db_path=self.temp_db)
 
@@ -127,6 +128,22 @@ Here are the evaluation results:
         self.assertIsNotNone(table_obj)
         self.assertEqual(table_obj.type, ObjectType.TABLE.value)
         self.assertEqual(len(table_obj.content), 3)
+
+    def test_markdown_parser_handles_malformed_long_markers(self):
+        """Malformed user text must not trigger regex backtracking or fake citations."""
+        malformed_images = "![" * 5000
+        malformed_footnote = "[^" + ("1" * 5000) + "]:" + (" " * 5000)
+        extracted = RichDocumentExtractor.extract_markdown_tables_and_figures(
+            malformed_images + "\n" + malformed_footnote
+        )
+        self.assertEqual(extracted["figure_count"], 0)
+        self.assertEqual(extracted["citation_count"], 0)
+
+        valid = RichDocumentExtractor.extract_markdown_tables_and_figures(
+            "![Architecture](images/arch.png)\n[^1]: Source citation"
+        )
+        self.assertEqual(valid["figures"][0]["path"], "images/arch.png")
+        self.assertEqual(valid["citations"][0]["key"], "1")
 
     def test_persistent_vector_indexing_and_search(self):
         """Rule #45: Persistent vector index with cosine similarity search and recomputability."""

@@ -24,6 +24,21 @@ class SQLExecutionEngine:
     def __init__(self, storage: StorageBackend):
         self.storage = storage
 
+    @staticmethod
+    def _read_only_authorizer(action, arg1, arg2, database_name, trigger_name):
+        """Allow query-only SQLite operations; deny writes, DDL, ATTACH, and PRAGMA."""
+        allowed_actions = {
+            sqlite3.SQLITE_SELECT,
+            sqlite3.SQLITE_READ,
+            sqlite3.SQLITE_FUNCTION,
+            sqlite3.SQLITE_RECURSIVE,
+        }
+        if action == sqlite3.SQLITE_FUNCTION:
+            function_name = (arg2 or arg1 or "").lower()
+            if function_name in {"load_extension", "writefile", "readfile"}:
+                return sqlite3.SQLITE_DENY
+        return sqlite3.SQLITE_OK if action in allowed_actions else sqlite3.SQLITE_DENY
+
     def execute_sql(
         self,
         sql_query: str,
@@ -74,7 +89,10 @@ class SQLExecutionEngine:
                     registered_tables.append(tname)
                 source_object_ids.append(obj.id)
 
-        # Execute query
+        # Execute user-supplied SQL only after restricting SQLite to read-only
+        # operations. An in-memory database can still ATTACH files or mutate its
+        # schema unless the connection authorizer explicitly denies those actions.
+        conn.set_authorizer(self._read_only_authorizer)
         try:
             query_df = pd.read_sql_query(sql_query, conn)
             execution_time_ms = round((time.time() - start_time) * 1000.0, 2)

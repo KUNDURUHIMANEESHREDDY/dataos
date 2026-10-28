@@ -14,7 +14,8 @@ from engines.query.query_engine import UnifiedQueryEngine
 class TestQueryExecution(unittest.TestCase):
 
     def setUp(self):
-        self.temp_db = tempfile.mktemp(suffix=".db")
+        fd, self.temp_db = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
         self.storage = SQLiteStorage(db_path=self.temp_db)
         self.query_engine = UnifiedQueryEngine(self.storage)
 
@@ -41,6 +42,24 @@ class TestQueryExecution(unittest.TestCase):
         self.assertEqual(res["row_count"], 2)
         eng_row = next(r for r in res["results"] if r["department"] == "Eng")
         self.assertEqual(eng_row["avg_sal"], 115000.0)
+
+    def test_sql_engine_rejects_mutating_sql(self):
+        """User SQL must not attach files, alter schema, or inspect PRAGMAs."""
+        for query in (
+            "ATTACH DATABASE ':memory:' AS injected",
+            "CREATE TABLE injected (id INTEGER)",
+            "PRAGMA database_list",
+        ):
+            with self.subTest(query=query):
+                result = self.query_engine.execute_query(query, query_type="sql")
+                self.assertFalse(result["success"])
+                self.assertTrue(result["error"])
+
+        safe_result = self.query_engine.execute_query(
+            "SELECT COUNT(*) AS count FROM employees", query_type="sql"
+        )
+        self.assertTrue(safe_result["success"])
+        self.assertEqual(safe_result["results"][0]["count"], 3)
 
     def test_python_query_execution(self):
         """Verify Python execution."""
