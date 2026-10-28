@@ -26,8 +26,8 @@ def _aggregate(required_needs):
         for dependency in required_needs
     }
     run = "\n".join(
-        f'test "${variable}" = "success"'
-        for variable in env
+        ["set -euo pipefail"]
+        + [f'test "${variable}" = "success"' for variable in env]
     )
     return {"if": "always()", "needs": list(required_needs), "steps": [{"env": env, "run": run}]}
 
@@ -81,6 +81,12 @@ class WorkflowYamlGateTests(unittest.TestCase):
         workflow["jobs"]["security-required"]["steps"][0]["run"] = "echo looks good"
         self.assertFalse(validate_gate_contract(Path("workflow.yml"), workflow))
 
+    def test_aggregate_without_fail_fast_shell_mode_fails(self):
+        workflow = _valid_workflow()
+        step = workflow["jobs"]["security-required"]["steps"][0]
+        step["run"] = step["run"].replace("set -euo pipefail\n", "", 1)
+        self.assertFalse(validate_gate_contract(Path("workflow.yml"), workflow))
+
     def test_comment_only_result_guards_fail(self):
         workflow = _valid_workflow()
         env = workflow["jobs"]["security-required"]["steps"][0]["env"]
@@ -94,7 +100,6 @@ class WorkflowYamlGateTests(unittest.TestCase):
         workflow = _valid_workflow()
         workflow["jobs"]["backend-required"]["needs"].remove("postgres-storage")
         self.assertFalse(validate_gate_contract(Path("workflow.yml"), workflow))
-
 
     def test_missing_critical_high_alert_gate_fails(self):
         workflow = _valid_workflow()
@@ -121,9 +126,11 @@ class WorkflowYamlGateTests(unittest.TestCase):
     def test_alert_gate_deduplication_is_rejected(self):
         workflow = _valid_workflow()
         alert_step = workflow["jobs"]["security-required"]["steps"][-1]
-        alert_step["run"] = alert_step["run"].replace('fetch_alerts "ref=refs/pull/${PR_NUMBER}/merge"', 'fetch_alerts "ref=refs/pull/${PR_NUMBER}/merge" | sort -u')
+        alert_step["run"] = alert_step["run"].replace(
+            'fetch_alerts "ref=refs/pull/${PR_NUMBER}/merge"',
+            'fetch_alerts "ref=refs/pull/${PR_NUMBER}/merge" | sort -u',
+        )
         self.assertFalse(validate_gate_contract(Path("workflow.yml"), workflow))
-
 
     def test_alert_gate_uses_pull_request_merge_ref_filter(self):
         workflow = _valid_workflow()
@@ -140,7 +147,6 @@ class WorkflowYamlGateTests(unittest.TestCase):
         workflow = _valid_workflow()
         workflow["jobs"]["security-required"]["if"] = "success()"
         self.assertFalse(validate_gate_contract(Path("workflow.yml"), workflow))
-
 
     def test_result_guard_hidden_in_here_document_fails(self):
         workflow = _valid_workflow()
