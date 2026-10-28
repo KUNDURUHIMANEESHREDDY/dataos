@@ -2,6 +2,7 @@
 """Validate workflow YAML, reject duplicate keys, and protect required-gate dependencies."""
 
 from pathlib import Path
+import re
 import sys
 
 import yaml
@@ -65,13 +66,22 @@ def has_fail_closed_result_checks(job: dict, required_needs: set[str]) -> bool:
         if not isinstance(env, dict) or not isinstance(run, str):
             continue
 
-        # Only accept active standalone shell commands. A comment or echo that
-        # merely mentions the expected guard must not satisfy the release check.
-        active_commands = {
+        # Aggregate guard scripts must stay simple and unconditional. Reject
+        # here-docs, conditionals, pipelines, command substitutions and compound
+        # shell commands so a textual guard cannot satisfy the release contract.
+        active_lines = [
             line.strip()
             for line in run.splitlines()
             if line.strip() and not line.lstrip().startswith("#")
-        }
+        ]
+        simple_command = re.compile(
+            r'^(?:set -euo pipefail|'
+            r'echo "(?!.*(?:\$\(|\x60|&&|\|\||<<|[<>;|])).*"|'
+            r'test "\$[A-Z_]+" = "success")$'
+        )
+        if any(not simple_command.fullmatch(line) for line in active_lines):
+            continue
+        active_commands = set(active_lines)
         for dependency in required_needs:
             variable = RESULT_ENV.get(dependency)
             expected_expression = f"${{{{ needs.{dependency}.result }}}}"

@@ -142,5 +142,26 @@ class WorkflowYamlGateTests(unittest.TestCase):
         self.assertFalse(validate_gate_contract(Path("workflow.yml"), workflow))
 
 
+    def test_result_guard_hidden_in_here_document_fails(self):
+        workflow = _valid_workflow()
+        env = workflow["jobs"]["security-required"]["steps"][0]["env"]
+        variable = next(iter(env))
+        expected_guard = 'test "$' + variable + '" = "success"'
+        workflow["jobs"]["security-required"]["steps"][0]["run"] = (
+            "cat <<'EOF'\n" + expected_guard + "\nEOF"
+        )
+        self.assertFalse(validate_gate_contract(Path("workflow.yml"), workflow))
+
+    def test_result_guard_inside_conditional_fails(self):
+        workflow = _valid_workflow()
+        env = workflow["jobs"]["security-required"]["steps"][0]["env"]
+        variable = next(iter(env))
+        expected_guard = 'test "$' + variable + '" = "success"'
+        workflow["jobs"]["security-required"]["steps"][0]["run"] = (
+            "if false; then\n" + expected_guard + "\nfi"
+        )
+        self.assertFalse(validate_gate_contract(Path("workflow.yml"), workflow))
+
+
 if __name__ == "__main__":
     unittest.main()
