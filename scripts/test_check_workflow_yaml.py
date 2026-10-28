@@ -145,7 +145,7 @@ class WorkflowYamlGateTests(unittest.TestCase):
     def test_result_guard_hidden_in_here_document_fails(self):
         workflow = _valid_workflow()
         env = workflow["jobs"]["security-required"]["steps"][0]["env"]
-        variable = RESULT_ENV[next(iter(env))]
+        variable = next(iter(env))
         expected_guard = 'test "$' + variable + '" = "success"'
         workflow["jobs"]["security-required"]["steps"][0]["run"] = (
             "cat <<'EOF'\n" + expected_guard + "\nEOF"
@@ -155,7 +155,7 @@ class WorkflowYamlGateTests(unittest.TestCase):
     def test_result_guard_inside_conditional_fails(self):
         workflow = _valid_workflow()
         env = workflow["jobs"]["security-required"]["steps"][0]["env"]
-        variable = RESULT_ENV[next(iter(env))]
+        variable = next(iter(env))
         expected_guard = 'test "$' + variable + '" = "success"'
         workflow["jobs"]["security-required"]["steps"][0]["run"] = (
             "if false; then\n" + expected_guard + "\nfi"
