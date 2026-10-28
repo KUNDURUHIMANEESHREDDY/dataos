@@ -27,18 +27,25 @@ class PostgresStorage(StorageBackend):
         self._pg_conn = None
         self._fallback_db = None
 
-        # Check if psycopg/psycopg2 is available and connection succeeds
+        # Never silently downgrade a requested durable PostgreSQL store to
+        # ephemeral in-memory SQLite: callers could otherwise report successful
+        # writes that disappear when the process exits.
         if not self.mock_mode:
             try:
                 import psycopg2
                 self._pg_conn = psycopg2.connect(self.connection_string, connect_timeout=2)
                 self._init_postgres_schema()
-            except Exception:
-                # Resilient fallback: SQL-compatible emulation mode for environments without live Postgres
-                self.mock_mode = True
-                self._fallback_db = sqlite3.connect(":memory:", check_same_thread=False)
-                self._fallback_db.row_factory = sqlite3.Row
-                self._init_sqlite_schema()
+            except Exception as exc:
+                if self._pg_conn is not None:
+                    try:
+                        self._pg_conn.close()
+                    except Exception:
+                        pass
+                    self._pg_conn = None
+                raise RuntimeError(
+                    "PostgreSQL storage initialization failed; refusing to fall back to ephemeral SQLite. "
+                    "Use mock_mode=True only for tests."
+                ) from exc
         else:
             self._fallback_db = sqlite3.connect(":memory:", check_same_thread=False)
             self._fallback_db.row_factory = sqlite3.Row
@@ -60,7 +67,8 @@ class PostgresStorage(StorageBackend):
                     version INT NOT NULL DEFAULT 1,
                     source TEXT,
                     metadata JSONB,
-                    indexes JSONB
+                    indexes JSONB,
+                    deleted_at TIMESTAMP WITH TIME ZONE
                 );
                 CREATE TABLE IF NOT EXISTS dataos_relationships (
                     id VARCHAR(255) PRIMARY KEY,
@@ -107,6 +115,8 @@ class PostgresStorage(StorageBackend):
                     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
                 );
             """)
+            # Additive migration for databases created by older versions.
+            cur.execute("ALTER TABLE dataos_objects ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMP WITH TIME ZONE")
             self._pg_conn.commit()
 
     def _init_sqlite_schema(self):
@@ -125,7 +135,8 @@ class PostgresStorage(StorageBackend):
                 version INTEGER NOT NULL DEFAULT 1,
                 source TEXT,
                 metadata TEXT,
-                indexes TEXT
+                indexes TEXT,
+                deleted_at TEXT
             );
         """)
         cur.execute("""
@@ -243,7 +254,7 @@ class PostgresStorage(StorageBackend):
         """Retrieve a DataObject by ID."""
         if self._pg_conn and not self.mock_mode:
             with self._pg_conn.cursor() as cur:
-                cur.execute("SELECT * FROM dataos_objects WHERE id = %s", (object_id,))
+                cur.execute("SELECT * FROM dataos_objects WHERE id = %s AND deleted_at IS NULL", (object_id,))
                 row = cur.fetchone()
                 if not row:
                     return None
@@ -261,7 +272,7 @@ class PostgresStorage(StorageBackend):
                 })
         else:
             cur = self._fallback_db.cursor()
-            cur.execute("SELECT * FROM dataos_objects WHERE id = ?", (object_id,))
+            cur.execute("SELECT * FROM dataos_objects WHERE id = ? AND deleted_at IS NULL", (object_id,))
             row = cur.fetchone()
             if not row:
                 return None
@@ -277,57 +288,129 @@ class PostgresStorage(StorageBackend):
                 "indexes": json.loads(row["indexes"]) if row["indexes"] else {}
             })
 
-    def delete_object(self, object_id: str) -> bool:
-        """Delete a DataObject by ID."""
+    def delete_object(self, object_id: str, soft: bool = True) -> bool:
+        """Delete or soft-delete a DataObject, matching the StorageBackend contract."""
         if self._pg_conn and not self.mock_mode:
             with self._pg_conn.cursor() as cur:
-                cur.execute("DELETE FROM dataos_objects WHERE id = %s", (object_id,))
+                if soft:
+                    cur.execute(
+                        "UPDATE dataos_objects SET deleted_at = NOW() WHERE id = %s AND deleted_at IS NULL",
+                        (object_id,),
+                    )
+                else:
+                    cur.execute("DELETE FROM dataos_objects WHERE id = %s", (object_id,))
                 self._pg_conn.commit()
                 return cur.rowcount > 0
-        else:
-            cur = self._fallback_db.cursor()
-            cur.execute("DELETE FROM dataos_objects WHERE id = ?", (object_id,))
-            self._fallback_db.commit()
-            return cur.rowcount > 0
 
-    def list_objects(self, object_type: Optional[str] = None, limit: int = 100, offset: int = 0) -> List[DataObject]:
-        """List DataObjects with optional filters."""
-        if self._pg_conn and not self.mock_mode:
-            with self._pg_conn.cursor() as cur:
-                if object_type:
-                    cur.execute("SELECT * FROM dataos_objects WHERE type = %s LIMIT %s OFFSET %s", (object_type, limit, offset))
-                else:
-                    cur.execute("SELECT * FROM dataos_objects LIMIT %s OFFSET %s", (limit, offset))
-                rows = cur.fetchall()
-                return [DataObject.from_dict({
-                    "id": r[0], "type": r[1], "schema": r[2],
-                    "properties": r[3] if isinstance(r[3], dict) else json.loads(r[3]),
-                    "content": r[4] if (isinstance(r[4], (dict, list)) or r[4] is None) else json.loads(r[4]),
-                    "provenance": r[5] if isinstance(r[5], dict) else json.loads(r[5]),
-                    "permissions": r[6] if isinstance(r[6], dict) else json.loads(r[6]),
-                    "timestamps": r[7] if isinstance(r[7], dict) else json.loads(r[7]),
-                    "version": r[8], "source": r[9],
-                    "metadata": r[10] if isinstance(r[10], dict) else json.loads(r[10]),
-                    "indexes": r[11] if isinstance(r[11], dict) else json.loads(r[11])
-                }) for r in rows]
+        cur = self._fallback_db.cursor()
+        if soft:
+            cur.execute(
+                "UPDATE dataos_objects SET deleted_at = CURRENT_TIMESTAMP WHERE id = ? AND deleted_at IS NULL",
+                (object_id,),
+            )
         else:
-            cur = self._fallback_db.cursor()
+            cur.execute("DELETE FROM dataos_objects WHERE id = ?", (object_id,))
+        self._fallback_db.commit()
+        return cur.rowcount > 0
+
+    def count_objects(
+        self,
+        object_type: Optional[str] = None,
+        source: Optional[str] = None,
+    ) -> int:
+        """Count objects using the same type/source filters as list_objects."""
+        if self._pg_conn and not self.mock_mode:
+            clauses = []
+            params = []
             if object_type:
-                cur.execute("SELECT * FROM dataos_objects WHERE type = ? LIMIT ? OFFSET ?", (object_type, limit, offset))
-            else:
-                cur.execute("SELECT * FROM dataos_objects LIMIT ? OFFSET ?", (limit, offset))
-            rows = cur.fetchall()
+                clauses.append("type = %s")
+                params.append(object_type)
+            if source:
+                clauses.append("source ILIKE %s")
+                params.append(f"%{source}%")
+            query = "SELECT COUNT(*) FROM dataos_objects WHERE deleted_at IS NULL"
+            if clauses:
+                query += " AND " + " AND ".join(clauses)
+            with self._pg_conn.cursor() as cur:
+                cur.execute(query, tuple(params))
+                return int(cur.fetchone()[0])
+
+        clauses = []
+        params = []
+        if object_type:
+            clauses.append("type = ?")
+            params.append(object_type)
+        if source:
+            clauses.append("source LIKE ?")
+            params.append(f"%{source}%")
+        query = "SELECT COUNT(*) FROM dataos_objects WHERE deleted_at IS NULL"
+        if clauses:
+            query += " AND " + " AND ".join(clauses)
+        row = self._fallback_db.execute(query, params).fetchone()
+        return int(row[0])
+
+    def list_objects(
+        self,
+        object_type: Optional[str] = None,
+        source: Optional[str] = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> List[DataObject]:
+        """List objects with optional type/source filters and stable ordering."""
+        if self._pg_conn and not self.mock_mode:
+            clauses = []
+            params = []
+            if object_type:
+                clauses.append("type = %s")
+                params.append(object_type)
+            if source:
+                clauses.append("source ILIKE %s")
+                params.append(f"%{source}%")
+            query = "SELECT * FROM dataos_objects WHERE deleted_at IS NULL"
+            if clauses:
+                query += " AND " + " AND ".join(clauses)
+            query += " ORDER BY id ASC LIMIT %s OFFSET %s"
+            params.extend([limit, offset])
+            with self._pg_conn.cursor() as cur:
+                cur.execute(query, tuple(params))
+                rows = cur.fetchall()
             return [DataObject.from_dict({
-                "id": r["id"], "type": r["type"], "schema": r["schema"],
-                "properties": json.loads(r["properties"]),
-                "content": json.loads(r["content"]) if r["content"] else None,
-                "provenance": json.loads(r["provenance"]),
-                "permissions": json.loads(r["permissions"]),
-                "timestamps": json.loads(r["timestamps"]),
-                "version": r["version"], "source": r["source"],
-                "metadata": json.loads(r["metadata"]) if r["metadata"] else {},
-                "indexes": json.loads(r["indexes"]) if r["indexes"] else {}
+                "id": r[0], "type": r[1], "schema": r[2],
+                "properties": r[3] if isinstance(r[3], dict) else json.loads(r[3]),
+                "content": r[4] if (isinstance(r[4], (dict, list)) or r[4] is None) else json.loads(r[4]),
+                "provenance": r[5] if isinstance(r[5], dict) else json.loads(r[5]),
+                "permissions": r[6] if isinstance(r[6], dict) else json.loads(r[6]),
+                "timestamps": r[7] if isinstance(r[7], dict) else json.loads(r[7]),
+                "version": r[8], "source": r[9],
+                "metadata": r[10] if isinstance(r[10], dict) else json.loads(r[10]),
+                "indexes": r[11] if isinstance(r[11], dict) else json.loads(r[11])
             }) for r in rows]
+
+        clauses = []
+        params = []
+        if object_type:
+            clauses.append("type = ?")
+            params.append(object_type)
+        if source:
+            clauses.append("source LIKE ?")
+            params.append(f"%{source}%")
+        query = "SELECT * FROM dataos_objects WHERE deleted_at IS NULL"
+        if clauses:
+            query += " AND " + " AND ".join(clauses)
+        query += " ORDER BY id ASC LIMIT ? OFFSET ?"
+        params.extend([limit, offset])
+        rows = self._fallback_db.execute(query, params).fetchall()
+        return [DataObject.from_dict({
+            "id": r["id"], "type": r["type"], "schema": r["schema"],
+            "properties": json.loads(r["properties"]),
+            "content": json.loads(r["content"]) if r["content"] else None,
+            "provenance": json.loads(r["provenance"]),
+            "permissions": json.loads(r["permissions"]),
+            "timestamps": json.loads(r["timestamps"]),
+            "version": r["version"], "source": r["source"],
+            "metadata": json.loads(r["metadata"]) if r["metadata"] else {},
+            "indexes": json.loads(r["indexes"]) if r["indexes"] else {}
+        }) for r in rows]
 
     def save_relationship(self, rel: Relationship) -> Relationship:
         """Save a Relationship to PostgreSQL."""
@@ -367,7 +450,7 @@ class PostgresStorage(StorageBackend):
         """Retrieve a Relationship by ID."""
         if self._pg_conn and not self.mock_mode:
             with self._pg_conn.cursor() as cur:
-                cur.execute("SELECT * FROM dataos_relationships WHERE id = %s", (rel_id,))
+                cur.execute("SELECT * FROM dataos_relationships WHERE id = %s AND deleted_at IS NULL", (rel_id,))
                 r = cur.fetchone()
                 if not r:
                     return None
@@ -381,7 +464,7 @@ class PostgresStorage(StorageBackend):
                 )
         else:
             cur = self._fallback_db.cursor()
-            cur.execute("SELECT * FROM dataos_relationships WHERE id = ?", (rel_id,))
+            cur.execute("SELECT * FROM dataos_relationships WHERE id = ? AND deleted_at IS NULL", (rel_id,))
             r = cur.fetchone()
             if not r:
                 return None
@@ -394,30 +477,37 @@ class PostgresStorage(StorageBackend):
                 created_at=r["created_at"], updated_at=r["updated_at"], deleted_at=r["deleted_at"]
             )
 
-    def delete_relationship(self, rel_id: str) -> bool:
-        """Delete a Relationship by ID."""
+    def delete_relationship(self, rel_id: str, soft: bool = True) -> bool:
+        """Delete or soft-delete a relationship, matching the StorageBackend contract."""
         if self._pg_conn and not self.mock_mode:
             with self._pg_conn.cursor() as cur:
-                cur.execute("DELETE FROM dataos_relationships WHERE id = %s", (rel_id,))
+                if soft:
+                    cur.execute("UPDATE dataos_relationships SET deleted_at = NOW() WHERE id = %s AND deleted_at IS NULL", (rel_id,))
+                else:
+                    cur.execute("DELETE FROM dataos_relationships WHERE id = %s", (rel_id,))
                 self._pg_conn.commit()
                 return cur.rowcount > 0
+        cur = self._fallback_db.cursor()
+        if soft:
+            cur.execute("UPDATE dataos_relationships SET deleted_at = CURRENT_TIMESTAMP WHERE id = ? AND deleted_at IS NULL", (rel_id,))
         else:
-            cur = self._fallback_db.cursor()
             cur.execute("DELETE FROM dataos_relationships WHERE id = ?", (rel_id,))
-            self._fallback_db.commit()
-            return cur.rowcount > 0
+        self._fallback_db.commit()
+        return cur.rowcount > 0
 
     def list_relationships(
         self,
         source_id: Optional[str] = None,
         target_id: Optional[str] = None,
         relation_type: Optional[str] = None,
-        limit: int = 1000
+        min_confidence: float = 0.0,
+        limit: int = 1000,
+        offset: int = 0,
     ) -> List[Relationship]:
-        """List Relationships with optional filters."""
+        """List active relationships with filters, stable ordering, and pagination."""
         if self._pg_conn and not self.mock_mode:
-            query = "SELECT * FROM dataos_relationships WHERE 1=1"
-            params = []
+            query = "SELECT * FROM dataos_relationships WHERE deleted_at IS NULL AND confidence >= %s"
+            params = [min_confidence]
             if source_id:
                 query += " AND source = %s"
                 params.append(source_id)
@@ -427,9 +517,8 @@ class PostgresStorage(StorageBackend):
             if relation_type:
                 query += " AND relation_type = %s"
                 params.append(relation_type)
-            query += " LIMIT %s"
-            params.append(limit)
-
+            query += " ORDER BY confidence DESC, updated_at DESC, id ASC LIMIT %s OFFSET %s"
+            params.extend([limit, offset])
             with self._pg_conn.cursor() as cur:
                 cur.execute(query, tuple(params))
                 rows = cur.fetchall()
@@ -441,32 +530,70 @@ class PostgresStorage(StorageBackend):
                     evidence=r[7] if isinstance(r[7], list) else json.loads(r[7]),
                     created_at=str(r[8]), updated_at=str(r[9]), deleted_at=str(r[10]) if r[10] else None
                 ) for r in rows]
-        else:
-            query = "SELECT * FROM dataos_relationships WHERE 1=1"
-            params = []
+
+        query = "SELECT * FROM dataos_relationships WHERE deleted_at IS NULL AND confidence >= ?"
+        params = [min_confidence]
+        if source_id:
+            query += " AND source = ?"
+            params.append(source_id)
+        if target_id:
+            query += " AND target = ?"
+            params.append(target_id)
+        if relation_type:
+            query += " AND relation_type = ?"
+            params.append(relation_type)
+        query += " ORDER BY confidence DESC, updated_at DESC, id ASC LIMIT ? OFFSET ?"
+        params.extend([limit, offset])
+        cur = self._fallback_db.cursor()
+        cur.execute(query, tuple(params))
+        rows = cur.fetchall()
+        return [Relationship(
+            id=r["id"], source=r["source"], target=r["target"], relation_type=r["relation_type"],
+            metadata=json.loads(r["metadata"]) if r["metadata"] else {},
+            confidence=r["confidence"],
+            provenance=json.loads(r["provenance"]) if r["provenance"] else {},
+            evidence=json.loads(r["evidence"]) if r["evidence"] else [],
+            created_at=r["created_at"], updated_at=r["updated_at"], deleted_at=r["deleted_at"]
+        ) for r in rows]
+
+    def count_relationships(
+        self,
+        source_id: Optional[str] = None,
+        target_id: Optional[str] = None,
+        relation_type: Optional[str] = None,
+        min_confidence: float = 0.0,
+    ) -> int:
+        """Count active relationships with the same predicates as list_relationships."""
+        if self._pg_conn and not self.mock_mode:
+            query = "SELECT COUNT(*) FROM dataos_relationships WHERE deleted_at IS NULL AND confidence >= %s"
+            params = [min_confidence]
             if source_id:
-                query += " AND source = ?"
+                query += " AND source = %s"
                 params.append(source_id)
             if target_id:
-                query += " AND target = ?"
+                query += " AND target = %s"
                 params.append(target_id)
             if relation_type:
-                query += " AND relation_type = ?"
+                query += " AND relation_type = %s"
                 params.append(relation_type)
-            query += " LIMIT ?"
-            params.append(limit)
+            with self._pg_conn.cursor() as cur:
+                cur.execute(query, tuple(params))
+                return int(cur.fetchone()[0])
 
-            cur = self._fallback_db.cursor()
-            cur.execute(query, tuple(params))
-            rows = cur.fetchall()
-            return [Relationship(
-                id=r["id"], source=r["source"], target=r["target"], relation_type=r["relation_type"],
-                metadata=json.loads(r["metadata"]) if r["metadata"] else {},
-                confidence=r["confidence"],
-                provenance=json.loads(r["provenance"]) if r["provenance"] else {},
-                evidence=json.loads(r["evidence"]) if r["evidence"] else [],
-                created_at=r["created_at"], updated_at=r["updated_at"], deleted_at=r["deleted_at"]
-            ) for r in rows]
+        query = "SELECT COUNT(*) FROM dataos_relationships WHERE deleted_at IS NULL AND confidence >= ?"
+        params = [min_confidence]
+        if source_id:
+            query += " AND source = ?"
+            params.append(source_id)
+        if target_id:
+            query += " AND target = ?"
+            params.append(target_id)
+        if relation_type:
+            query += " AND relation_type = ?"
+            params.append(relation_type)
+        cur = self._fallback_db.cursor()
+        cur.execute(query, tuple(params))
+        return int(cur.fetchone()[0])
 
     def get_version_history(self, object_id: str) -> List[Dict[str, Any]]:
         """Return version history for an object."""

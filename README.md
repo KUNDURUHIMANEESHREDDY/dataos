@@ -6,10 +6,7 @@ graph**, and **first-class provenance** — every derived result traceable back 
 The design principle, stated in `context/ai-workflow-rules.md`: **AI is an operator over the graph, never an
 authority over it.**
 
-> ⚠️ **The library is real. The API layer is not.** ~180 Python files, 12 engine packages, and ~670 unit tests
-> form a coherent, substantial core. The package imports cleanly, **653 correctness tests pass**, the **CLI works
-> end to end**, and **`scenario_demo.py` runs all 10 steps**. What remains broken is the FastAPI backend, which
-> still calls a `DataOS` API that no longer exists. See [Current blockers](#current-blockers).
+> **Backend status (PR branch):** the FastAPI-to-kernel contracts have been repaired for the supported routes, and the current PR head passed the backend verification workflow: 708 tests passed, 74/74 end-to-end invariants passed, and the configured secret scan, dependency audit, SBOM, CodeQL, and required aggregates succeeded. This is branch-level evidence, not a production-readiness claim. The main remaining risks are shared-token rather than per-user authorization, production key/salt management, Postgres parity, unused Prisma schema, and unverified frontend/release enforcement. See [Current blockers](#current-blockers).
 
 ---
 
@@ -39,21 +36,18 @@ Six bugs that made the project unusable, fixed in `dab962b` and `4193152`:
 
 ### Still open
 
-#### 1. The FastAPI backend targets an API that no longer exists
+#### 1. Production API authorization is not yet multi-user safe
 
-`backend/app.py` makes 52 `dataos.*` attribute accesses; only about 13 resolve. **Roughly 22 of ~35 endpoints
-return HTTP 500.** It was written against an older, richer `DataOS` and never updated.
+The current PR repairs the FastAPI-to-kernel method contracts and verifies the backend through the current CI suite. The old claim that roughly 22 endpoints are known to return HTTP 500 is stale and should not be used as the current status.
 
-Broken calls include `dataos.execute_sql` (the real name is `DataOS.sql`), `dataos.execute_python` (`.python`),
-`dataos.ingest_file`, `dataos.get_object`, `dataos.graph.traverse` (use `dataos.graph.engine.traverse`),
-`dataos.create_agent`, `dataos.get_system_health` (no such method anywhere), `dataos.run_multi_agent_pipeline`,
-and `dataos.query.execute_query` (where `dataos.query` is a bound method, not a namespace).
+Remaining authorization work is still material:
 
-Working endpoints: `/api/objects` CRUD, `/api/relationships`, `/api/vectors/search`,
-`/api/provenance/lineage/{id}`, `/api/profiling/{id}`, `/api/quality/{id}`, `/api/objects/{id}/why`,
-`/api/objects/{id}/impact`, `/api/ask`, `/api/ingest/universal`, `/api/io/export`, `/health`.
+- Production `/api/*` requests use a single shared bearer token; this is not per-user identity, role-based access control, or resource-level authorization.
+- The library's capability policy and grounding checks are not consistently enforced at the HTTP boundary.
+- Python compute is disabled by default in production unless `DATAOS_ALLOW_PYTHON_COMPUTE=true`; that opt-in does not prove the sandbox is safe.
+- Postgres backend parity and the frontend relationship field contract still require explicit regression coverage.
 
-The CLI and `scenario_demo.py` show exactly how each missing call should be rewritten.
+Treat these as release blockers until the corresponding API and deployment tests exist.
 
 #### 2. Prisma is dead weight
 
@@ -80,6 +74,35 @@ completed and checked in GitHub Settings.
 
 ---
 
+## Runtime security configuration
+
+DataOS sharing-token signing has no built-in/default secret. Configure `DATAOS_SHARING_TOKEN_SECRET` with a randomly generated value of at least 32 UTF-8 bytes through your deployment secret manager before using `/api/sharing/issue_token` or `/api/sharing/verify_token`. If it is missing, the API returns HTTP 503 and token support remains disabled. Never commit the value to the repository or include it in logs.
+
+For local development, generate a value without printing it separately:
+
+```bash
+export DATAOS_SHARING_TOKEN_SECRET="$(python -c 'import secrets; print(secrets.token_urlsafe(48))')"
+```
+
+This secret protects sharing-token signatures only. It does **not** authenticate the rest of the FastAPI API. SQL/Python execution, writes, ingestion, and data-reading routes still need an explicit authentication/authorization boundary; do not expose the API to untrusted networks until that work is completed.
+
+### Production API authentication
+
+When any of `DATAOS_ENV`, `APP_ENV`, or `ENVIRONMENT` is set to `production` or `prod`, every `/api/*` route requires an `Authorization: Bearer …` header. Configure `DATAOS_API_TOKEN` as a high-entropy secret of at least 32 UTF-8 bytes through the deployment secret manager. If the token is absent, padded with accidental whitespace, or too short, API requests fail closed with HTTP 503; missing or incorrect bearer credentials return HTTP 401. Environment markers are checked independently, so a conflicting `development` marker does not disable the production guard. The non-`/api` health route remains available for liveness monitoring.
+
+Generate a token without committing or printing it to logs:
+
+```bash
+export DATAOS_API_TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe(48))')"
+```
+
+Python execution is a separate high-risk capability. In production, both `/api/compute/python` and unified-query `query_type=python` are disabled unless `DATAOS_ALLOW_PYTHON_COMPUTE=true` is explicitly configured. Keep it disabled unless the execution sandbox and access controls have been reviewed. This flag is an opt-in, not proof that the sandbox is safe.
+
+This is a single shared bearer-token boundary, not per-user identity or role-based authorization. Rotate it through secret management and do not expose it to browser bundles. If a public browser client needs access, place a properly authenticated backend-for-frontend or identity-aware gateway in front of DataOS rather than embedding this token in frontend code.
+
+
+---
+
 ## Quick start
 
 ```bash
@@ -89,7 +112,7 @@ pip install -r requirements.txt
 There is no `pyproject.toml`/`setup.py` — the package runs from the repo root.
 
 ```bash
-python -m pytest tests/ --ignore=tests/test_benchmarks.py   # 653 correctness tests
+python -m pytest tests/ --ignore=tests/test_benchmarks.py   # correctness suite (CI reports the current test count)
 python scenario_demo.py                                      # 10-step end-to-end demo
 python -m cli health                                         # CLI
 ```
@@ -263,19 +286,20 @@ execution at 10s and 10 MB output.
 
 ## Configuration
 
-Security-sensitive environment variables:
+Core encryption reads `DATAOS_MASTER_KEY` (`infrastructure/privacy/encryption.py`). Supply it through deployment secret management; never commit it or log its value. In production, set `DATAOS_ENV`, `APP_ENV`, or `ENVIRONMENT` to `production`/`prod`; if the master key is absent or empty, encryption initialization fails closed instead of generating an ephemeral key.
 
-- `DATAOS_MASTER_KEY`: persistent master secret for encryption. Supply it through deployment secret management; never commit it or log its value. An explicitly empty or whitespace-only value is rejected.
-- `DATAOS_ENCRYPTION_SALT_FILE`: optional path for the 16-byte key-derivation salt; defaults to `~/.dataos/encryption_salt`. The salt is not secret, but it **must be backed up and kept identical across restarts and replicas that share encrypted data**. Losing/changing it makes existing ciphertext derived from the same master key unreadable. Initialization writes the salt atomically and rejects malformed existing salt files.
-- `DATAOS_ENV`: set to `production` or `prod` in production deployments. In those modes, startup fails if `DATAOS_MASTER_KEY` is absent rather than generating an ephemeral key. Without a production mode, an unset key permits an ephemeral development/test key; ciphertext created with it cannot be decrypted after process restart.
-- `DATAOS_CORS_ORIGINS`: comma-separated explicit browser-origin allowlist. Keep production origins HTTPS and do not use wildcard origins.
+New writes require an authenticated-encryption backend from `cryptography`; DataOS never writes XOR ciphertext. Legacy XOR decryption is disabled by default and is available only through an explicit migration-only opt-in. `DATAOS_ENCRYPTION_SALT_FILE` may point to a persistent 16-byte key-derivation salt; it defaults to `~/.dataos/encryption_salt`. Back up the salt and keep it identical across restarts and replicas sharing encrypted data: losing or changing it makes existing ciphertext unreadable.
 
-Everything else is a constructor argument: `db_path="dataos.db"`, `blob_dir=".dataos_blobs"`, and
-`PostgresStorage`'s connection string (the current implementation has no `DATABASE_URL` lookup).
+The FastAPI deployment layer also reads environment markers (`DATAOS_ENV`, `APP_ENV`, `ENVIRONMENT`), the production API bearer secret (`DATAOS_API_TOKEN`), CORS configuration (`DATAOS_CORS_ORIGINS`), sharing-token secret (`DATAOS_SHARING_TOKEN_SECRET`), and the high-risk Python-compute opt-in (`DATAOS_ALLOW_PYTHON_COMPUTE`). Check the relevant module before deploying; this list describes the current core/API controls, not every optional provider's configuration.
 
-**No external service is required.** SQLite is the default. Postgres, S3, GCS, and Azure are optional and
-degrade gracefully — notably, `PostgresStorage` **silently falls back to an in-memory SQLite** if `psycopg2`
-fails to connect (`postgres_store.py:31-41`), which means a misconfigured Postgres looks like a working one.
+Storage defaults remain constructor arguments: `db_path="dataos.db"`, `blob_dir=".dataos_blobs`, and
+`PostgresStorage`'s connection string (currently no `DATABASE_URL` lookup).
+
+**No external service is required for the default SQLite store.** Postgres, S3, GCS, and Azure are optional.
+A requested PostgreSQL store now **fails closed** if the driver, connection, or schema initialization fails; it
+does not silently downgrade to ephemeral in-memory SQLite. That avoids reporting successful writes to a temporary
+store when the operator configured durable PostgreSQL. `mock_mode=True` is explicit SQLite emulation for tests
+only; do not use it as a production fallback.
 
 **By default no LLM is wired in.** `MultiAgentPipeline` defaults to `MockDeterministicProvider`, a
 string-templating stub. Embeddings default to `HashEmbeddingProvider(dimension=128)` — a feature hash, not a
@@ -292,7 +316,7 @@ lacks `source`. The backend passes both, so those routes raise `TypeError` under
 The frontend reads `r.source_id` / `r.target_id` from relationship JSON, but `Relationship.to_dict()` emits
 `source` / `target`. Every graph edge renders as `undefined`.
 
-CORS now uses an explicit `DATAOS_CORS_ORIGINS` allowlist (defaulting to the local frontend origins), rejects wildcard or malformed origins, and does not enable credentialed cross-origin requests. Endpoint authentication is still absent despite `Depends` being imported; that remains a separate high-priority production blocker.
+CORS uses an explicit `DATAOS_CORS_ORIGINS` allowlist (defaulting to local frontend origins), rejects wildcard or malformed origins, and does not enable credentialed cross-origin requests. In production, `/api/*` routes require the configured shared bearer token; this is not per-user identity or resource-level authorization, which remains a high-priority production blocker.
 
 ---
 
@@ -308,7 +332,7 @@ python -m unittest discover -s tests
 python -m tests.benchmarks.run_all
 ```
 
-**Current result: 653 passed** excluding `tests/test_benchmarks.py`, which is a separate matter.
+**Current PR-head result (2026-10-26): 708 passed in the backend correctness suite and 74/74 end-to-end invariants verified**; the benchmark module remains outside this correctness gate.
 
 ### `test_benchmarks.py` is flaky
 
@@ -349,3 +373,10 @@ of the product and dominates the repo's file count.
 
 ~181 Python files excluding `skills/`: `core/` 22, `engines/` 35, `infrastructure/` 36, `intelligence/` 20,
 `runtime/` 14, `tests/` 48, `backend/` 1, `cli/` 2.
+
+
+## API pagination contract
+
+- `GET /api/objects/` accepts `limit=1..500` and `offset=0..1,000,000`. Its `total` is the count of all active objects matching `object_type` and `source`, before page slicing.
+- `GET /api/relationships/` accepts `limit=1..1,000`, `offset=0..1,000,000`, and `min_confidence=0..1`. Its `total` counts all active relationships matching the filters before page slicing. Soft-deleted relationships are excluded consistently across built-in storage backends.
+- Built-in SQLite, PostgreSQL, and cloud-index backends use database-level counts. Third-party storage adapters should implement efficient count methods; the base interface provides a bounded-page fallback when listing supports offsets.
