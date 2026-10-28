@@ -4,28 +4,49 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
+    # Include the release-gate branch so stacked feature PRs can receive the
+    # same required backend/security checks before the gate PR is merged.
+    branches:
+      - main
+      - fix/restore-dataos-release-gates-20261026
   workflow_dispatch:
 
 permissions:
   contents: read
   actions: read
-  security-events: write
 
 concurrency:
   group: dataos-backend-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
+  workflow-lint:
+    name: Workflow YAML integrity
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.11"
+      - name: Install pinned YAML parser
+        run: python -m pip install --disable-pip-version-check PyYAML==6.0.2
+      - name: Reject invalid YAML and duplicate mapping keys
+        run: python scripts/check_workflow_yaml.py
+      - name: Test duplicate-key and fail-closed gate regressions
+        run: python -m unittest scripts.test_check_workflow_yaml -v
+
   backend:
     name: Backend correctness and smoke tests
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.11"
           cache: pip
@@ -40,7 +61,7 @@ jobs:
           python -m pytest tests/ --ignore=tests/test_benchmarks.py --junitxml=test-results/junit.xml
       - name: Upload JUnit report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: dataos-pytest-${{ github.run_id }}
           path: test-results/junit.xml
@@ -51,21 +72,41 @@ jobs:
       - name: Smoke-test CLI health
         run: python -m cli health
 
-  backend-required:
-    name: Backend required
-    if: always()
-    needs: [backend]
+  postgres-storage:
+    name: Live PostgreSQL storage contract
     runs-on: ubuntu-latest
-    steps:
-      - name: Fail closed unless backend verification passed
+    timeout-minutes: 25
+    services:
+      postgres:
+        image: postgres:16
         env:
-          BACKEND_RESULT: ${{ needs.backend.result }}
+          POSTGRES_USER: dataos
+          POSTGRES_PASSWORD: dataos-test-password
+          POSTGRES_DB: dataos_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U dataos -d dataos_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATAOS_TEST_POSTGRES_URL: postgresql://dataos:dataos-test-password@localhost:5432/dataos_test
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - name: Install PostgreSQL test dependencies
         run: |
-          if [ "$BACKEND_RESULT" != "success" ]; then
-            echo "::error::Backend verification result was $BACKEND_RESULT"
-            exit 1
-          fi
-          echo "Backend correctness and smoke tests passed."
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pytest psycopg2-binary
+      - name: Verify additive migration and object deletion against live PostgreSQL
+        run: python -m pytest tests/test_postgres_storage_integration.py -q
 
   secret-scan:
     name: Git history secret scan
@@ -74,10 +115,10 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           fetch-depth: 0
-      - uses: gitleaks/gitleaks-action@v3
+      - uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -86,8 +127,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.11"
           cache: pip
@@ -102,15 +143,15 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.11"
       - name: Install CycloneDX tooling
         run: python -m pip install --upgrade pip cyclonedx-bom
       - name: Generate requirements SBOM
         run: cyclonedx-py requirements requirements.txt --output-format JSON --output-file sbom.json
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: dataos-python-sbom
           path: sbom.json
@@ -126,12 +167,12 @@ jobs:
       actions: read
       security-events: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: github/codeql-action/init@v3
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: github/codeql-action/init@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4
         with:
           languages: python
           build-mode: none
-      - uses: github/codeql-action/analyze@v3
+      - uses: github/codeql-action/analyze@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4
 
   security-required:
     name: security-required
@@ -163,14 +204,79 @@ jobs:
       - name: Fail on open critical/high code-scanning alerts
         env:
           GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         shell: bash
         run: |
           set -euo pipefail
-          count="$(gh api --paginate --jq '.[].rule.security_severity_level' \
-            "repos/${GITHUB_REPOSITORY}/code-scanning/alerts?state=open&per_page=100" \
-            | awk '$0 == "critical" || $0 == "high" { count++ } END { print count + 0 }')"
-          echo "Open critical/high code-scanning alerts: $count"
-          if [[ "$count" != "0" ]]; then
-            echo "::error::Found $count open critical/high code-scanning alert(s); triage and remediate before release."
-            exit 1
+          endpoint="repos/${GITHUB_REPOSITORY}/code-scanning/alerts?state=open&per_page=100"
+          fetch_alerts() {
+            local filter="$1"
+            gh api --paginate --jq '
+              .[]
+              | select(.state == "open" and
+                  ((.rule.security_severity_level // "") == "critical" or
+                   (.rule.security_severity_level // "") == "high"))
+              | [
+                  ((.number // 0) | tostring),
+                  (.rule.security_severity_level // "unknown"),
+                  (.rule.id // "unknown"),
+                  (.most_recent_instance.location.path // "unknown"),
+                  ((.most_recent_instance.location.start_line // 0) | tostring)
+                ]
+              | @tsv
+            ' "${endpoint}&${filter}"
+          }
+          count_lines() {
+            if [[ -n "$1" ]]; then
+              printf '%s\n' "$1" | sed '/^$/d' | wc -l | tr -d ' '
+            else
+              printf '0'
+            fi
+          }
+          if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
+            alerts="$(fetch_alerts "ref=refs/pull/${PR_NUMBER}/merge")"
+            count="$(count_lines "$alerts")"
+            echo "Open critical/high alerts associated with PR #${PR_NUMBER} merge ref: $count"
+            if [[ "$count" != "0" ]]; then
+              echo "PR alerts (number, severity, rule, path, line):"
+              printf '%s\n' "$alerts"
+              echo "::error::This PR has open critical/high code-scanning alerts."
+              exit 1
+            fi
+            echo "No open critical/high alerts associated with this PR merge ref. Main-branch gate remains fail-closed until its total reaches zero."
+          else
+            alerts="$(fetch_alerts "ref=refs/heads/${GITHUB_REF_NAME}")"
+            count="$(count_lines "$alerts")"
+            echo "Open critical/high code-scanning alerts on ${GITHUB_REF_NAME}: $count"
+            if [[ "$count" != "0" ]]; then
+              echo "Open alerts (number, severity, rule, path, line):"
+              printf '%s\n' "$alerts"
+              echo "::error::Found $count open critical/high code-scanning alert(s); triage and remediate before release."
+              exit 1
+            fi
           fi
+
+  backend-required:
+    name: Backend required
+    if: always()
+    needs: [backend, postgres-storage, security-required, workflow-lint]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Fail closed unless backend, PostgreSQL, and security verification passed
+        env:
+          BACKEND_RESULT: ${{ needs.backend.result }}
+          POSTGRES_RESULT: ${{ needs.postgres-storage.result }}
+          SECURITY_RESULT: ${{ needs.security-required.result }}
+          WORKFLOW_LINT_RESULT: ${{ needs.workflow-lint.result }}
+        run: |
+          set -euo pipefail
+          echo "backend: $BACKEND_RESULT"
+          echo "postgres-storage: $POSTGRES_RESULT"
+          echo "security-required: $SECURITY_RESULT"
+          echo "workflow-lint: $WORKFLOW_LINT_RESULT"
+          test "$BACKEND_RESULT" = "success"
+          test "$POSTGRES_RESULT" = "success"
+          test "$SECURITY_RESULT" = "success"
+          test "$WORKFLOW_LINT_RESULT" = "success"
+          echo "Backend, live PostgreSQL, security, and workflow integrity verification passed."
