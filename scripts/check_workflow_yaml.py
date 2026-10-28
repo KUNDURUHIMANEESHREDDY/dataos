@@ -77,8 +77,13 @@ def has_fail_closed_result_checks(job: dict, required_needs: set[str]) -> bool:
         ]
         simple_command = re.compile(
             r'^(?:set -euo pipefail|'
-            r'echo "(?!.*(?:\\$\\(|`|&&|\\|\\||<<|[<>;|])).*"|'
-            r'test "\\$[A-Z_]+" = "success")
+            r'echo "(?!.*(?:\$\(|\x60|&&|\|\||<<|[<>;|])).*"|'
+            r'test "\$[A-Z_]+" = "success")$'
+        )
+        if any(not simple_command.fullmatch(line) for line in active_lines):
+            continue
+        active_commands = set(active_lines)
+        for dependency in required_needs:
             variable = RESULT_ENV.get(dependency)
             expected_expression = f"${{{{ needs.{dependency}.result }}}}"
             expected_guard = f'test "${variable}" = "success"'
