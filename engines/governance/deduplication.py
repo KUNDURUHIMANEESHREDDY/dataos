@@ -9,11 +9,15 @@ Implements:
 
 from __future__ import annotations
 import hashlib
+import heapq
 import re
-from typing import Dict, Any, List, Set, Tuple, Optional
+from typing import Dict, Any, List, Set, Tuple, Optional, Union
 from core.object.model import DataObject
 from core.relation.model import Relationship, RelationType
 from infrastructure.storage.base import StorageBackend
+
+DEFAULT_DUPLICATE_SCAN_LIMIT = 1000
+DEFAULT_DUPLICATE_RESULT_LIMIT = 1000
 
 
 def compute_levenshtein_distance(s1: str, s2: str) -> int:
@@ -50,6 +54,8 @@ def compute_levenshtein_similarity(s1: str, s2: str) -> float:
 def get_k_shingles(text: str, k: int = 3) -> Set[str]:
     """Extract character k-shingles from text."""
     clean = re.sub(r"\s+", " ", text.strip().lower())
+    if not clean:
+        return set()
     if len(clean) < k:
         return {clean}
     return {clean[i:i + k] for i in range(len(clean) - k + 1)}
@@ -62,8 +68,8 @@ def compute_minhash_jaccard(text1: str, text2: str, num_perm: int = 64) -> float
     shingles1 = get_k_shingles(text1)
     shingles2 = get_k_shingles(text2)
 
-    if not shingles1 and not shingles2:
-        return 1.0
+    # Empty content carries no evidence of similarity. Treating two empty
+    # shingle sets as identical makes unrelated blank documents look like matches.
     if not shingles1 or not shingles2:
         return 0.0
 
@@ -83,70 +89,126 @@ class DuplicateDetectionEngine:
         self,
         target_object_id: Optional[str] = None,
         min_similarity: float = 0.75,
-        auto_link_graph: bool = True
-    ) -> List[Dict[str, Any]]:
+        auto_link_graph: bool = True,
+        max_results: Optional[int] = None,
+        return_metadata: bool = False,
+    ) -> Union[List[Dict[str, Any]], Tuple[List[Dict[str, Any]], int]]:
         """
         Detect duplicates against a target object or across the entire catalog.
         Categorizes matches into:
         - exact_hash (1.0 similarity)
         - near_duplicate_minhash (high Jaccard overlap)
         - title_similar_levenshtein (high string similarity)
-        """
-        all_objects = self.storage.list_objects(limit=1000)
-        results: List[Dict[str, Any]] = []
 
-        target_pool = [self.storage.get_object(target_object_id)] if target_object_id else all_objects
-        target_pool = [o for o in target_pool if o is not None]
+        max_results bounds retained/returned candidates, not pair comparisons or
+        optional graph-link side effects. return_metadata adds the exact match count
+        so API callers can signal truncation without retaining every result in memory.
+        """
+        if max_results is not None and (
+            isinstance(max_results, bool) or not isinstance(max_results, int) or max_results < 1
+        ):
+            raise ValueError("max_results must be a positive integer or None")
+
+        all_objects = self.storage.list_objects(limit=DEFAULT_DUPLICATE_SCAN_LIMIT)
+        results: List[Dict[str, Any]] = []
+        result_heap: List[Tuple[float, int, Dict[str, Any]]] = []
+        matches_seen = 0
+        sequence = 0
+
+        target_object = self.storage.get_object(target_object_id) if target_object_id else None
+        target_pool = [target_object] if target_object_id else all_objects
+        target_pool = [obj for obj in target_pool if obj is not None]
+
+        # Resolve each object's hash/content/title once. dict.get(key, obj.compute_hash())
+        # evaluates compute_hash even when the key exists, and doing that inside the
+        # pairwise loop makes hashing O(n^2) for a catalog scan.
+        objects_by_id = {obj.id: obj for obj in all_objects}
+        for obj in target_pool:
+            objects_by_id[obj.id] = obj
+
+        comparison_data: Dict[str, Dict[str, Any]] = {}
+        for object_id, obj in objects_by_id.items():
+            metadata = obj.metadata or {}
+            properties = obj.properties or {}
+            content = str(obj.content)
+            content_hash = (
+                metadata["content_hash"]
+                if "content_hash" in metadata
+                else obj.compute_hash()
+            )
+            comparison_data[object_id] = {
+                "content": content,
+                "normalized_content": content.strip(),
+                "content_hash": content_hash,
+                "title": properties.get("title") or properties.get("filename", ""),
+                "properties": properties,
+            }
 
         for i, obj_a in enumerate(target_pool):
             search_pool = all_objects[i + 1:] if not target_object_id else all_objects
+            data_a = comparison_data[obj_a.id]
 
             for obj_b in search_pool:
                 if obj_a.id == obj_b.id:
                     continue
 
-                # 1. Exact Content / Hash Check
-                content_a = str(obj_a.content).strip()
-                content_b = str(obj_b.content).strip()
-                
-                hash_a = obj_a.metadata.get("content_hash", obj_a.compute_hash())
-                hash_b = obj_b.metadata.get("content_hash", obj_b.compute_hash())
-                
+                data_b = comparison_data[obj_b.id]
+                content_a = data_a["normalized_content"]
+                content_b = data_b["normalized_content"]
+                hash_a = data_a["content_hash"]
+                hash_b = data_b["content_hash"]
+
                 is_exact = (hash_a == hash_b) or (bool(content_a) and content_a == content_b)
                 method = "exact_hash" if is_exact else None
                 sim_score = 1.0 if is_exact else 0.0
 
                 # 2. MinHash Jaccard Check on Content
                 if not is_exact:
-                    content_a = str(obj_a.content)
-                    content_b = str(obj_b.content)
-                    jaccard_sim = compute_minhash_jaccard(content_a, content_b)
-                    
+                    jaccard_sim = compute_minhash_jaccard(data_a["content"], data_b["content"])
                     if jaccard_sim >= min_similarity:
                         sim_score = jaccard_sim
                         method = "minhash_jaccard"
 
                 # 3. Levenshtein Check on Titles / Filenames
-                title_a = obj_a.properties.get("title") or obj_a.properties.get("filename", "")
-                title_b = obj_b.properties.get("title") or obj_b.properties.get("filename", "")
-                
-                if title_a and title_b:
-                    lev_sim = compute_levenshtein_similarity(title_a, title_b)
-                    if lev_sim > sim_score and lev_sim >= min_similarity:
-                        sim_score = lev_sim
-                        method = "levenshtein_title"
+                title_a = data_a["title"]
+                title_b = data_b["title"]
+                if title_a and title_b and sim_score < 1.0:
+                    max_title_len = max(len(title_a), len(title_b))
+                    # Edit distance is at least the length difference, so this
+                    # ratio is an upper bound on normalized title similarity.
+                    # Skip the quadratic dynamic-programming pass when that
+                    # upper bound cannot reach the requested threshold.
+                    length_similarity_upper_bound = min(len(title_a), len(title_b)) / max_title_len
+                    if length_similarity_upper_bound >= min_similarity:
+                        lev_sim = compute_levenshtein_similarity(title_a, title_b)
+                        if lev_sim > sim_score and lev_sim >= min_similarity:
+                            sim_score = lev_sim
+                            method = "levenshtein_title"
 
                 if sim_score >= min_similarity:
+                    properties_a = data_a["properties"]
+                    properties_b = data_b["properties"]
                     duplicate_entry = {
                         "object_a_id": obj_a.id,
                         "object_b_id": obj_b.id,
-                        "object_a_name": obj_a.properties.get("filename", obj_a.properties.get("title", obj_a.id[:8])),
-                        "object_b_name": obj_b.properties.get("filename", obj_b.properties.get("title", obj_b.id[:8])),
+                        "object_a_name": properties_a.get("filename", properties_a.get("title", obj_a.id[:8])),
+                        "object_b_name": properties_b.get("filename", properties_b.get("title", obj_b.id[:8])),
                         "similarity_score": sim_score,
                         "method": method,
                         "is_exact_duplicate": is_exact
                     }
-                    results.append(duplicate_entry)
+                    matches_seen += 1
+                    if max_results is None:
+                        results.append(duplicate_entry)
+                    else:
+                        # Keep only the best bounded set; negative sequence numbers
+                        # preserve earlier candidates when similarity scores tie.
+                        candidate = (float(sim_score), -sequence, duplicate_entry)
+                        if len(result_heap) < max_results:
+                            heapq.heappush(result_heap, candidate)
+                        elif candidate[:2] > result_heap[0][:2]:
+                            heapq.heapreplace(result_heap, candidate)
+                        sequence += 1
 
                     # Auto-link candidate duplicates in the graph (Rule #58)
                     if auto_link_graph:
@@ -158,5 +220,18 @@ class DuplicateDetectionEngine:
                             metadata={"method": method, "is_exact": is_exact}
                         ))
 
-        results.sort(key=lambda x: x["similarity_score"], reverse=True)
+        if max_results is not None:
+            results = [
+                entry
+                for _, _, entry in sorted(
+                    result_heap,
+                    key=lambda item: (-item[0], -item[1]),
+                )
+            ]
+        else:
+            results.sort(key=lambda x: x["similarity_score"], reverse=True)
+
+        if return_metadata:
+            return results, matches_seen
         return results
+

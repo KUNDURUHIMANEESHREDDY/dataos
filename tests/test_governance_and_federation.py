@@ -74,6 +74,108 @@ class TestGovernanceAndFederation(unittest.TestCase):
                self.storage.list_relationships(target_id=obj_original.id, relation_type=RelationType.SIMILAR_TO.value)
         self.assertTrue(len(rels) >= 1)
 
+    def test_empty_content_does_not_match_other_empty_documents(self):
+        """Blank payloads provide no evidence that two different objects are duplicates."""
+        first = self.storage.save_object(DataObject(
+            type="document",
+            properties={"title": "Invoice for January"},
+            content="",
+        ))
+        second = self.storage.save_object(DataObject(
+            type="document",
+            properties={"title": "Engineering design"},
+            content="",
+        ))
+
+        self.assertEqual(compute_minhash_jaccard("", ""), 0.0)
+        self.assertEqual(compute_minhash_jaccard("   ", "\t\n"), 0.0)
+
+        duplicates = self.deduplication.find_duplicates(
+            min_similarity=0.75,
+            auto_link_graph=False,
+        )
+        pair_ids = {first.id, second.id}
+        self.assertFalse(
+            any({item["object_a_id"], item["object_b_id"]} == pair_ids for item in duplicates),
+            "unrelated empty documents must not be reported as duplicates",
+        )
+
+    def test_duplicate_detection_bounds_results_and_reports_total_matches(self):
+        """The API can retain top matches without allocating an unbounded result list."""
+        for content in ("alpha", "bravo", "charlie"):
+            self.storage.save_object(DataObject(
+                type="document",
+                properties={"title": "Shared report"},
+                content=content,
+            ))
+
+        matches, total = self.deduplication.find_duplicates(
+            min_similarity=0.99,
+            auto_link_graph=False,
+            max_results=1,
+            return_metadata=True,
+        )
+
+        self.assertEqual(total, 3)
+        self.assertEqual(len(matches), 1)
+        self.assertEqual(matches[0]["similarity_score"], 1.0)
+
+    def test_duplicate_detection_hashes_each_object_once(self):
+        """A catalog scan computes fallback hashes per object, not per pair."""
+        class TrackedObject:
+            def __init__(self, object_id, content, title):
+                self.id = object_id
+                self.content = content
+                self.metadata = {}
+                self.properties = {"title": title}
+                self.hash_calls = 0
+
+            def compute_hash(self):
+                self.hash_calls += 1
+                return f"hash-{self.id}"
+
+        class MemoryStorage:
+            def __init__(self, objects):
+                self.objects = objects
+
+            def list_objects(self, limit):
+                return self.objects[:limit]
+
+        objects = [
+            TrackedObject("object-a", "alpha content", "Alpha report"),
+            TrackedObject("object-b", "bravo content", "Bravo report"),
+            TrackedObject("object-c", "charlie content", "Charlie report"),
+        ]
+        engine = DuplicateDetectionEngine(MemoryStorage(objects))
+
+        engine.find_duplicates(min_similarity=1.0, auto_link_graph=False)
+
+        self.assertEqual([obj.hash_calls for obj in objects], [1, 1, 1])
+
+    def test_duplicate_detection_skips_title_distance_when_length_bound_fails(self):
+        """Avoid quadratic edit-distance work when title lengths cannot meet the threshold."""
+        self.storage.save_object(DataObject(
+            type="document",
+            properties={"title": "tiny"},
+            content="alpha unique content",
+        ))
+        self.storage.save_object(DataObject(
+            type="document",
+            properties={"title": "x" * 100},
+            content="unrelated document body",
+        ))
+
+        with patch(
+            "engines.governance.deduplication.compute_levenshtein_similarity",
+            side_effect=AssertionError("impossible title match must be skipped"),
+        ):
+            matches = self.deduplication.find_duplicates(
+                min_similarity=0.75,
+                auto_link_graph=False,
+            )
+
+        self.assertEqual(matches, [])
+
     def test_resource_governance_and_rate_limiting(self):
         """Rule #61: Execution timeouts, query rate limits, and compute budgets."""
         quota = ResourceQuota(
