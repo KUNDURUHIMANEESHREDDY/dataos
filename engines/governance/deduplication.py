@@ -172,11 +172,18 @@ class DuplicateDetectionEngine:
                 # 3. Levenshtein Check on Titles / Filenames
                 title_a = data_a["title"]
                 title_b = data_b["title"]
-                if title_a and title_b:
-                    lev_sim = compute_levenshtein_similarity(title_a, title_b)
-                    if lev_sim > sim_score and lev_sim >= min_similarity:
-                        sim_score = lev_sim
-                        method = "levenshtein_title"
+                if title_a and title_b and sim_score < 1.0:
+                    max_title_len = max(len(title_a), len(title_b))
+                    # Edit distance is at least the length difference, so this
+                    # ratio is an upper bound on normalized title similarity.
+                    # Skip the quadratic dynamic-programming pass when that
+                    # upper bound cannot reach the requested threshold.
+                    length_similarity_upper_bound = min(len(title_a), len(title_b)) / max_title_len
+                    if length_similarity_upper_bound >= min_similarity:
+                        lev_sim = compute_levenshtein_similarity(title_a, title_b)
+                        if lev_sim > sim_score and lev_sim >= min_similarity:
+                            sim_score = lev_sim
+                            method = "levenshtein_title"
 
                 if sim_score >= min_similarity:
                     properties_a = data_a["properties"]
