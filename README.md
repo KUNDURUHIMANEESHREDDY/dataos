@@ -286,12 +286,11 @@ execution at 10s and 10 MB output.
 
 ## Configuration
 
-Core encryption reads `DATAOS_MASTER_KEY` (`infrastructure/privacy/encryption.py:54`). The FastAPI
-deployment layer also reads environment markers (`DATAOS_ENV`, `APP_ENV`, `ENVIRONMENT`), the production
-API bearer secret (`DATAOS_API_TOKEN`), CORS configuration (`DATAOS_CORS_ORIGINS`), sharing-token secret
-(`DATAOS_SHARING_TOKEN_SECRET`), and the high-risk Python-compute opt-in
-(`DATAOS_ALLOW_PYTHON_COMPUTE`). Check the relevant module before deploying; this list describes the
-current core/API controls, not every optional provider's configuration.
+Core encryption reads `DATAOS_MASTER_KEY` (`infrastructure/privacy/encryption.py`). Supply it through deployment secret management; never commit it or log its value. In production, set `DATAOS_ENV`, `APP_ENV`, or `ENVIRONMENT` to `production`/`prod`; if the master key is absent or empty, encryption initialization fails closed instead of generating an ephemeral key.
+
+New writes require an authenticated-encryption backend from `cryptography`; DataOS never writes XOR ciphertext. Legacy XOR decryption is disabled by default and is available only through an explicit migration-only opt-in. `DATAOS_ENCRYPTION_SALT_FILE` may point to a persistent 16-byte key-derivation salt; it defaults to `~/.dataos/encryption_salt`. Back up the salt and keep it identical across restarts and replicas sharing encrypted data: losing or changing it makes existing ciphertext unreadable.
+
+The FastAPI deployment layer also reads environment markers (`DATAOS_ENV`, `APP_ENV`, `ENVIRONMENT`), the production API bearer secret (`DATAOS_API_TOKEN`), CORS configuration (`DATAOS_CORS_ORIGINS`), sharing-token secret (`DATAOS_SHARING_TOKEN_SECRET`), and the high-risk Python-compute opt-in (`DATAOS_ALLOW_PYTHON_COMPUTE`). Check the relevant module before deploying; this list describes the current core/API controls, not every optional provider's configuration.
 
 Storage defaults remain constructor arguments: `db_path="dataos.db"`, `blob_dir=".dataos_blobs`, and
 `PostgresStorage`'s connection string (currently no `DATABASE_URL` lookup).

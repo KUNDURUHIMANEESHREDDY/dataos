@@ -5,7 +5,12 @@ Validates encryption, selective sharing, tokens, and private execution contexts.
 
 import unittest
 import os
-from infrastructure.privacy.encryption import EncryptionEngine
+import base64
+import tempfile
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
+from unittest.mock import patch
+from infrastructure.privacy.encryption import EncryptionEngine, EncryptionError
 from infrastructure.privacy.sharing import (
     SelectiveSharingManager, SharingToken, SharingLevel, PrivateExecutionContext
 )
@@ -68,6 +73,197 @@ class TestEncryptionEngine(unittest.TestCase):
         ct2 = self.engine.encrypt("after rotation")
         pt2 = self.engine.decrypt(ct2)
         self.assertEqual(pt2, "after rotation")
+
+    def test_encryption_fails_closed_without_secure_backend(self):
+        self.engine._backend = None
+        with self.assertRaises(EncryptionError):
+            self.engine.encrypt("sensitive data")
+
+    def test_unknown_and_legacy_xor_ciphertexts_are_rejected_by_default(self):
+        with self.assertRaises(EncryptionError):
+            self.engine.decrypt("unknown:payload")
+        with self.assertRaises(EncryptionError):
+            self.engine.decrypt("xor:Zm9v")
+
+    def test_decrypt_dict_does_not_silence_legacy_ciphertext_failure(self):
+        with self.assertRaises(EncryptionError):
+            self.engine.decrypt_dict({"secret": "xor:Zm9v"}, fields=["secret"])
+
+    def test_decrypt_dict_normalizes_corrupt_authenticated_ciphertext_errors(self):
+        for ciphertext in ("fernet:not-a-valid-token", "aesgcm:not-base64"):
+            with self.subTest(prefix=ciphertext.split(":", 1)[0]):
+                with self.assertRaisesRegex(EncryptionError, "Unable to decrypt encrypted field"):
+                    self.engine.decrypt_dict({"secret": ciphertext}, fields=["secret"])
+
+    def test_legacy_xor_decryption_requires_explicit_migration_opt_in(self):
+        plaintext = "legacy data to migrate"
+        key = self.engine._aes_key
+        raw = plaintext.encode()
+        encrypted = bytes(raw[i] ^ key[i % len(key)] for i in range(len(raw)))
+        legacy_ciphertext = "xor:" + base64.b64encode(encrypted).decode()
+
+        with self.assertRaises(EncryptionError):
+            self.engine.decrypt(legacy_ciphertext)
+
+        migration_engine = EncryptionEngine(
+            master_key="test_password_123",
+            allow_legacy_xor_decryption=True,
+        )
+        with self.assertWarns(RuntimeWarning):
+            self.assertEqual(migration_engine.decrypt(legacy_ciphertext), plaintext)
+
+    def test_empty_master_key_is_rejected(self):
+        with self.assertRaises(EncryptionError):
+            EncryptionEngine(master_key="   ")
+
+    def test_explicit_missing_key_file_fails_closed(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            missing_path = os.path.join(temp_dir, "missing.key")
+            with patch.dict(os.environ, {}, clear=True):
+                with self.assertRaisesRegex(EncryptionError, "regular non-symlink"):
+                    EncryptionEngine(key_file=missing_path)
+
+    def test_explicit_dangling_key_symlink_fails_closed(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            target_path = os.path.join(temp_dir, "missing-target.key")
+            key_path = os.path.join(temp_dir, "key-link")
+            try:
+                os.symlink(target_path, key_path)
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest(f"symlink creation is unavailable on this runner: {exc}")
+            with patch.dict(os.environ, {}, clear=True):
+                with self.assertRaisesRegex(EncryptionError, "regular non-symlink"):
+                    EncryptionEngine(key_file=key_path)
+
+    def test_key_file_accepts_exact_32_byte_raw_key(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            key_path = os.path.join(temp_dir, "key.bin")
+            with open(key_path, "wb") as key_file:
+                key_file.write(bytes(range(32)))
+            engine = EncryptionEngine(key_file=key_path)
+            ciphertext = engine.encrypt("key-file round trip")
+            self.assertEqual(engine.decrypt(ciphertext), "key-file round trip")
+
+    def test_key_file_accepts_bounded_utf8_passphrase(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            key_path = os.path.join(temp_dir, "key.txt")
+            salt_path = os.path.join(temp_dir, "salt.bin")
+            with open(key_path, "wb") as key_file:
+                key_file.write(b"test passphrase from file")
+            with patch.dict(os.environ, {"DATAOS_ENCRYPTION_SALT_FILE": salt_path}):
+                engine = EncryptionEngine(key_file=key_path)
+                ciphertext = engine.encrypt("passphrase-file round trip")
+                self.assertEqual(engine.decrypt(ciphertext), "passphrase-file round trip")
+
+    def test_oversized_key_file_fails_closed(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            key_path = os.path.join(temp_dir, "key.bin")
+            with open(key_path, "wb") as key_file:
+                key_file.write(b"x" * 4097)
+            with self.assertRaisesRegex(EncryptionError, "4 KiB limit"):
+                EncryptionEngine(key_file=key_path)
+
+    def test_symlinked_key_file_fails_closed(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            target_path = os.path.join(temp_dir, "target.key")
+            key_path = os.path.join(temp_dir, "key.bin")
+            with open(target_path, "wb") as key_file:
+                key_file.write(bytes(range(32)))
+            try:
+                os.symlink(target_path, key_path)
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest(f"symlink creation is unavailable on this runner: {exc}")
+            with self.assertRaisesRegex(EncryptionError, "regular non-symlink"):
+                EncryptionEngine(key_file=key_path)
+
+    def test_production_requires_persistent_master_key_for_all_environment_markers(self):
+        for marker in ("DATAOS_ENV", "APP_ENV", "ENVIRONMENT"):
+            for value in ("production", "prod"):
+                with self.subTest(marker=marker, value=value):
+                    with patch.dict(os.environ, {marker: value}, clear=True):
+                        with self.assertRaisesRegex(EncryptionError, "DATAOS_MASTER_KEY"):
+                            EncryptionEngine()
+
+    def test_any_production_marker_overrides_nonproduction_marker(self):
+        with patch.dict(
+            os.environ,
+            {"DATAOS_ENV": "development", "APP_ENV": "production"},
+            clear=True,
+        ):
+            with self.assertRaisesRegex(EncryptionError, "DATAOS_MASTER_KEY"):
+                EncryptionEngine()
+
+    def test_configured_salt_path_is_stable_across_engine_instances(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            salt_path = os.path.join(temp_dir, "persistent", "encryption_salt")
+            env = {"DATAOS_ENCRYPTION_SALT_FILE": salt_path}
+            with patch.dict(os.environ, env):
+                first = EncryptionEngine(master_key="stable_test_master_password")
+                ciphertext = first.encrypt("replica-safe data")
+                second = EncryptionEngine(master_key="stable_test_master_password")
+                self.assertEqual(second.decrypt(ciphertext), "replica-safe data")
+
+            with open(salt_path, "rb") as salt_file:
+                self.assertEqual(len(salt_file.read()), 16)
+
+    def test_concurrent_salt_initialization_converges_on_one_value(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            salt_path = os.path.join(temp_dir, "encryption_salt")
+            workers = 6
+            barrier = Barrier(workers)
+            real_link = os.link
+
+            def synchronized_link(source, destination):
+                # Make every worker finish writing its private candidate before
+                # any worker publishes, exercising the create-if-absent race.
+                barrier.wait(timeout=10)
+                return real_link(source, destination)
+
+            def load_salt(_):
+                engine = object.__new__(EncryptionEngine)
+                return EncryptionEngine._get_or_create_salt(engine)
+
+            with patch.dict(os.environ, {"DATAOS_ENCRYPTION_SALT_FILE": salt_path}):
+                with patch("infrastructure.privacy.encryption.os.link", side_effect=synchronized_link):
+                    with ThreadPoolExecutor(max_workers=workers) as pool:
+                        salts = list(pool.map(load_salt, range(workers)))
+
+            self.assertEqual(len(set(salts)), 1, "concurrent initializers must all use the published salt")
+            with open(salt_path, "rb") as salt_file:
+                self.assertEqual(salt_file.read(), salts[0])
+
+    def test_corrupt_persistent_salt_fails_closed(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            salt_path = os.path.join(temp_dir, "encryption_salt")
+            with open(salt_path, "wb") as salt_file:
+                salt_file.write(b"short")
+            with patch.dict(os.environ, {"DATAOS_ENCRYPTION_SALT_FILE": salt_path}):
+                with self.assertRaisesRegex(EncryptionError, "exactly 16 bytes"):
+                    EncryptionEngine(master_key="stable_test_master_password")
+
+    def test_oversized_persistent_salt_fails_closed(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            salt_path = os.path.join(temp_dir, "encryption_salt")
+            with open(salt_path, "wb") as salt_file:
+                salt_file.write(b"x" * 17)
+            with patch.dict(os.environ, {"DATAOS_ENCRYPTION_SALT_FILE": salt_path}):
+                with self.assertRaisesRegex(EncryptionError, "exactly 16 bytes"):
+                    EncryptionEngine(master_key="stable_test_master_password")
+
+    def test_symlinked_persistent_salt_fails_closed(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            target_path = os.path.join(temp_dir, "external_salt")
+            salt_path = os.path.join(temp_dir, "encryption_salt")
+            with open(target_path, "wb") as salt_file:
+                salt_file.write(b"x" * 16)
+            try:
+                os.symlink(target_path, salt_path)
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest(f"symlink creation is unavailable on this runner: {exc}")
+
+            with patch.dict(os.environ, {"DATAOS_ENCRYPTION_SALT_FILE": salt_path}):
+                with self.assertRaisesRegex(EncryptionError, "regular non-symlink"):
+                    EncryptionEngine(master_key="stable_test_master_password")
 
 
 class TestSharingToken(unittest.TestCase):
