@@ -152,6 +152,30 @@ class TestGovernanceAndFederation(unittest.TestCase):
 
         self.assertEqual([obj.hash_calls for obj in objects], [1, 1, 1])
 
+    def test_duplicate_detection_skips_title_distance_when_length_bound_fails(self):
+        """Avoid quadratic edit-distance work when title lengths cannot meet the threshold."""
+        self.storage.save_object(DataObject(
+            type="document",
+            properties={"title": "tiny"},
+            content="alpha unique content",
+        ))
+        self.storage.save_object(DataObject(
+            type="document",
+            properties={"title": "x" * 100},
+            content="unrelated document body",
+        ))
+
+        with patch(
+            "engines.governance.deduplication.compute_levenshtein_similarity",
+            side_effect=AssertionError("impossible title match must be skipped"),
+        ):
+            matches = self.deduplication.find_duplicates(
+                min_similarity=0.75,
+                auto_link_graph=False,
+            )
+
+        self.assertEqual(matches, [])
+
     def test_resource_governance_and_rate_limiting(self):
         """Rule #61: Execution timeouts, query rate limits, and compute budgets."""
         quota = ResourceQuota(
