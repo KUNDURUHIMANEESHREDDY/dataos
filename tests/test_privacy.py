@@ -89,6 +89,12 @@ class TestEncryptionEngine(unittest.TestCase):
         with self.assertRaises(EncryptionError):
             self.engine.decrypt_dict({"secret": "xor:Zm9v"}, fields=["secret"])
 
+    def test_decrypt_dict_normalizes_corrupt_authenticated_ciphertext_errors(self):
+        for ciphertext in ("fernet:not-a-valid-token", "aesgcm:not-base64"):
+            with self.subTest(prefix=ciphertext.split(":", 1)[0]):
+                with self.assertRaisesRegex(EncryptionError, "Unable to decrypt encrypted field"):
+                    self.engine.decrypt_dict({"secret": ciphertext}, fields=["secret"])
+
     def test_legacy_xor_decryption_requires_explicit_migration_opt_in(self):
         plaintext = "legacy data to migrate"
         key = self.engine._aes_key
