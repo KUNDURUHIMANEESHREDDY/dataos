@@ -336,8 +336,16 @@ class EncryptionEngine:
             value = result.get(field)
             if isinstance(value, str) and value.startswith(encrypted_prefixes):
                 # A recognized ciphertext that cannot be decrypted is an error,
-                # not an unencrypted value. Never silently pass it through.
-                result[field] = self.decrypt(value)
+                # not an unencrypted value. Normalize backend-specific failures
+                # so callers can handle corrupt ciphertext through one contract.
+                try:
+                    result[field] = self.decrypt(value)
+                except EncryptionError:
+                    raise
+                except Exception as exc:
+                    raise EncryptionError(
+                        f"Unable to decrypt encrypted field {field!r}"
+                    ) from exc
         return result
 
     def hash_content(self, content: str) -> str:
