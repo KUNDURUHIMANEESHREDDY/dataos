@@ -11,7 +11,7 @@
  * @param {number} [maxOffset=1000000]
  * @returns {Promise<T[]>}
  */
-export async function loadAllPages(fetchPage, collectionKey, pageSize, maxOffset = 1_000_000) {
+async function loadAllPages(fetchPage, collectionKey, pageSize, maxOffset = 1_000_000) {
   if (typeof fetchPage !== "function") {
     throw new TypeError("fetchPage must be a function");
   }
@@ -49,3 +49,5 @@ export async function loadAllPages(fetchPage, collectionKey, pageSize, maxOffset
     }
   }
 }
+
+module.exports = { loadAllPages };
