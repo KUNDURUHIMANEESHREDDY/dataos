@@ -56,10 +56,21 @@ RESULT_ENV = {
 }
 
 
+def is_enforced_step(job: dict, step: dict) -> bool:
+    """Reject guards that a workflow can skip or mark as non-blocking."""
+    job_continue = job.get("continue-on-error")
+    step_continue = step.get("continue-on-error")
+    return (
+        (job_continue is None or job_continue is False)
+        and (step_continue is None or step_continue is False)
+        and "if" not in step
+    )
+
+
 def has_fail_closed_result_checks(job: dict, required_needs: set[str]) -> bool:
     """Require every prerequisite result to be explicitly checked for success."""
     for step in job.get("steps", []):
-        if not isinstance(step, dict):
+        if not isinstance(step, dict) or not is_enforced_step(job, step):
             continue
         env = step.get("env")
         run = step.get("run")
@@ -115,7 +126,7 @@ def has_critical_high_alert_gate(job: dict) -> bool:
         "exit 1",
     )
     for step in job.get("steps", []):
-        if not isinstance(step, dict):
+        if not isinstance(step, dict) or not is_enforced_step(job, step):
             continue
         if step.get("name") != "Fail on open critical/high code-scanning alerts":
             continue
