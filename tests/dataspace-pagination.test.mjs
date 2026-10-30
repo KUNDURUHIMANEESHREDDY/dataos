@@ -40,6 +40,29 @@ test("stops on a short page when the API omits total", async () => {
   assert.equal(calls.length, 2);
 });
 
+test("rejects a short page before the reported total instead of silently truncating", async () => {
+  const calls = [];
+  await assert.rejects(
+    () => loadAllPages(async ({ offset }) => {
+      calls.push(offset);
+      return { total: 5, items: offset === 0 ? ["a"] : ["b"] };
+    }, "items", 2),
+    /short page at offset 0 before the reported total of 5 records/,
+  );
+  assert.deepEqual(calls, [0]);
+});
+
+test("rejects missing collection payloads and invalid totals", async () => {
+  await assert.rejects(
+    () => loadAllPages(async () => ({ total: 0 }), "items", 2),
+    /must contain an array named items/,
+  );
+  await assert.rejects(
+    () => loadAllPages(async () => ({ total: -1, items: [] }), "items", 2),
+    /total must be a non-negative safe integer/,
+  );
+});
+
 test("rejects invalid page sizes and offset bounds", async () => {
   await assert.rejects(() => loadAllPages(async () => ({}), "items", 0), /pageSize/);
   await assert.rejects(() => loadAllPages(async () => ({}), "items", 1, -1), /maxOffset/);
