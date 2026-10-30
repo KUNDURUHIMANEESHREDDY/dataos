@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState, lazy, Suspense } from "react";
-import { useSpatialStore } from "@/hooks/useSpatialStore";
+import { useSpatialStore, type ObjectType } from "@/hooks/useSpatialStore";
 import { api } from "@/lib/api";
 import { loadAllPages } from "@/lib/paginate.js";
 import { useKeyboard } from "@/hooks/useKeyboard";
@@ -65,7 +65,7 @@ export default function DataspacePage() {
           loadAllRelationships(),
         ]);
 
-        const typeMap: Record<string, string> = {
+        const typeMap: Record<string, ObjectType> = {
           document: "dataset",
           dataset: "dataset",
           csv: "dataset",
