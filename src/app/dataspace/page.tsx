@@ -4,6 +4,7 @@ import { useEffect, useState, lazy, Suspense } from "react";
 import { useSpatialStore, type ObjectType } from "@/hooks/useSpatialStore";
 import { api } from "@/lib/api";
 import paginate from "@/lib/paginate.js";
+import { toGraphEdge } from "@/lib/relationship-edge.js";
 import { useKeyboard } from "@/hooks/useKeyboard";
 import TopBar from "@/components/layout/TopBar";
 import Sidebar from "@/components/layout/Sidebar";
@@ -87,13 +88,10 @@ export default function DataspacePage() {
           properties: o.properties || {},
         }));
 
-        const edges = (relsRes.relationships || []).map((r: any) => ({
-          id: r.id || `${r.source_id}-${r.target_id}`,
-          source: r.source_id,
-          target: r.target_id,
-          type: r.relation_type || "related_to",
-          confidence: r.confidence ?? 1.0,
-        }));
+        const edges = (relsRes.relationships || []).flatMap((relationship: any) => {
+          const edge = toGraphEdge(relationship);
+          return edge ? [edge] : [];
+        });
 
         setObjects(objects);
         setEdges(edges);
