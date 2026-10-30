@@ -28,8 +28,15 @@ function toGraphEdge(relationship) {
   const type = typeof relationship.relation_type === "string" && relationship.relation_type.length > 0
     ? relationship.relation_type
     : "related_to";
-  const confidence = typeof relationship.confidence === "number" && Number.isFinite(relationship.confidence)
-    ? relationship.confidence
+  // Relationship.confidence is a contract value in the inclusive [0, 1]
+  // range. Corrupt/legacy payloads must not leak invalid values into graph
+  // styling, where out-of-range opacity can hide or distort an edge.
+  const rawConfidence = relationship.confidence;
+  const confidence = typeof rawConfidence === "number"
+    && Number.isFinite(rawConfidence)
+    && rawConfidence >= 0
+    && rawConfidence <= 1
+    ? rawConfidence
     : 1.0;
 
   return { id, source, target, type, confidence };
