@@ -45,7 +45,7 @@ Remaining authorization work is still material:
 - Production `/api/*` requests use a single shared bearer token; this is not per-user identity, role-based access control, or resource-level authorization.
 - The library's capability policy and grounding checks are not consistently enforced at the HTTP boundary.
 - Python compute is disabled by default in production unless `DATAOS_ALLOW_PYTHON_COMPUTE=true`; that opt-in does not prove the sandbox is safe.
-- Postgres backend parity and the frontend relationship field contract still require explicit regression coverage.
+- The live PostgreSQL CI contract now covers additive migration, source filtering, and soft-delete visibility; the Dataspace relationship serializer mismatch is normalized and regression-tested on this PR branch. Broader cloud-adapter parity, backup/restore, and deployed acceptance remain open.
 
 Treat these as release blockers until the corresponding API and deployment tests exist.
 
@@ -298,14 +298,18 @@ model.
 
 ---
 
-## Storage and contract issues
+## Storage and contract status
 
-`PostgresStorage` has drifted from `SQLiteStorage`: `delete_object()` lacks the `soft` kwarg and `list_objects()`
-lacks `source`. The backend passes both, so those routes raise `TypeError` under Postgres — while
-`tests/test_storage_backends.py` asserts backend parity **only against mock mode**, so the tests miss it.
+The live PostgreSQL CI integration test now creates a pre-soft-delete schema and verifies the additive
+`deleted_at` migration, source-filtered object counts/listing, and soft-delete visibility against a real
+PostgreSQL service. The ordinary dual-backend suite still uses PostgreSQL mock mode for broad contract
+coverage, so this does not establish full production parity for every storage method or cloud adapter.
+Backup/restore, failover, and rollback drills remain release blockers.
 
-The frontend reads `r.source_id` / `r.target_id` from relationship JSON, but `Relationship.to_dict()` emits
-`source` / `target`. Every graph edge renders as `undefined`.
+The backend relationship serializer emits canonical `source` and `target` fields. The Dataspace PR branch
+normalizes those fields into graph edges, retains `source_id` / `target_id` compatibility for older
+integrations, and rejects malformed endpoints. The frontend regression suite covers the canonical and
+legacy contracts; confidence is now constrained to the API's inclusive `0..1` range.
 
 CORS uses an explicit `DATAOS_CORS_ORIGINS` allowlist (defaulting to local frontend origins), rejects wildcard or malformed origins, and does not enable credentialed cross-origin requests. In production, `/api/*` routes require the configured shared bearer token; this is not per-user identity or resource-level authorization, which remains a high-priority production blocker.
 
