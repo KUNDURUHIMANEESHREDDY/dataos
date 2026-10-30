@@ -3,6 +3,7 @@
 import { useEffect, useState, lazy, Suspense } from "react";
 import { useSpatialStore } from "@/hooks/useSpatialStore";
 import { api } from "@/lib/api";
+import { loadAllPages } from "@/lib/paginate.js";
 import { useKeyboard } from "@/hooks/useKeyboard";
 import TopBar from "@/components/layout/TopBar";
 import Sidebar from "@/components/layout/Sidebar";
@@ -28,15 +29,23 @@ function Canvas3DFallback() {
 }
 
 async function loadAllObjects() {
-  const pageSize = 500;
-  const objects: any[] = [];
-  for (let offset = 0; ; offset += pageSize) {
-    const page = await api.listObjects({ limit: pageSize, offset });
-    const batch = Array.isArray(page.objects) ? page.objects : [];
-    objects.push(...batch);
-    if (batch.length < pageSize) break;
-  }
+  const objects = await loadAllPages<any>(
+    ({ limit, offset }) => api.listObjects({ limit, offset }),
+    "objects",
+    500,
+  );
   return { objects, total: objects.length };
+}
+
+async function loadAllRelationships() {
+  // The API caps each relationship page at 1,000 rows. Fetch every page rather
+  // than requesting 5,000 in one call (which FastAPI rejects with HTTP 422).
+  const relationships = await loadAllPages<any>(
+    ({ limit, offset }) => api.listRelationships({ limit, offset }),
+    "relationships",
+    1000,
+  );
+  return { relationships, total: relationships.length };
 }
 
 export default function DataspacePage() {
@@ -53,7 +62,7 @@ export default function DataspacePage() {
       try {
         const [objsRes, relsRes] = await Promise.all([
           loadAllObjects(),
-          api.listRelationships({ limit: 5000 }),
+          loadAllRelationships(),
         ]);
 
         const typeMap: Record<string, string> = {
