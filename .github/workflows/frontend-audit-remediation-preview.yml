@@ -1,0 +1,54 @@
+name: Frontend dependency remediation preview
+
+on:
+  push:
+    branches:
+      - automation/frontend-audit-remediation-preview-20261030
+
+permissions:
+  contents: read
+
+jobs:
+  preview:
+    name: Generate semver-safe dependency remediation proposal
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22"
+          cache: npm
+      - name: Install current locked dependencies
+        run: npm ci --no-audit --no-fund
+      - name: Apply non-breaking audit fixes and capture report
+        shell: bash
+        run: |
+          set +e
+          npm audit fix --no-fund
+          printf '%s\\n' "$?" > audit-fix.exit
+          npm audit --json > audit-after.json
+          printf '%s\\n' "$?" > audit-after.exit
+          npm audit --audit-level=high > audit-after.txt 2>&1
+          printf '%s\\n' "$?" > audit-high.exit
+          exit 0
+      - name: Reinstall proposed dependency graph
+        run: npm ci --no-audit --no-fund
+      - name: Verify production build against proposed lockfile
+        run: npm run build
+      - name: Upload proposed lockfile and audit evidence
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v4.6.2
+        with:
+          name: frontend-dependency-remediation-preview
+          path: |
+            package.json
+            package-lock.json
+            audit-fix.exit
+            audit-after.json
+            audit-after.exit
+            audit-after.txt
+            audit-high.exit
+          if-no-files-found: error
