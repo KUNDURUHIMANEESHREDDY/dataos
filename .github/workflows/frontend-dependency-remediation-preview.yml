@@ -40,9 +40,7 @@ jobs:
           git show origin/fix/dataspace-relationship-pagination-20261030:src/lib/paginate.d.ts > src/lib/paginate.d.ts
           git show origin/fix/dataspace-relationship-pagination-20261030:src/lib/paginate.js > src/lib/paginate.js
           git show origin/fix/dataspace-relationship-pagination-20261030:tests/dataspace-pagination.test.mjs > tests/dataspace-pagination.test.mjs
-          git show origin/fix/dataspace-relationship-pagination-20261030:.github/workflows/frontend-verification.yml > .github/workflows/frontend-verification.yml
           cp /tmp/dataos-package.json package.json
-          sed -i 's/fix\/dataspace-relationship-pagination-20261030/fix\/dataos-frontend-dataspace-20261030/g' .github/workflows/frontend-verification.yml
       - name: Regenerate reproducible lockfile
         run: npm install --package-lock-only --no-audit --no-fund
       - name: Install locked dependencies
@@ -59,12 +57,12 @@ jobs:
         run: npx tsc --noEmit
       - name: Build production frontend
         run: npm run build
-      - name: Commit and push verified frontend changes
+      - name: Commit and push verified frontend source and dependency lock
         shell: bash
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add package.json package-lock.json src/app/dataspace/page.tsx src/lib/api.ts src/lib/paginate.d.ts src/lib/paginate.js tests/dataspace-pagination.test.mjs .github/workflows/frontend-verification.yml
+          git add package.json package-lock.json src/app/dataspace/page.tsx src/lib/api.ts src/lib/paginate.d.ts src/lib/paginate.js tests/dataspace-pagination.test.mjs
           git commit -m "fix(frontend): secure dependencies and recover Dataspace loading"
           git push origin HEAD:refs/heads/fix/dataos-frontend-dataspace-20261030
