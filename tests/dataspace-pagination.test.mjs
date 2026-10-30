@@ -118,7 +118,7 @@ test("accepts legacy source_id and target_id aliases during migration", () => {
   assert.deepEqual(
     toGraphEdge({ source_id: "legacy-a", target_id: "legacy-b" }),
     {
-      id: "legacy-a-legacy-b",
+      id: JSON.stringify(["legacy-a", "legacy-b", "related_to"]),
       source: "legacy-a",
       target: "legacy-b",
       type: "related_to",
@@ -147,4 +147,15 @@ test("uses conservative zero confidence for malformed explicit values", () => {
 test("preserves relationship confidence at both valid contract boundaries", () => {
   assert.equal(toGraphEdge({ source: "a", target: "b", confidence: 0 }).confidence, 0);
   assert.equal(toGraphEdge({ source: "a", target: "b", confidence: 1 }).confidence, 1);
+});
+
+
+test("uses an unambiguous fallback identity for endpoint IDs containing delimiters", () => {
+  const first = toGraphEdge({ source: "a-b", target: "c", relation_type: "depends_on" });
+  const second = toGraphEdge({ source: "a", target: "b-c", relation_type: "depends_on" });
+  const third = toGraphEdge({ source: "a-b", target: "c", relation_type: "related_to" });
+
+  assert.notEqual(first.id, second.id);
+  assert.notEqual(first.id, third.id);
+  assert.equal(first.id, JSON.stringify(["a-b", "c", "depends_on"]));
 });
