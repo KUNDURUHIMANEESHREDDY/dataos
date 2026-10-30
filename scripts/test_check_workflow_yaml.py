@@ -169,5 +169,31 @@ class WorkflowYamlGateTests(unittest.TestCase):
         self.assertFalse(validate_gate_contract(Path("workflow.yml"), workflow))
 
 
+    def test_aggregate_guard_cannot_ignore_failure_with_step_continue_on_error(self):
+        workflow = _valid_workflow()
+        workflow["jobs"]["security-required"]["steps"][0]["continue-on-error"] = True
+        self.assertFalse(validate_gate_contract(Path("workflow.yml"), workflow))
+
+    def test_aggregate_job_cannot_ignore_failure_with_continue_on_error(self):
+        workflow = _valid_workflow()
+        workflow["jobs"]["backend-required"]["continue-on-error"] = True
+        self.assertFalse(validate_gate_contract(Path("workflow.yml"), workflow))
+
+    def test_aggregate_guard_cannot_be_conditionally_skipped(self):
+        workflow = _valid_workflow()
+        workflow["jobs"]["backend-required"]["steps"][0]["if"] = "false"
+        self.assertFalse(validate_gate_contract(Path("workflow.yml"), workflow))
+
+    def test_critical_alert_gate_cannot_ignore_failure_with_continue_on_error(self):
+        workflow = _valid_workflow()
+        workflow["jobs"]["security-required"]["steps"][-1]["continue-on-error"] = True
+        self.assertFalse(validate_gate_contract(Path("workflow.yml"), workflow))
+
+    def test_critical_alert_gate_cannot_be_conditionally_skipped(self):
+        workflow = _valid_workflow()
+        workflow["jobs"]["security-required"]["steps"][-1]["if"] = "false"
+        self.assertFalse(validate_gate_contract(Path("workflow.yml"), workflow))
+
+
 if __name__ == "__main__":
     unittest.main()
