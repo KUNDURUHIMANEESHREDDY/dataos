@@ -118,7 +118,7 @@ test("accepts legacy source_id and target_id aliases during migration", () => {
   assert.deepEqual(
     toGraphEdge({ source_id: "legacy-a", target_id: "legacy-b" }),
     {
-      id: "legacy-a-legacy-b",
+      id: JSON.stringify(["legacy-a", "legacy-b", "related_to"]),
       source: "legacy-a",
       target: "legacy-b",
       type: "related_to",
