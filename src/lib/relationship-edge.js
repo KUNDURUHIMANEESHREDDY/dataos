@@ -5,7 +5,7 @@
  * The canonical API fields are source/target. The source_id/target_id aliases
  * are retained for older persisted fixtures and integrations during migration.
  *
- * @param {unknown} relationship
+ * @param {Record<string, unknown> | null | undefined} relationship
  * @returns {{id: string, source: string, target: string, type: string, confidence: number} | null}
  */
 function toGraphEdge(relationship) {
