@@ -6,7 +6,7 @@ graph**, and **first-class provenance** — every derived result traceable back 
 The design principle, stated in `context/ai-workflow-rules.md`: **AI is an operator over the graph, never an
 authority over it.**
 
-> **Backend status (PR branch):** the FastAPI-to-kernel contracts have been repaired for the supported routes, and the current PR head passed the backend verification workflow: 708 tests passed, 74/74 end-to-end invariants passed, and the configured secret scan, dependency audit, SBOM, CodeQL, and required aggregates succeeded. This is branch-level evidence, not a production-readiness claim. The main remaining risks are shared-token rather than per-user authorization, production key/salt management, Postgres parity, unused Prisma schema, and unverified frontend/release enforcement. See [Current blockers](#current-blockers).
+> **Verification status (PR branch):** at head `e68cab2754d6d23f13ebe7774f23e03f6167f762`, the backend/security workflow passed 9/9 jobs (720 tests passed, 1 skipped; 74/74 scenario invariants; live PostgreSQL contract; workflow-integrity tests; Gitleaks; dependency audit; SBOM; CodeQL; required aggregates). The frontend workflow passed its production build, TypeScript check, 10 pagination/relationship tests, `npm audit` with zero vulnerabilities, and CycloneDX SBOM generation. These are pull-request checks, not deployed-production evidence. Remaining release blockers include per-user/resource authorization, encryption-key lifecycle, broader PostgreSQL recovery/parity, and verified branch-protection enforcement. See [Current blockers](#current-blockers).
 
 ---
 
@@ -59,18 +59,9 @@ SQLite is the default store; the schema is unused.
 
 ## CI verification
 
-`.github/workflows/backend-verification.yml` runs the documented Python correctness
-suite (excluding only the benchmark module), the 10-step scenario demo, and the CLI
-health smoke test on pushes and pull requests to `main`. The stable
-`Backend required` job fails closed if the backend verification job fails, is
-cancelled, or is skipped.
+`.github/workflows/backend-verification.yml` verifies the Python correctness suite, scenario invariants, CLI health, live PostgreSQL contract, and backend/security gates. The `Backend required` aggregate fails closed when its required backend/security jobs fail, are cancelled, or are skipped.
 
-This is a backend verification gate, not a complete release gate yet. The frontend
-build is deliberately not included until the committed npm lockfile is regenerated
-from the current `package.json`: the lockfile still lists removed Python packages
-(`django`, `fastapi`, and `uvicorn`) as npm dependencies. Do not treat the frontend
-build or required-check branch protection as verified until those separate items are
-completed and checked in GitHub Settings.
+The PR branch also contains `.github/workflows/frontend-verification.yml`. It performs a clean `npm ci`, high-severity dependency audit, pagination/relationship contract tests, TypeScript validation, Next.js production build, and CycloneDX SBOM generation/upload. The current lockfile is reproducible with `npm ci`, and the latest exact-head audit reported zero vulnerabilities. These are separate required workflow aggregates; repository branch-protection settings have not been verified, so do not assume GitHub enforces both checks before merge.
 
 ---
 
@@ -199,8 +190,7 @@ all calls are same-origin.
 | `actions/` | `ActionsRegistry`, `ObjectAction` — dynamic per-type capabilities |
 | `usage/` | `UsageTracker` — consumption, popularity, hourly timeline |
 
-**6 of the 12 are not reachable from the kernel or the API.** `dataos_system.py` imports only 11 engine classes;
-`catalog`, `diff`, `usage`, `actions`, and `governance` are fully implemented and tested but never wired in.
+**Kernel wiring is not equivalent to API exposure.** `dataos_system.py` currently imports and instantiates the graph, search, compute, profiling, quality, provenance, and query engines, alongside discovery, lineage, grounding, embedding, federation, ingestion, and other subsystems. The `governance`, `diff`, `catalog`, `actions`, and `usage` packages are separate engine areas; their presence or importability does not establish that a supported HTTP route exposes them. Treat API reachability as a route/contract inventory rather than inferring it from the number of imported classes.
 
 ---
 
