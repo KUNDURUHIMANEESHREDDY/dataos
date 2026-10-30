@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import paginate from "../src/lib/paginate.js";
+import { toGraphEdge } from "../src/lib/relationship-edge.js";
 
 const { loadAllPages } = paginate;
 
@@ -91,4 +92,43 @@ test("propagates page-fetch failures without returning partial results", async (
     }, "items", 2),
     /upstream unavailable/,
   );
+});
+
+
+test("maps canonical backend Relationship.to_dict source and target fields", () => {
+  assert.deepEqual(
+    toGraphEdge({
+      id: "rel-1",
+      source: "object-a",
+      target: "object-b",
+      relation_type: "depends_on",
+      confidence: 0.75,
+    }),
+    {
+      id: "rel-1",
+      source: "object-a",
+      target: "object-b",
+      type: "depends_on",
+      confidence: 0.75,
+    },
+  );
+});
+
+test("accepts legacy source_id and target_id aliases during migration", () => {
+  assert.deepEqual(
+    toGraphEdge({ source_id: "legacy-a", target_id: "legacy-b" }),
+    {
+      id: "legacy-a-legacy-b",
+      source: "legacy-a",
+      target: "legacy-b",
+      type: "related_to",
+      confidence: 1,
+    },
+  );
+});
+
+test("drops malformed relationships instead of creating undefined graph edges", () => {
+  assert.equal(toGraphEdge({ id: "missing-target", source: "object-a" }), null);
+  assert.equal(toGraphEdge({ source: "", target: "object-b" }), null);
+  assert.equal(toGraphEdge(null), null);
 });
