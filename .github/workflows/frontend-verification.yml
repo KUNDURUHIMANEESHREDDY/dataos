@@ -2,7 +2,9 @@ name: DataOS frontend verification
 
 on:
   push:
-    branches: [main]
+    branches:
+      - main
+      - fix/dataspace-relationship-pagination-20261030
   pull_request:
   workflow_dispatch:
 
