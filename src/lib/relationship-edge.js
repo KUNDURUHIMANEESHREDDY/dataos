@@ -22,12 +22,15 @@ function toGraphEdge(relationship) {
     return null;
   }
 
-  const id = typeof relationship.id === "string" && relationship.id.length > 0
-    ? relationship.id
-    : `${source}-${target}`;
   const type = typeof relationship.relation_type === "string" && relationship.relation_type.length > 0
     ? relationship.relation_type
     : "related_to";
+  // The old `${source}-${target}` fallback was ambiguous when IDs contained
+  // hyphens (for example ["a-b", "c"] and ["a", "b-c"]). A JSON tuple keeps
+  // the fallback deterministic without conflating distinct endpoint/type tuples.
+  const id = typeof relationship.id === "string" && relationship.id.length > 0
+    ? relationship.id
+    : JSON.stringify([source, target, type]);
   // Relationship.confidence is a contract value in the inclusive [0, 1]
   // range. Clamp finite legacy values and treat malformed explicit values
   // conservatively; only an absent value keeps the historical default of 1.
