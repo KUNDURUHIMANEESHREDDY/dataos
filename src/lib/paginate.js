@@ -28,7 +28,7 @@ async function loadAllPages(fetchPage, collectionKey, pageSize, maxOffset = 1_00
   const results = [];
   for (let offset = 0; ; offset += pageSize) {
     if (offset > maxOffset) {
-      throw new Error(\`Pagination exceeded the API offset limit of \${maxOffset}\`);
+      throw new Error("Pagination exceeded the API offset limit of " + maxOffset);
     }
 
     const page = await fetchPage({ limit: pageSize, offset });
@@ -37,10 +37,10 @@ async function loadAllPages(fetchPage, collectionKey, pageSize, maxOffset = 1_00
     }
     const items = page[collectionKey];
     if (!Array.isArray(items)) {
-      throw new TypeError(\`Pagination response must contain an array named \${collectionKey}\`);
+      throw new TypeError("Pagination response must contain an array named " + collectionKey);
     }
     if (items.length > pageSize) {
-      throw new RangeError(\`Pagination response exceeded the requested page size of \${pageSize}\`);
+      throw new RangeError("Pagination response exceeded the requested page size of " + pageSize);
     }
     results.push(...items);
 
@@ -58,7 +58,8 @@ async function loadAllPages(fetchPage, collectionKey, pageSize, maxOffset = 1_00
       }
       if (items.length < pageSize) {
         throw new Error(
-          \`Pagination returned a short page at offset \${offset} before the reported total of \${total} records\`,
+          "Pagination returned a short page at offset " + offset
+          + " before the reported total of " + total + " records",
         );
       }
     } else if (items.length < pageSize) {
@@ -67,7 +68,8 @@ async function loadAllPages(fetchPage, collectionKey, pageSize, maxOffset = 1_00
 
     if (offset + pageSize > maxOffset) {
       throw new Error(
-        \`Pagination reached the API offset limit of \${maxOffset} before loading all \${total ?? "available"} records\`,
+        "Pagination reached the API offset limit of " + maxOffset
+        + " before loading all " + (total ?? "available") + " records",
       );
     }
   }
