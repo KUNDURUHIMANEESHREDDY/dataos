@@ -1,6 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { loadAllPages } from "../src/lib/paginate.js";
+import paginate from "../src/lib/paginate.js";
+
+const { loadAllPages } = paginate;
 
 test("loads every page using bounded offsets and the reported total", async () => {
   const calls = [];
