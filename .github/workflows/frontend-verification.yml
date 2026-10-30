@@ -17,7 +17,7 @@ concurrency:
 
 jobs:
   frontend:
-    name: Frontend dependency audit, pagination tests, typecheck, and production build
+    name: Frontend dependency audit, SBOM, pagination tests, typecheck, and production build
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -38,6 +38,14 @@ jobs:
         run: npx tsc --noEmit
       - name: Build production frontend
         run: npm run build
+      - name: Generate frontend CycloneDX SBOM
+        run: npm sbom --sbom-format=cyclonedx > frontend.cdx.json
+      - name: Upload frontend SBOM
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v4.6.2
+        with:
+          name: dataos-frontend-sbom
+          path: frontend.cdx.json
+          if-no-files-found: error
 
   frontend-required:
     name: Frontend required
