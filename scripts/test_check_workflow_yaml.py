@@ -60,6 +60,7 @@ def _valid_workflow():
         }
     )
     return {
+        "on": {"pull_request": None},
         "jobs": {
             "security-required": security,
             "backend-required": _aggregate(backend_needs),
@@ -68,6 +69,21 @@ def _valid_workflow():
 
 
 class WorkflowYamlGateTests(unittest.TestCase):
+    def test_pull_request_trigger_is_required(self):
+        workflow = _valid_workflow()
+        del workflow["on"]["pull_request"]
+        self.assertFalse(validate_gate_contract(Path("workflow.yml"), workflow))
+
+    def test_pull_request_branch_filter_is_rejected(self):
+        workflow = _valid_workflow()
+        workflow["on"]["pull_request"] = {"branches": ["main"]}
+        self.assertFalse(validate_gate_contract(Path("workflow.yml"), workflow))
+
+    def test_pull_request_branches_ignore_filter_is_rejected(self):
+        workflow = _valid_workflow()
+        workflow["on"]["pull_request"] = {"branches-ignore": ["release/**"]}
+        self.assertFalse(validate_gate_contract(Path("workflow.yml"), workflow))
+
     def test_duplicate_mapping_key_is_rejected(self):
         source = "jobs:\n  backend: {}\n  backend: {}\n"
         with self.assertRaises(yaml.constructor.ConstructorError):
