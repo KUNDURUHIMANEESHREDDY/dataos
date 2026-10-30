@@ -29,15 +29,14 @@ function toGraphEdge(relationship) {
     ? relationship.relation_type
     : "related_to";
   // Relationship.confidence is a contract value in the inclusive [0, 1]
-  // range. Corrupt/legacy payloads must not leak invalid values into graph
-  // styling, where out-of-range opacity can hide or distort an edge.
+  // range. Clamp finite legacy values and treat malformed explicit values
+  // conservatively; only an absent value keeps the historical default of 1.
   const rawConfidence = relationship.confidence;
-  const confidence = typeof rawConfidence === "number"
-    && Number.isFinite(rawConfidence)
-    && rawConfidence >= 0
-    && rawConfidence <= 1
-    ? rawConfidence
-    : 1.0;
+  const confidence = rawConfidence === undefined || rawConfidence === null
+    ? 1.0
+    : typeof rawConfidence === "number" && Number.isFinite(rawConfidence)
+      ? Math.min(1, Math.max(0, rawConfidence))
+      : 0.0;
 
   return { id, source, target, type, confidence };
 }
