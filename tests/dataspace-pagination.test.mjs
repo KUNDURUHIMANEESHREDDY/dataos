@@ -132,3 +132,19 @@ test("drops malformed relationships instead of creating undefined graph edges", 
   assert.equal(toGraphEdge({ source: "", target: "object-b" }), null);
   assert.equal(toGraphEdge(null), null);
 });
+
+test("defaults invalid relationship confidence values to the safe contract maximum", () => {
+  for (const confidence of [-0.01, 1.01, Number.NaN, Number.POSITIVE_INFINITY]) {
+    const edge = toGraphEdge({
+      source: "object-a",
+      target: "object-b",
+      confidence,
+    });
+    assert.equal(edge.confidence, 1);
+  }
+});
+
+test("preserves relationship confidence at both valid contract boundaries", () => {
+  assert.equal(toGraphEdge({ source: "a", target: "b", confidence: 0 }).confidence, 0);
+  assert.equal(toGraphEdge({ source: "a", target: "b", confidence: 1 }).confidence, 1);
+});
