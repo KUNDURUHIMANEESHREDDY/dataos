@@ -17,7 +17,7 @@ concurrency:
 
 jobs:
   frontend:
-    name: Frontend pagination tests, typecheck, and production build
+    name: Frontend dependency audit, pagination tests, typecheck, and production build
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -30,6 +30,8 @@ jobs:
           cache: npm
       - name: Install reviewed frontend dependencies
         run: npm ci --no-audit --no-fund
+      - name: Audit frontend dependencies
+        run: npm audit --audit-level=high
       - name: Test bounded API pagination
         run: node --test tests/dataspace-pagination.test.mjs
       - name: Typecheck frontend
@@ -50,5 +52,5 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          printf 'Frontend result: %s\n' "$FRONTEND_RESULT"
+          printf 'Frontend result: %s\\n' "$FRONTEND_RESULT"
           test "$FRONTEND_RESULT" = "success"
