@@ -4,11 +4,6 @@ on:
   push:
     branches: [main]
   pull_request:
-    # Include the release-gate branch so stacked feature PRs can receive the
-    # same required backend/security checks before the gate PR is merged.
-    branches:
-      - main
-      - fix/restore-dataos-release-gates-20261026
   workflow_dispatch:
 
 permissions:
