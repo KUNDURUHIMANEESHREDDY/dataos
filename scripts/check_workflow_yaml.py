@@ -144,6 +144,22 @@ def has_critical_high_alert_gate(job: dict) -> bool:
     return False
 
 
+def has_unfiltered_pull_request_trigger(workflow: dict) -> bool:
+    """Require backend/security verification for PRs targeting stacked feature branches."""
+    # PyYAML's YAML 1.1 resolver may load the unquoted key on as boolean True.
+    triggers = workflow.get("on")
+    if triggers is None:
+        triggers = workflow.get(True)
+    if not isinstance(triggers, dict) or "pull_request" not in triggers:
+        return False
+    pull_request = triggers["pull_request"]
+    if isinstance(pull_request, dict) and (
+        "branches" in pull_request or "branches-ignore" in pull_request
+    ):
+        return False
+    return True
+
+
 def validate_gate_contract(path: Path, workflow: object) -> bool:
     """Ensure release aggregates both depend on and fail closed for required jobs."""
     if not isinstance(workflow, dict):
@@ -165,6 +181,12 @@ def validate_gate_contract(path: Path, workflow: object) -> bool:
         },
     }
     ok = True
+    if not has_unfiltered_pull_request_trigger(workflow):
+        print(
+            f"FAIL: {path}: pull_request must be unfiltered so stacked feature PRs receive backend and security verification",
+            file=sys.stderr,
+        )
+        ok = False
     for job_id, required_needs in expected.items():
         job = jobs.get(job_id)
         if not isinstance(job, dict):
