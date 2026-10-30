@@ -1,4 +1,4 @@
-name: Frontend dependency remediation candidate
+name: Build verified frontend dependency remediation branch
 
 on:
   push:
@@ -6,56 +6,65 @@ on:
       - automation/frontend-dependency-remediation-no-exa-20261030
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  preview:
-    name: Generate and verify dependency remediation proposal
+  remediate:
+    name: Build a clean stacked frontend PR from verified dependency fixes
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 35
     steps:
-      - name: Check out source
+      - name: Check out remediation preview
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
       - name: Set up Node.js
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "22"
           cache: npm
-      - name: Regenerate lockfile after removing unused SDK
+      - name: Save reviewed manifest and fetch target branches
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp package.json /tmp/dataos-package.json
+          git fetch origin fix/dataos-stacked-release-gate-20261030:refs/remotes/origin/fix/dataos-stacked-release-gate-20261030
+          git fetch origin fix/dataspace-relationship-pagination-20261030:refs/remotes/origin/fix/dataspace-relationship-pagination-20261030
+      - name: Create clean branch on verified release-gate stack
+        shell: bash
+        run: |
+          set -euo pipefail
+          git checkout -B fix/dataos-frontend-dataspace-20261030 origin/fix/dataos-stacked-release-gate-20261030
+          git show origin/fix/dataspace-relationship-pagination-20261030:src/app/dataspace/page.tsx > src/app/dataspace/page.tsx
+          git show origin/fix/dataspace-relationship-pagination-20261030:src/lib/api.ts > src/lib/api.ts
+          git show origin/fix/dataspace-relationship-pagination-20261030:src/lib/paginate.d.ts > src/lib/paginate.d.ts
+          git show origin/fix/dataspace-relationship-pagination-20261030:src/lib/paginate.js > src/lib/paginate.js
+          git show origin/fix/dataspace-relationship-pagination-20261030:tests/dataspace-pagination.test.mjs > tests/dataspace-pagination.test.mjs
+          git show origin/fix/dataspace-relationship-pagination-20261030:.github/workflows/frontend-verification.yml > .github/workflows/frontend-verification.yml
+          cp /tmp/dataos-package.json package.json
+          sed -i 's/fix\/dataspace-relationship-pagination-20261030/fix\/dataos-frontend-dataspace-20261030/g' .github/workflows/frontend-verification.yml
+      - name: Regenerate reproducible lockfile
         run: npm install --package-lock-only --no-audit --no-fund
-      - name: Install proposed dependency graph
+      - name: Install locked dependencies
         run: npm ci --no-audit --no-fund
-      - name: Apply non-breaking audit fixes
+      - name: Apply semver-compatible security fixes
         run: npm audit fix --no-fund
-        continue-on-error: true
-      - name: Reinstall remediated dependency graph
+      - name: Reinstall remediated lockfile
         run: npm ci --no-audit --no-fund
-      - name: Audit remediated frontend dependencies
-        id: audit
+      - name: Enforce frontend dependency security
         run: npm audit --audit-level=high
-        continue-on-error: true
-      - name: Test bounded API pagination
+      - name: Test bounded pagination
         run: node --test tests/dataspace-pagination.test.mjs
       - name: Typecheck frontend
         run: npx tsc --noEmit
       - name: Build production frontend
         run: npm run build
-      - name: Upload proposed manifest, lockfile and audit evidence
-        if: always()
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v4.6.2
-        with:
-          name: frontend-dependency-remediation-no-exa
-          path: |
-            package.json
-            package-lock.json
-            npm-audit.json
-          if-no-files-found: error
-      - name: Fail if high or critical vulnerabilities remain
-        if: always()
-        env:
-          AUDIT_OUTCOME: ${{ steps.audit.outcome }}
+      - name: Commit and push verified frontend changes
         shell: bash
         run: |
           set -euo pipefail
-          printf 'npm audit outcome: %s\\n' "$AUDIT_OUTCOME"
-          test "$AUDIT_OUTCOME" = "success"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add package.json package-lock.json src/app/dataspace/page.tsx src/lib/api.ts src/lib/paginate.d.ts src/lib/paginate.js tests/dataspace-pagination.test.mjs .github/workflows/frontend-verification.yml
+          git commit -m "fix(frontend): secure dependencies and recover Dataspace loading"
+          git push origin HEAD:refs/heads/fix/dataos-frontend-dataspace-20261030
