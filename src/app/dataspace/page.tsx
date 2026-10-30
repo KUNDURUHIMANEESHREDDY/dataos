@@ -3,7 +3,7 @@
 import { useEffect, useState, lazy, Suspense } from "react";
 import { useSpatialStore, type ObjectType } from "@/hooks/useSpatialStore";
 import { api } from "@/lib/api";
-import { loadAllPages } from "@/lib/paginate.js";
+import paginate from "@/lib/paginate.js";
 import { useKeyboard } from "@/hooks/useKeyboard";
 import TopBar from "@/components/layout/TopBar";
 import Sidebar from "@/components/layout/Sidebar";
@@ -16,6 +16,7 @@ import EmptyState from "@/components/canvas/EmptyState";
 import CommandPalette from "@/components/ai/CommandPalette";
 
 const SpatialCanvas3D = lazy(() => import("@/components/canvas/SpatialCanvas3D"));
+const { loadAllPages } = paginate;
 
 function Canvas3DFallback() {
   return (
