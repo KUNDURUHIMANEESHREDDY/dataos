@@ -15,12 +15,15 @@ async function apiFetch(path: string, options?: RequestInit): Promise<any> {
 export const api = {
   health: () => apiFetch("/api/catalog/health"),
 
-  listObjects: (params?: { object_type?: string; limit?: number; offset?: number }) => {
+  listObjects: (
+    params?: { object_type?: string; limit?: number; offset?: number },
+    options?: Pick<RequestInit, "signal">,
+  ) => {
     const qs = new URLSearchParams();
     if (params?.object_type) qs.set("object_type", params.object_type);
     if (params?.limit) qs.set("limit", String(params.limit));
     if (params?.offset !== undefined) qs.set("offset", String(params.offset));
-    return apiFetch(`/api/objects/?${qs}`);
+    return apiFetch(`/api/objects/?${qs}`, options);
   },
 
   getObject: (id: string) => apiFetch(`/api/objects/${id}`),
@@ -31,13 +34,16 @@ export const api = {
   deleteObject: (id: string) =>
     apiFetch(`/api/objects/${id}`, { method: "DELETE" }),
 
-  listRelationships: (params?: { source_id?: string; target_id?: string; limit?: number; offset?: number }) => {
+  listRelationships: (
+    params?: { source_id?: string; target_id?: string; limit?: number; offset?: number },
+    options?: Pick<RequestInit, "signal">,
+  ) => {
     const qs = new URLSearchParams();
     if (params?.source_id) qs.set("source_id", params.source_id);
     if (params?.target_id) qs.set("target_id", params.target_id);
     if (params?.limit) qs.set("limit", String(params.limit));
     if (params?.offset !== undefined) qs.set("offset", String(params.offset));
-    return apiFetch(`/api/relationships/?${qs}`);
+    return apiFetch(`/api/relationships/?${qs}`, options);
   },
 
   createRelationship: (data: any) =>
@@ -78,8 +84,7 @@ export const api = {
   duplicates: (id?: string) =>
     apiFetch(`/api/governance/duplicates${id ? `?object_id=${id}` : ""}`),
 
-  recommendations: (id: string) =>
-    apiFetch(`/api/recommendations/connections/${id}`),
+  recommendations: (id: string) => apiFetch(`/api/recommendations/connections/${id}`),
   queryKnowledge: (data: { query: string; selected_file_ids: string[]; include_related?: boolean; max_related_files?: number; min_confidence?: number }) =>
     apiFetch("/api/knowledge/query", { method: "POST", body: JSON.stringify(data) }),
 };
