@@ -37,6 +37,22 @@ def test_graph_neighbors_publishes_supported_direction_contract():
     assert direction["schema"]["default"] == "both"
 
 
+def test_graph_neighbors_dispatches_each_supported_direction(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        api.dataos.graph,
+        "neighbors",
+        lambda object_id, direction: calls.append((object_id, direction)) or [],
+    )
+
+    for direction in ("outgoing", "incoming", "both"):
+        assert run(api.get_neighbors("root", direction=direction)) == {
+            "object_id": "root", "total": 0, "neighbors": []
+        }
+
+    assert calls == [("root", "outgoing"), ("root", "incoming"), ("root", "both")]
+
+
 def test_graph_neighbors_uses_graph_namespace(monkeypatch):
     monkeypatch.setattr(api.dataos.graph, "neighbors", lambda object_id, direction: [{"neighbor_id": "b"}])
     result = run(api.get_neighbors("a", direction="incoming"))
