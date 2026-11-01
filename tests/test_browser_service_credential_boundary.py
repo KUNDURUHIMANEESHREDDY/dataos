@@ -1,20 +1,48 @@
 """Prevent the server-only DataOS service credential from entering client modules."""
 
 from pathlib import Path
-import re
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 CLIENT_ROOT = ROOT / "src"
 CLIENT_SUFFIXES = {".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs"}
-CLIENT_DIRECTIVE = re.compile(
-    r"\A(?:\ufeff)?(?:\s|//[^\n]*(?:\n|$)|/\*[\s\S]*?\*/)*(['\"])use client\1\s*;?"
-)
 
 
 def is_client_module(source: str) -> bool:
-    """Recognize Next.js client modules, allowing a BOM and leading comments."""
-    return CLIENT_DIRECTIVE.match(source) is not None
+    """Recognize a Next.js client directive without a backtracking regex."""
+    text = source.lstrip("\ufeff")
+
+    # ECMAScript permits comments and whitespace before a directive prologue.
+    # Consume only complete leading comments; malformed comments fail closed.
+    while True:
+        text = text.lstrip()
+        if text.startswith("//"):
+            newline = text.find("\n")
+            if newline < 0:
+                return False
+            text = text[newline + 1 :]
+            continue
+        if text.startswith("/*"):
+            end = text.find("*/", 2)
+            if end < 0:
+                return False
+            text = text[end + 2 :]
+            continue
+        break
+
+    for quote in ('"', "'"):
+        directive = f"{quote}use client{quote}"
+        if not text.startswith(directive):
+            continue
+        remainder = text[len(directive) :]
+        return (
+            not remainder
+            or remainder[0].isspace()
+            or remainder[0] == ";"
+            or remainder.startswith("//")
+            or remainder.startswith("/*")
+        )
+    return False
 
 
 class TestBrowserServiceCredentialBoundary(unittest.TestCase):
@@ -23,6 +51,7 @@ class TestBrowserServiceCredentialBoundary(unittest.TestCase):
         self.assertTrue(is_client_module("// client entry\n'use client'\nexport {}"))
         self.assertFalse(is_client_module('/* server component */\nexport const dynamic = "force-dynamic";'))
         self.assertFalse(is_client_module('import React from "react";\n"use client";'))
+        self.assertFalse(is_client_module("/* unterminated comment"))
 
     def test_public_service_token_names_never_appear_in_source(self):
         self.assertTrue(CLIENT_ROOT.is_dir(), "Expected the Next.js source tree to exist")
