@@ -30,6 +30,13 @@ def test_relationship_creation_uses_graph_namespace(monkeypatch):
     assert called["target_id"] == "target"
 
 
+def test_graph_neighbors_publishes_supported_direction_contract():
+    parameters = api.app.openapi()["paths"]["/api/graph/neighbors/{object_id}"]["get"]["parameters"]
+    direction = next(parameter for parameter in parameters if parameter["name"] == "direction")
+    assert direction["schema"]["enum"] == ["outgoing", "incoming", "both"]
+    assert direction["schema"]["default"] == "both"
+
+
 def test_graph_neighbors_uses_graph_namespace(monkeypatch):
     monkeypatch.setattr(api.dataos.graph, "neighbors", lambda object_id, direction: [{"neighbor_id": "b"}])
     result = run(api.get_neighbors("a", direction="incoming"))
