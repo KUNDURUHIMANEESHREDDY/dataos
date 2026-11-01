@@ -5,13 +5,22 @@
  * with an actionable error instead of issuing a request the API will reject.
  *
  * @template T
- * @param {(params: { limit: number; offset: number }) => Promise<Record<string, unknown>>} fetchPage
+ * @param {(params: { limit: number; offset: number; signal?: AbortSignal }) => Promise<Record<string, unknown>>} fetchPage
  * @param {string} collectionKey
  * @param {number} pageSize
  * @param {number} [maxOffset=1000000]
+ * @param {AbortSignal} [signal]
  * @returns {Promise<T[]>}
  */
-async function loadAllPages(fetchPage, collectionKey, pageSize, maxOffset = 1_000_000) {
+function throwIfAborted(signal) {
+  if (!signal?.aborted) return;
+  if (signal.reason instanceof Error) throw signal.reason;
+  const error = new Error("Pagination was aborted");
+  error.name = "AbortError";
+  throw error;
+}
+
+async function loadAllPages(fetchPage, collectionKey, pageSize, maxOffset = 1_000_000, signal) {
   if (typeof fetchPage !== "function") {
     throw new TypeError("fetchPage must be a function");
   }
@@ -27,11 +36,13 @@ async function loadAllPages(fetchPage, collectionKey, pageSize, maxOffset = 1_00
 
   const results = [];
   for (let offset = 0; ; offset += pageSize) {
+    throwIfAborted(signal);
     if (offset > maxOffset) {
       throw new Error("Pagination exceeded the API offset limit of " + maxOffset);
     }
 
-    const page = await fetchPage({ limit: pageSize, offset });
+    const page = await fetchPage({ limit: pageSize, offset, signal });
+    throwIfAborted(signal);
     if (!page || typeof page !== "object" || Array.isArray(page)) {
       throw new TypeError("Pagination response must be an object");
     }
