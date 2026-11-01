@@ -11,7 +11,7 @@ import uuid
 import datetime
 import hmac
 import threading
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Literal, Optional
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Depends, Header, Request, Query as FastQuery
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -502,11 +502,14 @@ async def evaluate_quality(object_id: str, req: QualityEvaluateRequest):
 # =============================================================================
 
 @app.get("/api/provenance/lineage/{object_id}", summary="Data Lineage Traversal")
-async def get_lineage(object_id: str, direction: str = "upstream", max_depth: int = 10):
+async def get_lineage(
+    object_id: str,
+    direction: Literal["upstream", "downstream"] = FastQuery(default="upstream"),
+    max_depth: int = FastQuery(default=10, ge=1, le=10),
+):
     if direction == "upstream":
         return dataos.lineage.trace_upstream_lineage(object_id, max_depth=max_depth)
-    else:
-        return dataos.lineage.trace_downstream_impact(object_id, max_depth=max_depth)
+    return dataos.lineage.trace_downstream_impact(object_id, max_depth=max_depth)
 
 
 # =============================================================================
