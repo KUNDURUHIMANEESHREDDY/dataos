@@ -34,7 +34,7 @@ async function loadAllObjects(signal: AbortSignal) {
   const objects = await loadAllPages<any>(
     ({ limit, offset, signal: requestSignal }) => api.listObjects(
       { limit, offset },
-      { signal: requestSignal },
+      requestSignal ? { signal: requestSignal } : undefined,
     ),
     "objects",
     500,
