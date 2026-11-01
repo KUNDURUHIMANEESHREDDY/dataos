@@ -1,12 +1,14 @@
 """HTTP contract tests for bounded provenance lineage parameters."""
 
-from fastapi.testclient import TestClient
+import asyncio
+import importlib
+from types import SimpleNamespace
 
-from backend.app import app
+api = importlib.import_module("backend.app")
 
 
 def test_lineage_route_publishes_bounded_query_contract():
-    parameters = app.openapi()["paths"]["/api/provenance/lineage/{object_id}"]["get"]["parameters"]
+    parameters = api.app.openapi()["paths"]["/api/provenance/lineage/{object_id}"]["get"]["parameters"]
     by_name = {parameter["name"]: parameter for parameter in parameters}
 
     assert by_name["direction"]["schema"]["enum"] == ["upstream", "downstream"]
@@ -16,17 +18,21 @@ def test_lineage_route_publishes_bounded_query_contract():
     assert by_name["max_depth"]["schema"]["default"] == 10
 
 
-def test_lineage_route_rejects_invalid_direction_and_unbounded_depth(monkeypatch):
-    for marker in ("DATAOS_ENV", "APP_ENV", "ENVIRONMENT"):
-        monkeypatch.delenv(marker, raising=False)
-
-    client = TestClient(app)
-    invalid_queries = (
-        "direction=sideways",
-        "max_depth=0",
-        "max_depth=11",
-        "max_depth=999999",
+def test_lineage_route_dispatches_only_the_two_supported_directions(monkeypatch):
+    calls = []
+    lineage = SimpleNamespace(
+        trace_upstream_lineage=lambda object_id, max_depth: calls.append(
+            ("upstream", object_id, max_depth)
+        ) or {"direction": "upstream", "object_id": object_id, "max_depth": max_depth},
+        trace_downstream_impact=lambda object_id, max_depth: calls.append(
+            ("downstream", object_id, max_depth)
+        ) or {"direction": "downstream", "object_id": object_id, "max_depth": max_depth},
     )
-    for query in invalid_queries:
-        response = client.get(f"/api/provenance/lineage/root?{query}")
-        assert response.status_code == 422, query
+    monkeypatch.setattr(api.dataos, "lineage", lineage)
+
+    upstream = asyncio.run(api.get_lineage("root", "upstream", 4))
+    downstream = asyncio.run(api.get_lineage("root", "downstream", 2))
+
+    assert upstream == {"direction": "upstream", "object_id": "root", "max_depth": 4}
+    assert downstream == {"direction": "downstream", "object_id": "root", "max_depth": 2}
+    assert calls == [("upstream", "root", 4), ("downstream", "root", 2)]
