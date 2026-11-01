@@ -410,3 +410,10 @@ def test_non_api_health_path_remains_available_without_api_token(monkeypatch):
         any(dependency.call is api.require_production_api_token for dependency in route.dependant.dependencies)
         for route in api_routes
     )
+
+
+def test_time_travel_openapi_declares_temporal_axis_enum():
+    parameters = api.app.openapi()["paths"]["/api/time_travel/object/{object_id}"]["get"]["parameters"]
+    temporal_axis = next(parameter for parameter in parameters if parameter["name"] == "temporal_axis")
+    assert temporal_axis["schema"]["enum"] == ["system_time", "validity_time"]
+    assert temporal_axis["schema"]["default"] == "system_time"
