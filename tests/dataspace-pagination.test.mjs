@@ -24,9 +24,9 @@ test("loads every page using bounded offsets and the reported total", async () =
 
   assert.deepEqual(result, ["a", "b", "c", "d", "e"]);
   assert.deepEqual(calls, [
-    { limit: 2, offset: 0 },
-    { limit: 2, offset: 2 },
-    { limit: 2, offset: 4 },
+    { limit: 2, offset: 0, signal: undefined },
+    { limit: 2, offset: 2, signal: undefined },
+    { limit: 2, offset: 4, signal: undefined },
   ]);
 });
 
@@ -94,6 +94,39 @@ test("propagates page-fetch failures without returning partial results", async (
   );
 });
 
+test("forwards the abort signal and stops before requesting another page", async () => {
+  const controller = new AbortController();
+  const calls = [];
+
+  await assert.rejects(
+    () => loadAllPages(async ({ offset, signal }) => {
+      calls.push({ offset, signal });
+      controller.abort();
+      return { total: 2, items: ["first"] };
+    }, "items", 1, undefined, controller.signal),
+    { name: "AbortError" },
+  );
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].offset, 0);
+  assert.equal(calls[0].signal, controller.signal);
+});
+
+test("does not start a page request when the signal is already aborted", async () => {
+  const controller = new AbortController();
+  const calls = [];
+  controller.abort();
+
+  await assert.rejects(
+    () => loadAllPages(async (params) => {
+      calls.push(params);
+      return { total: 0, items: [] };
+    }, "items", 1, undefined, controller.signal),
+    { name: "AbortError" },
+  );
+
+  assert.deepEqual(calls, []);
+});
 
 test("maps canonical backend Relationship.to_dict source and target fields", () => {
   assert.deepEqual(
