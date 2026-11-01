@@ -5,10 +5,11 @@ export type PaginatedResponse<T> = {
 
 declare const paginate: {
   loadAllPages<T>(
-    fetchPage: (params: { limit: number; offset: number }) => Promise<PaginatedResponse<T>>,
+    fetchPage: (params: { limit: number; offset: number; signal?: AbortSignal }) => Promise<PaginatedResponse<T>>,
     collectionKey: string,
     pageSize: number,
     maxOffset?: number,
+    signal?: AbortSignal,
   ): Promise<T[]>;
 };
 
