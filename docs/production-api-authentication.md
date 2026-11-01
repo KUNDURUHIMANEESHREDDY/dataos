@@ -19,7 +19,9 @@ and must never be copied into:
 - browser JavaScript, source maps, HTML, or client-visible configuration;
 - URLs, query strings, browser storage, or client-side logs.
 
-A browser request must not receive the shared service credential.
+A browser request must not receive the shared service credential. A server-only Next.js
+route handler or BFF may read the unprefixed `DATAOS_API_TOKEN` from its server environment,
+but it must authenticate the user independently and authorize every requested resource.
 
 The current main-branch browser API client uses same-origin fetch without a bearer token,
 and the repository does not currently contain a Next.js `src/app/api/*` BFF route. Therefore,
@@ -50,6 +52,8 @@ Do not use it as a substitute for those controls.
 - [ ] Browser-to-BFF-to-FastAPI integration tests cover success, expiry, unauthorized resources, and service-token misconfiguration.
 - [ ] A deployed smoke test confirms the same contract in the actual production ingress configuration.
 
-The source-level regression test in `tests/test_browser_service_credential_boundary.py` prevents
-the known service-token environment variable names from being introduced into browser-bundled
-source. It is a guardrail, not a replacement for the BFF, user authentication, or deployed acceptance tests.
+The source-level regression test in `tests/test_browser_service_credential_boundary.py` requires
+the `src/` tree to exist, rejects public service-token variable names throughout source, and
+rejects the unprefixed service-token identifier in Next.js `"use client"` modules. It permits
+a future server-only BFF route to read the unprefixed token without weakening the browser boundary.
+This is a guardrail, not a replacement for the BFF, user authentication, or deployed acceptance tests.
