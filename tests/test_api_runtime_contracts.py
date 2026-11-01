@@ -156,11 +156,58 @@ def test_time_travel_routes_use_time_travel_engine(monkeypatch):
         "id": "obj-1", "version": 1
     }
     assert run(api.time_travel_graph(as_of="2026-01-01T00:00:00Z")) == {
-        "as_of": "2026-01-01T00:00:00Z"
+        "as_of": "2026-01-01T00:00:00+00:00"
     }
-    assert run(api.time_travel_changes(t1="2026-01-01", t2="2026-01-02")) == {
-        "from": "2026-01-01", "to": "2026-01-02"
+    assert run(api.time_travel_changes(t1="2026-01-01T00:00:00Z", t2="2026-01-02T00:00:00Z")) == {
+        "from": "2026-01-01T00:00:00+00:00", "to": "2026-01-02T00:00:00+00:00"
     }
+
+
+def test_time_travel_normalizes_offsets_before_engine_comparisons(monkeypatch):
+    called = {}
+    engine = SimpleNamespace(
+        changes_between=lambda t1, t2, temporal_axis: called.update(
+            t1=t1, t2=t2, temporal_axis=temporal_axis
+        ) or {"from": t1, "to": t2}
+    )
+    monkeypatch.setattr(api.dataos, "time_travel", engine)
+
+    result = run(api.time_travel_changes(
+        t1="2026-01-01T00:30:00+01:00",
+        t2="2026-01-01T00:00:00Z",
+        temporal_axis="validity_time",
+    ))
+    assert result == {
+        "from": "2025-12-31T23:30:00+00:00",
+        "to": "2026-01-01T00:00:00+00:00",
+    }
+    assert called == {
+        "t1": "2025-12-31T23:30:00+00:00",
+        "t2": "2026-01-01T00:00:00+00:00",
+        "temporal_axis": "validity_time",
+    }
+
+
+def test_time_travel_rejects_naive_and_reversed_timestamps(monkeypatch):
+    def should_not_execute(*args, **kwargs):
+        pytest.fail("invalid time-travel input must be rejected before engine execution")
+
+    monkeypatch.setattr(api.dataos, "time_travel", SimpleNamespace(
+        get_object_as_of=should_not_execute,
+        changes_between=should_not_execute,
+    ))
+    with pytest.raises(HTTPException) as naive_exc:
+        run(api.time_travel_object("obj-1", as_of="2026-01-01T00:00:00"))
+    assert naive_exc.value.status_code == 422
+    assert "UTC offset" in naive_exc.value.detail
+
+    with pytest.raises(HTTPException) as order_exc:
+        run(api.time_travel_changes(
+            t1="2026-01-02T00:00:00Z",
+            t2="2026-01-01T00:00:00Z",
+        ))
+    assert order_exc.value.status_code == 422
+    assert "earlier than or equal" in order_exc.value.detail
 
 
 def test_ingest_text_does_not_use_client_filename_as_temp_path(monkeypatch):
