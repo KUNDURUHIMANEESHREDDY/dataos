@@ -30,22 +30,32 @@ function Canvas3DFallback() {
   );
 }
 
-async function loadAllObjects() {
+async function loadAllObjects(signal: AbortSignal) {
   const objects = await loadAllPages<any>(
-    ({ limit, offset }) => api.listObjects({ limit, offset }),
+    ({ limit, offset, signal: requestSignal }) => api.listObjects(
+      { limit, offset },
+      { signal: requestSignal },
+    ),
     "objects",
     500,
+    undefined,
+    signal,
   );
   return { objects, total: objects.length };
 }
 
-async function loadAllRelationships() {
+async function loadAllRelationships(signal: AbortSignal) {
   // The API caps each relationship page at 1,000 rows. Fetch every page rather
   // than requesting 5,000 in one call (which FastAPI rejects with HTTP 422).
   const relationships = await loadAllPages<any>(
-    ({ limit, offset }) => api.listRelationships({ limit, offset }),
+    ({ limit, offset, signal: requestSignal }) => api.listRelationships(
+      { limit, offset },
+      { signal: requestSignal },
+    ),
     "relationships",
     1000,
+    undefined,
+    signal,
   );
   return { relationships, total: relationships.length };
 }
@@ -61,14 +71,19 @@ export default function DataspacePage() {
   useKeyboard();
 
   useEffect(() => {
+    const controller = new AbortController();
+    let active = true;
+
     async function load() {
       setLoading(true);
       setError(null);
       try {
         const [objsRes, relsRes] = await Promise.all([
-          loadAllObjects(),
-          loadAllRelationships(),
+          loadAllObjects(controller.signal),
+          loadAllRelationships(controller.signal),
         ]);
+
+        if (!active) return;
 
         const typeMap: Record<string, ObjectType> = {
           document: "dataset",
@@ -96,12 +111,18 @@ export default function DataspacePage() {
         setObjects(objects);
         setEdges(edges);
       } catch (err) {
+        if (!active || controller.signal.aborted) return;
         setError(err instanceof Error ? err.message : "An unknown error occurred while loading the workspace.");
       } finally {
-        setLoading(false);
+        if (active) setLoading(false);
       }
     }
+
     load();
+    return () => {
+      active = false;
+      controller.abort();
+    };
   }, [setObjects, setEdges, reloadKey]);
 
   return (
