@@ -89,3 +89,16 @@ test("preserves explicitly supplied zero values instead of replacing them with d
     ],
   );
 });
+
+test("rejects empty and dot-segment resource IDs before issuing a request", (t) => {
+  const requests = captureRequests(t);
+
+  for (const id of ["", ".", ".."]) {
+    assert.throws(() => api.getObject(id), {
+      name: "TypeError",
+      message: /non-empty and cannot be dot path segments/,
+    });
+  }
+
+  assert.equal(requests.length, 0);
+});
