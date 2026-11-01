@@ -28,6 +28,37 @@ from backend.cors_config import cors_middleware_options
 from backend.workflow_api import WorkflowRequestError, execute_safe_workflow
 from runtime.workflows.workflow_engine import WorkflowEngine
 
+
+
+def _parse_time_travel_timestamp(value: str, field_name: str) -> datetime.datetime:
+    """Parse an offset-aware ISO 8601 timestamp and normalize it to UTC.
+
+    The time-travel engine compares persisted ISO timestamps lexicographically,
+    so callers must not pass mixed offsets or timezone-naive values.
+    """
+    if not isinstance(value, str) or not value or value != value.strip() or len(value) > 64:
+        raise HTTPException(
+            status_code=422,
+            detail=f"{field_name} must be an ISO 8601 timestamp with an explicit UTC offset",
+        )
+
+    candidate = value[:-1] + "+00:00" if value.endswith("Z") else value
+    try:
+        parsed = datetime.datetime.fromisoformat(candidate)
+    except (ValueError, OverflowError):
+        raise HTTPException(
+            status_code=422,
+            detail=f"{field_name} must be an ISO 8601 timestamp with an explicit UTC offset",
+        ) from None
+
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise HTTPException(
+            status_code=422,
+            detail=f"{field_name} must include a UTC offset",
+        )
+    return parsed.astimezone(datetime.timezone.utc)
+
+
 def require_production_api_token(request: Request, authorization: Optional[str] = Header(default=None)) -> None:
     """Require a high-entropy bearer token for API routes in production.
 
@@ -396,38 +427,37 @@ async def extract_rich_document_api(
 @app.get("/api/time_travel/object/{object_id}", summary="Time-Travel Point-in-Time Object Query (Rule #27)")
 async def time_travel_object(
     object_id: str,
-    as_of: str = FastQuery(..., description="Timestamp ISO string to travel to"),
-    temporal_axis: str = "system_time"
+    as_of: str = FastQuery(..., min_length=17, max_length=64, description="Offset-aware ISO 8601 timestamp"),
+    temporal_axis: Literal["system_time", "validity_time"] = "system_time"
 ):
-    if temporal_axis not in {"system_time", "validity_time"}:
-        raise HTTPException(status_code=400, detail="temporal_axis must be system_time or validity_time")
-    obj = dataos.time_travel.get_object_as_of(object_id, as_of, temporal_axis=temporal_axis)
+    timestamp = _parse_time_travel_timestamp(as_of, "as_of")
+    normalized_as_of = timestamp.isoformat()
+    obj = dataos.time_travel.get_object_as_of(object_id, normalized_as_of, temporal_axis=temporal_axis)
     if not obj:
-        raise HTTPException(status_code=404, detail=f"Object {object_id} not found as of {as_of}")
+        raise HTTPException(status_code=404, detail=f"Object {object_id} not found as of {normalized_as_of}")
     return obj.to_dict()
 
 
 @app.get("/api/time_travel/graph", summary="Time-Travel Point-in-Time Graph Topology Query (Rule #27)")
 async def time_travel_graph(
-    as_of: str = FastQuery(..., description="Timestamp ISO string"),
-    temporal_axis: str = "system_time"
+    as_of: str = FastQuery(..., min_length=17, max_length=64, description="Offset-aware ISO 8601 timestamp"),
+    temporal_axis: Literal["system_time", "validity_time"] = "system_time"
 ):
-    if temporal_axis not in {"system_time", "validity_time"}:
-        raise HTTPException(status_code=400, detail="temporal_axis must be system_time or validity_time")
-    graph = dataos.time_travel.get_graph_as_of(as_of, temporal_axis=temporal_axis)
-    return graph
+    timestamp = _parse_time_travel_timestamp(as_of, "as_of")
+    return dataos.time_travel.get_graph_as_of(timestamp.isoformat(), temporal_axis=temporal_axis)
 
 
 @app.get("/api/time_travel/changes", summary="Changes Between Two Historical Timestamps (Rule #27)")
 async def time_travel_changes(
-    t1: str = FastQuery(..., description="Start timestamp ISO"),
-    t2: str = FastQuery(..., description="End timestamp ISO"),
-    temporal_axis: str = "system_time"
+    t1: str = FastQuery(..., min_length=17, max_length=64, description="Start offset-aware ISO 8601 timestamp"),
+    t2: str = FastQuery(..., min_length=17, max_length=64, description="End offset-aware ISO 8601 timestamp"),
+    temporal_axis: Literal["system_time", "validity_time"] = "system_time"
 ):
-    if temporal_axis not in {"system_time", "validity_time"}:
-        raise HTTPException(status_code=400, detail="temporal_axis must be system_time or validity_time")
-    changes = dataos.time_travel.changes_between(t1, t2, temporal_axis=temporal_axis)
-    return changes
+    start = _parse_time_travel_timestamp(t1, "t1")
+    end = _parse_time_travel_timestamp(t2, "t2")
+    if start > end:
+        raise HTTPException(status_code=422, detail="t1 must be earlier than or equal to t2")
+    return dataos.time_travel.changes_between(start.isoformat(), end.isoformat(), temporal_axis=temporal_axis)
 
 
 class ConflictResolutionRequest(BaseModel):
