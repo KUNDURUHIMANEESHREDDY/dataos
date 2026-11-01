@@ -8,6 +8,7 @@ on:
     # same required backend/security checks before the gate PR is merged.
     branches:
       - main
+      - fix/main-backend-required-needs-20261101-run11
       - fix/restore-dataos-release-gates-20261026
   workflow_dispatch:
 
