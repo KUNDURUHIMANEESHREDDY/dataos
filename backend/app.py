@@ -11,7 +11,7 @@ import uuid
 import datetime
 import hmac
 import threading
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Literal, Optional
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Depends, Header, Request, Query as FastQuery
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -257,7 +257,7 @@ async def create_relationship(req: RelationCreateRequest):
 
 
 @app.get("/api/graph/neighbors/{object_id}", summary="Get Object Neighbors")
-async def get_neighbors(object_id: str, direction: str = "both"):
+async def get_neighbors(object_id: str, direction: Literal["outgoing", "incoming", "both"] = "both"):
     neighbors = dataos.graph.neighbors(object_id, direction=direction)
     return {"object_id": object_id, "total": len(neighbors), "neighbors": neighbors}
 
