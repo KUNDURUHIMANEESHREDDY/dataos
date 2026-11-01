@@ -1,6 +1,11 @@
 const API_BASE = "";
 
-const pathSegment = (value: string): string => encodeURIComponent(value);
+const pathSegment = (value: string): string => {
+  if (value.length === 0 || value === "." || value === "..") {
+    throw new TypeError("DataOS resource IDs must be non-empty and cannot be dot path segments.");
+  }
+  return encodeURIComponent(value);
+};
 
 async function apiFetch(path: string, options?: RequestInit): Promise<any> {
   const res = await fetch(`${API_BASE}${path}`, {
