@@ -89,21 +89,23 @@ jobs:
   backend-required:
     name: Backend required
     if: always()
-    needs: [backend, postgres-storage]
-    needs: [backend, security-required]
+    needs: [backend, postgres-storage, security-required]
     runs-on: ubuntu-latest
     steps:
-      - name: Fail closed unless backend and PostgreSQL verification passed
+      - name: Fail closed unless backend, PostgreSQL, and security verification passed
         env:
           BACKEND_RESULT: ${{ needs.backend.result }}
           POSTGRES_RESULT: ${{ needs.postgres-storage.result }}
+          SECURITY_RESULT: ${{ needs['security-required'].result }}
         run: |
           set -euo pipefail
           echo "backend: $BACKEND_RESULT"
           echo "postgres-storage: $POSTGRES_RESULT"
+          echo "security: $SECURITY_RESULT"
           test "$BACKEND_RESULT" = "success"
           test "$POSTGRES_RESULT" = "success"
-          echo "Backend and live PostgreSQL storage verification passed."
+          test "$SECURITY_RESULT" = "success"
+          echo "Backend, live PostgreSQL storage, and security verification passed."
 
   secret-scan:
     name: Git history secret scan
