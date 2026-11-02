@@ -54,7 +54,13 @@ def _parse_time_travel_timestamp(value: str, field_name: str) -> datetime.dateti
             status_code=422,
             detail=f"{field_name} must include a UTC offset",
         )
-    return parsed.astimezone(datetime.timezone.utc)
+    try:
+        return parsed.astimezone(datetime.timezone.utc)
+    except (OverflowError, ValueError):
+        raise HTTPException(
+            status_code=422,
+            detail=f"{field_name} must be representable as a UTC timestamp",
+        ) from None
 
 
 def require_production_api_token(request: Request, authorization: Optional[str] = Header(default=None)) -> None:
