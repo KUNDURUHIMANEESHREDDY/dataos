@@ -201,6 +201,16 @@ def test_time_travel_rejects_malformed_whitespace_and_oversized_timestamps():
         assert exc.value.status_code == 422
         assert "ISO 8601 timestamp" in exc.value.detail
 
+def test_time_travel_rejects_utc_normalization_overflow():
+    for value in (
+        "0001-01-01T00:00:00+01:00",
+        "9999-12-31T23:59:59-01:00",
+    ):
+        with pytest.raises(HTTPException) as exc:
+            run(api.time_travel_object("obj-1", as_of=value))
+        assert exc.value.status_code == 422
+        assert "representable as a UTC timestamp" in exc.value.detail
+
 def test_ingest_text_does_not_use_client_filename_as_temp_path(monkeypatch):
     called = {}
     def ingest(content, filename, discover_relations):
