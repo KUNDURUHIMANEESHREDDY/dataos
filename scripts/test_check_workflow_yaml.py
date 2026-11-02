@@ -49,6 +49,7 @@ def _valid_workflow():
     security_needs = ["secret-scan", "dependency-audit", "sbom", "codeql"]
     backend_needs = ["backend", "postgres-storage", "security-required", "workflow-lint"]
     security = _aggregate(security_needs)
+    security["permissions"] = {"contents": "read", "security-events": "read"}
     security["steps"].append(
         {
             "name": "Fail on open critical/high code-scanning alerts",
@@ -100,6 +101,16 @@ class WorkflowYamlGateTests(unittest.TestCase):
         workflow = _valid_workflow()
         workflow["jobs"]["backend-required"]["needs"].remove("postgres-storage")
         self.assertFalse(validate_gate_contract(Path("workflow.yml"), workflow))
+
+    def test_security_alert_gate_requires_code_scanning_read_permission(self):
+        workflow = _valid_workflow()
+        workflow["jobs"]["security-required"]["permissions"].pop("security-events")
+        self.assertFalse(validate_gate_contract(Path("workflow.yml"), workflow))
+
+    def test_security_alert_gate_accepts_write_permission(self):
+        workflow = _valid_workflow()
+        workflow["jobs"]["security-required"]["permissions"]["security-events"] = "write"
+        self.assertTrue(validate_gate_contract(Path("workflow.yml"), workflow))
 
     def test_missing_critical_high_alert_gate_fails(self):
         workflow = _valid_workflow()
