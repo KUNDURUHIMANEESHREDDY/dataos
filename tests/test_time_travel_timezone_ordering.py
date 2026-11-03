@@ -119,6 +119,72 @@ class TestTimeTravelTimezoneOrdering(unittest.TestCase):
         self.assertEqual(graph["total_relationships"], 1)
         self.assertEqual(graph["relationships"][0]["id"], relationship.id)
 
+    def test_system_time_graph_excludes_soft_deleted_relationship_at_deletion(self):
+        created_at = "2026-01-01T00:00:00Z"
+        source = DataObject(id="source-deleted-edge", timestamps={"created_at": created_at, "updated_at": created_at})
+        target = DataObject(id="target-deleted-edge", timestamps={"created_at": created_at, "updated_at": created_at})
+        relationship = Relationship(
+            source=source.id,
+            target=target.id,
+            created_at="2026-01-01T01:00:00+01:00",
+            deleted_at="2026-01-01T02:00:00+01:00",
+        )
+        storage = MemoryStorage(
+            objects=[source, target],
+            snapshots={source.id: [snapshot_for(source)], target.id: [snapshot_for(target)]},
+            relationships=[relationship],
+        )
+        engine = TimeTravelEngine(storage)
+
+        before_deletion = engine.get_graph_as_of("2026-01-01T00:30:00Z")
+        at_deletion = engine.get_graph_as_of("2026-01-01T01:00:00Z")
+
+        self.assertEqual(before_deletion["total_relationships"], 1)
+        self.assertEqual(at_deletion["total_relationships"], 0)
+
+    def test_validity_time_graph_uses_explicit_relationship_interval(self):
+        created_at = "2025-12-31T23:00:00Z"
+        source = DataObject(id="source-valid-edge", timestamps={"created_at": created_at, "updated_at": created_at})
+        target = DataObject(id="target-valid-edge", timestamps={"created_at": created_at, "updated_at": created_at})
+        relationship = Relationship(
+            source=source.id,
+            target=target.id,
+            created_at=created_at,
+            metadata={
+                "valid_from": "2026-01-01T01:00:00+01:00",
+                "valid_to": "2026-01-01T02:00:00+01:00",
+            },
+        )
+        storage = MemoryStorage(
+            objects=[source, target],
+            snapshots={source.id: [snapshot_for(source)], target.id: [snapshot_for(target)]},
+            relationships=[relationship],
+        )
+        engine = TimeTravelEngine(storage)
+
+        inside_interval = engine.get_graph_as_of("2026-01-01T00:30:00Z", temporal_axis="validity_time")
+        outside_interval = engine.get_graph_as_of("2026-01-01T01:30:00Z", temporal_axis="validity_time")
+
+        self.assertEqual(inside_interval["total_relationships"], 1)
+        self.assertEqual(outside_interval["total_relationships"], 0)
+
+    def test_validity_time_graph_does_not_infer_validity_from_creation_time(self):
+        created_at = "2026-01-01T00:00:00Z"
+        source = DataObject(id="source-no-validity", timestamps={"created_at": created_at, "updated_at": created_at})
+        target = DataObject(id="target-no-validity", timestamps={"created_at": created_at, "updated_at": created_at})
+        relationship = Relationship(source=source.id, target=target.id, created_at=created_at)
+        storage = MemoryStorage(
+            objects=[source, target],
+            snapshots={source.id: [snapshot_for(source)], target.id: [snapshot_for(target)]},
+            relationships=[relationship],
+        )
+
+        graph = TimeTravelEngine(storage).get_graph_as_of(
+            "2026-01-02T00:00:00Z", temporal_axis="validity_time"
+        )
+
+        self.assertEqual(graph["total_relationships"], 0)
+
     def test_bitemporal_interval_uses_utc_instants(self):
         interval = BiTemporalInterval(
             valid_from="2026-01-01T01:00:00+01:00",
