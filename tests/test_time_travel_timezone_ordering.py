@@ -130,5 +130,26 @@ class TestTimeTravelTimezoneOrdering(unittest.TestCase):
         self.assertTrue(interval.is_valid_at("2026-01-01T00:30:00Z", "system_time"))
 
 
+    def test_unsupported_temporal_axis_is_rejected_by_engine_contracts(self):
+        interval = BiTemporalInterval(valid_from="2026-01-01T00:00:00Z")
+        engine = TimeTravelEngine(MemoryStorage())
+
+        with self.assertRaisesRegex(ValueError, "temporal_axis must be"):
+            interval.is_valid_at("2026-01-01T00:00:00Z", "transaction_time")
+
+        with self.assertRaisesRegex(ValueError, "temporal_axis must be"):
+            engine.get_object_as_of("missing", "2026-01-01T00:00:00Z", temporal_axis="transaction_time")
+
+        with self.assertRaisesRegex(ValueError, "temporal_axis must be"):
+            engine.get_graph_as_of("2026-01-01T00:00:00Z", temporal_axis="transaction_time")
+
+        with self.assertRaisesRegex(ValueError, "temporal_axis must be"):
+            engine.changes_between(
+                "2026-01-01T00:00:00Z",
+                "2026-01-02T00:00:00Z",
+                temporal_axis="transaction_time",
+            )
+
+
 if __name__ == "__main__":
     unittest.main()
