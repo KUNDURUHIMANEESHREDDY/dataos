@@ -185,6 +185,49 @@ class TestTimeTravelTimezoneOrdering(unittest.TestCase):
 
         self.assertEqual(graph["total_relationships"], 0)
 
+    def test_validity_time_relationship_interval_includes_exact_end_boundary(self):
+        created_at = "2025-12-31T23:00:00Z"
+        source = DataObject(id="source-valid-boundary", timestamps={"created_at": created_at, "updated_at": created_at})
+        target = DataObject(id="target-valid-boundary", timestamps={"created_at": created_at, "updated_at": created_at})
+        relationship = Relationship(
+            source=source.id,
+            target=target.id,
+            created_at=created_at,
+            metadata={"valid_from": "2026-01-01T00:00:00Z", "valid_to": "2026-01-01T01:00:00Z"},
+        )
+        storage = MemoryStorage(
+            objects=[source, target],
+            snapshots={source.id: [snapshot_for(source)], target.id: [snapshot_for(target)]},
+            relationships=[relationship],
+        )
+
+        graph = TimeTravelEngine(storage).get_graph_as_of(
+            "2026-01-01T01:00:00Z", temporal_axis="validity_time"
+        )
+
+        self.assertEqual(graph["total_relationships"], 1)
+
+    def test_invalid_relationship_validity_timestamp_fails_closed(self):
+        created_at = "2026-01-01T00:00:00Z"
+        source = DataObject(id="source-invalid-validity", timestamps={"created_at": created_at, "updated_at": created_at})
+        target = DataObject(id="target-invalid-validity", timestamps={"created_at": created_at, "updated_at": created_at})
+        relationship = Relationship(
+            source=source.id,
+            target=target.id,
+            created_at=created_at,
+            metadata={"valid_from": "not-a-timestamp"},
+        )
+        storage = MemoryStorage(
+            objects=[source, target],
+            snapshots={source.id: [snapshot_for(source)], target.id: [snapshot_for(target)]},
+            relationships=[relationship],
+        )
+
+        with self.assertRaisesRegex(ValueError, "relationship.valid_from must be a valid ISO 8601 timestamp"):
+            TimeTravelEngine(storage).get_graph_as_of(
+                "2026-01-02T00:00:00Z", temporal_axis="validity_time"
+            )
+
     def test_bitemporal_interval_uses_utc_instants(self):
         interval = BiTemporalInterval(
             valid_from="2026-01-01T01:00:00+01:00",
