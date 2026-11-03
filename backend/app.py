@@ -292,7 +292,10 @@ async def create_relationship(req: RelationCreateRequest):
 
 
 @app.get("/api/graph/neighbors/{object_id}", summary="Get Object Neighbors")
-async def get_neighbors(object_id: str, direction: str = "both"):
+async def get_neighbors(
+    object_id: str,
+    direction: Literal["outgoing", "incoming", "both"] = "both",
+):
     neighbors = dataos.graph.neighbors(object_id, direction=direction)
     return {"object_id": object_id, "total": len(neighbors), "neighbors": neighbors}
 
@@ -535,11 +538,14 @@ async def evaluate_quality(object_id: str, req: QualityEvaluateRequest):
 # =============================================================================
 
 @app.get("/api/provenance/lineage/{object_id}", summary="Data Lineage Traversal")
-async def get_lineage(object_id: str, direction: str = "upstream", max_depth: int = 10):
+async def get_lineage(
+    object_id: str,
+    direction: Literal["upstream", "downstream"] = FastQuery(default="upstream"),
+    max_depth: int = FastQuery(default=10, ge=1, le=10),
+):
     if direction == "upstream":
         return dataos.lineage.trace_upstream_lineage(object_id, max_depth=max_depth)
-    else:
-        return dataos.lineage.trace_downstream_impact(object_id, max_depth=max_depth)
+    return dataos.lineage.trace_downstream_impact(object_id, max_depth=max_depth)
 
 
 # =============================================================================
