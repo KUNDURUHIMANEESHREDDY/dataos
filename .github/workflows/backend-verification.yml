@@ -82,7 +82,7 @@ jobs:
         image: postgres:16
         env:
           POSTGRES_USER: dataos
-          POSTGRES_PASSWORD: dataos-test-password
+          POSTGRES_PASSWORD: ${{ github.run_id }}-${{ github.run_attempt }}-ci
           POSTGRES_DB: dataos_test
         ports:
           - 5432:5432
@@ -92,7 +92,7 @@ jobs:
           --health-timeout 5s
           --health-retries 5
     env:
-      DATAOS_TEST_POSTGRES_URL: postgresql://dataos:dataos-test-password@localhost:5432/dataos_test
+      DATAOS_TEST_POSTGRES_URL: postgresql://dataos:${{ github.run_id }}-${{ github.run_attempt }}-ci@localhost:5432/dataos_test
     steps:
       - name: Check out source
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
