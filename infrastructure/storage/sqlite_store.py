@@ -307,7 +307,7 @@ class SQLiteStorage(StorageBackend):
             if soft:
                 import datetime
                 now = datetime.datetime.now(datetime.timezone.utc).isoformat()
-                cursor.execute("UPDATE objects SET deleted_at = ? WHERE id = ?", (now, object_id))
+                cursor.execute("UPDATE objects SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL", (now, object_id))
             else:
                 cursor.execute("DELETE FROM objects WHERE id = ?", (object_id,))
             
