@@ -41,6 +41,13 @@ def _parse_timestamp(value: Optional[str], field_name: str) -> Optional[datetime
     return parsed.astimezone(datetime.timezone.utc)
 
 
+def _validate_temporal_axis(axis: str) -> str:
+    """Reject unsupported temporal axes instead of silently treating them as system time."""
+    if axis not in {"system_time", "validity_time"}:
+        raise ValueError("temporal_axis must be 'system_time' or 'validity_time'")
+    return axis
+
+
 @dataclass
 class BiTemporalInterval:
     """Bi-temporal interval representing both real-world validity and system recording time."""
@@ -51,6 +58,7 @@ class BiTemporalInterval:
 
     def is_valid_at(self, timestamp: str, axis: str = "system_time") -> bool:
         """Check interval membership using chronological UTC instants."""
+        _validate_temporal_axis(axis)
         instant = _parse_timestamp(timestamp, "timestamp")
         if instant is None:
             return False
@@ -86,6 +94,7 @@ class TimeTravelEngine:
         temporal_axis: str = "system_time"
     ) -> Optional[DataObject]:
         """Reconstruct an object using timezone-correct historical comparisons."""
+        _validate_temporal_axis(temporal_axis)
         boundary = _parse_timestamp(as_of_timestamp, "as_of_timestamp")
         if boundary is None:
             raise ValueError("as_of_timestamp is required")
@@ -139,6 +148,7 @@ class TimeTravelEngine:
         Reconstruct the entire graph topology (active objects and active relationships)
         as it existed at `as_of_timestamp`.
         """
+        _validate_temporal_axis(temporal_axis)
         all_objects = self.storage.list_objects(limit=10000)
         all_relationships = self.storage.list_relationships(limit=10000)
 
@@ -183,6 +193,7 @@ class TimeTravelEngine:
         - Deleted/superseded objects
         - Added/removed relationships
         """
+        _validate_temporal_axis(temporal_axis)
         g1 = self.get_graph_as_of(t1, temporal_axis=temporal_axis)
         g2 = self.get_graph_as_of(t2, temporal_axis=temporal_axis)
 
