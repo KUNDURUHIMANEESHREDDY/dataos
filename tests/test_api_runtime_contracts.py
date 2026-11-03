@@ -133,12 +133,83 @@ def test_time_travel_routes_use_time_travel_engine(monkeypatch):
         "id": "obj-1", "version": 1
     }
     assert run(api.time_travel_graph(as_of="2026-01-01T00:00:00Z")) == {
-        "as_of": "2026-01-01T00:00:00Z"
+        "as_of": "2026-01-01T00:00:00+00:00"
     }
-    assert run(api.time_travel_changes(t1="2026-01-01", t2="2026-01-02")) == {
-        "from": "2026-01-01", "to": "2026-01-02"
+    assert run(api.time_travel_changes(t1="2026-01-01T00:00:00Z", t2="2026-01-02T00:00:00Z")) == {
+        "from": "2026-01-01T00:00:00+00:00", "to": "2026-01-02T00:00:00+00:00"
     }
 
+
+def test_time_travel_normalizes_offsets_before_engine_comparisons(monkeypatch):
+    called = {}
+    engine = SimpleNamespace(
+        changes_between=lambda t1, t2, temporal_axis: called.update(
+            t1=t1, t2=t2, temporal_axis=temporal_axis
+        ) or {"from": t1, "to": t2}
+    )
+    monkeypatch.setattr(api.dataos, "time_travel", engine)
+
+    result = run(api.time_travel_changes(
+        t1="2026-01-01T00:30:00+01:00",
+        t2="2026-01-01T00:00:00Z",
+        temporal_axis="validity_time",
+    ))
+    assert result == {
+        "from": "2025-12-31T23:30:00+00:00",
+        "to": "2026-01-01T00:00:00+00:00",
+    }
+    assert called == {
+        "t1": "2025-12-31T23:30:00+00:00",
+        "t2": "2026-01-01T00:00:00+00:00",
+        "temporal_axis": "validity_time",
+    }
+
+
+def test_time_travel_rejects_naive_and_reversed_timestamps(monkeypatch):
+    def should_not_execute(*args, **kwargs):
+        pytest.fail("invalid time-travel input must be rejected before engine execution")
+
+    monkeypatch.setattr(api.dataos, "time_travel", SimpleNamespace(
+        get_object_as_of=should_not_execute,
+        changes_between=should_not_execute,
+    ))
+    with pytest.raises(HTTPException) as naive_exc:
+        run(api.time_travel_object("obj-1", as_of="2026-01-01T00:00:00"))
+    assert naive_exc.value.status_code == 422
+    assert "UTC offset" in naive_exc.value.detail
+
+    with pytest.raises(HTTPException) as order_exc:
+        run(api.time_travel_changes(
+            t1="2026-01-02T00:00:00Z",
+            t2="2026-01-01T00:00:00Z",
+        ))
+    assert order_exc.value.status_code == 422
+    assert "earlier than or equal" in order_exc.value.detail
+
+
+def test_time_travel_openapi_declares_temporal_axis_enum():
+    parameters = api.app.openapi()["paths"]["/api/time_travel/object/{object_id}"]["get"]["parameters"]
+    temporal_axis = next(parameter for parameter in parameters if parameter["name"] == "temporal_axis")
+    assert temporal_axis["schema"]["enum"] == ["system_time", "validity_time"]
+    assert temporal_axis["schema"]["default"] == "system_time"
+
+
+def test_time_travel_rejects_malformed_whitespace_and_oversized_timestamps():
+    for value in (" 2026-01-01T00:00:00Z", "not-a-timestamp", "x" * 65):
+        with pytest.raises(HTTPException) as exc:
+            run(api.time_travel_object("obj-1", as_of=value))
+        assert exc.value.status_code == 422
+        assert "ISO 8601 timestamp" in exc.value.detail
+
+def test_time_travel_rejects_utc_normalization_overflow():
+    for value in (
+        "0001-01-01T00:00:00+01:00",
+        "9999-12-31T23:59:59-01:00",
+    ):
+        with pytest.raises(HTTPException) as exc:
+            run(api.time_travel_object("obj-1", as_of=value))
+        assert exc.value.status_code == 422
+        assert "representable as a UTC timestamp" in exc.value.detail
 
 def test_ingest_text_does_not_use_client_filename_as_temp_path(monkeypatch):
     called = {}
