@@ -48,6 +48,31 @@ def _validate_temporal_axis(axis: str) -> str:
     return axis
 
 
+def _relationship_is_active_at(
+    relationship: Relationship,
+    boundary: datetime.datetime,
+    temporal_axis: str,
+) -> bool:
+    """Apply the selected temporal axis to relationship lifecycle metadata.
+
+    System time uses created_at/deleted_at. Validity time uses the explicit
+    metadata.valid_from/valid_to interval; relationships without a validity
+    start are omitted rather than incorrectly treating creation time as real-
+    world validity.
+    """
+    if temporal_axis == "validity_time":
+        metadata = getattr(relationship, "metadata", None)
+        if not isinstance(metadata, dict):
+            return False
+        start = _parse_timestamp(metadata.get("valid_from"), "relationship.valid_from")
+        end = _parse_timestamp(metadata.get("valid_to"), "relationship.valid_to")
+        return start is not None and start <= boundary and (end is None or boundary <= end)
+
+    created = _parse_timestamp(getattr(relationship, "created_at", None), "relationship.created_at")
+    deleted = _parse_timestamp(getattr(relationship, "deleted_at", None), "relationship.deleted_at")
+    return created is not None and created <= boundary and (deleted is None or boundary < deleted)
+
+
 @dataclass
 class BiTemporalInterval:
     """Bi-temporal interval representing both real-world validity and system recording time."""
@@ -160,14 +185,13 @@ class TimeTravelEngine:
 
         active_obj_ids = {o.id for o in active_objects}
 
-        # Filter relationships created on or before timestamp between active objects
+        # Apply the same temporal axis to edge lifecycle as to object history.
         active_relationships: List[Relationship] = []
         boundary = _parse_timestamp(as_of_timestamp, "as_of_timestamp")
         if boundary is None:
             raise ValueError("as_of_timestamp is required")
         for rel in all_relationships:
-            created_at = _parse_timestamp(getattr(rel, "created_at", None), "relationship.created_at")
-            if created_at is not None and created_at <= boundary:
+            if _relationship_is_active_at(rel, boundary, temporal_axis):
                 if rel.source in active_obj_ids and rel.target in active_obj_ids:
                     active_relationships.append(rel)
 
