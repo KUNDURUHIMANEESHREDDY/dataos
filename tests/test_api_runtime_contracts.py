@@ -411,3 +411,57 @@ def test_non_api_health_path_remains_available_without_api_token(monkeypatch):
         any(dependency.call is api.require_production_api_token for dependency in route.dependant.dependencies)
         for route in api_routes
     )
+
+
+def test_graph_neighbors_publishes_supported_direction_contract():
+    parameters = api.app.openapi()["paths"]["/api/graph/neighbors/{object_id}"]["get"]["parameters"]
+    direction = next(parameter for parameter in parameters if parameter["name"] == "direction")
+    assert direction["schema"]["enum"] == ["outgoing", "incoming", "both"]
+    assert direction["schema"]["default"] == "both"
+
+
+def test_graph_neighbors_dispatches_each_supported_direction(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        api.dataos.graph,
+        "neighbors",
+        lambda object_id, direction: calls.append((object_id, direction)) or [],
+    )
+
+    for direction in ("outgoing", "incoming", "both"):
+        assert run(api.get_neighbors("root", direction=direction)) == {
+            "object_id": "root", "total": 0, "neighbors": []
+        }
+
+    assert calls == [("root", "outgoing"), ("root", "incoming"), ("root", "both")]
+
+
+def test_lineage_route_publishes_bounded_query_contract():
+    parameters = api.app.openapi()["paths"]["/api/provenance/lineage/{object_id}"]["get"]["parameters"]
+    by_name = {parameter["name"]: parameter for parameter in parameters}
+
+    assert by_name["direction"]["schema"]["enum"] == ["upstream", "downstream"]
+    assert by_name["direction"]["schema"]["default"] == "upstream"
+    assert by_name["max_depth"]["schema"]["minimum"] == 1
+    assert by_name["max_depth"]["schema"]["maximum"] == 10
+    assert by_name["max_depth"]["schema"]["default"] == 10
+
+
+def test_lineage_route_dispatches_only_the_two_supported_directions(monkeypatch):
+    calls = []
+    lineage = SimpleNamespace(
+        trace_upstream_lineage=lambda object_id, max_depth: calls.append(
+            ("upstream", object_id, max_depth)
+        ) or {"direction": "upstream", "object_id": object_id, "max_depth": max_depth},
+        trace_downstream_impact=lambda object_id, max_depth: calls.append(
+            ("downstream", object_id, max_depth)
+        ) or {"direction": "downstream", "object_id": object_id, "max_depth": max_depth},
+    )
+    monkeypatch.setattr(api.dataos, "lineage", lineage)
+
+    upstream = run(api.get_lineage("root", "upstream", 4))
+    downstream = run(api.get_lineage("root", "downstream", 2))
+
+    assert upstream == {"direction": "upstream", "object_id": "root", "max_depth": 4}
+    assert downstream == {"direction": "downstream", "object_id": "root", "max_depth": 2}
+    assert calls == [("upstream", "root", 4), ("downstream", "root", 2)]
