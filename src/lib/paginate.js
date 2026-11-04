@@ -75,4 +75,88 @@ async function loadAllPages(fetchPage, collectionKey, pageSize, maxOffset = 1_00
   }
 }
 
-module.exports = { loadAllPages };
+/**
+ * Fetch a collection without allowing the browser graph to grow without bound.
+ *
+ * One extra record is requested at the cap so APIs that omit total can still
+ * report truncation accurately. The extra record is never returned to callers.
+ *
+ * @template T
+ * @param {(params: { limit: number; offset: number }) => Promise<Record<string, unknown>>} fetchPage
+ * @param {string} collectionKey
+ * @param {number} pageSize
+ * @param {number} maxItems
+ * @returns {Promise<{ items: T[]; total: number | null; truncated: boolean }>}
+ */
+async function loadBoundedPages(fetchPage, collectionKey, pageSize, maxItems) {
+  if (typeof fetchPage !== "function") {
+    throw new TypeError("fetchPage must be a function");
+  }
+  if (typeof collectionKey !== "string" || collectionKey.length === 0) {
+    throw new TypeError("collectionKey must be a non-empty string");
+  }
+  if (!Number.isSafeInteger(pageSize) || pageSize < 1) {
+    throw new RangeError("pageSize must be a positive safe integer");
+  }
+  if (!Number.isSafeInteger(maxItems) || maxItems < 1) {
+    throw new RangeError("maxItems must be a positive safe integer");
+  }
+
+  const items = [];
+  let total = null;
+
+  for (;;) {
+    const remaining = maxItems - items.length;
+    // At the cap, make a one-record probe when the API omits total. This
+    // distinguishes an exactly-full collection from a truncated one.
+    const limit = Math.min(pageSize, remaining + 1);
+    const offset = items.length;
+    const page = await fetchPage({ limit, offset });
+
+    if (!page || typeof page !== "object" || Array.isArray(page)) {
+      throw new TypeError("Pagination response must be an object");
+    }
+
+    const batch = page[collectionKey];
+    if (!Array.isArray(batch)) {
+      throw new TypeError("Pagination response must contain an array named " + collectionKey);
+    }
+    if (batch.length > limit) {
+      throw new RangeError("Pagination response exceeded the requested page size of " + limit);
+    }
+
+    if (page.total !== undefined && page.total !== null) {
+      if (!Number.isSafeInteger(page.total) || page.total < 0) {
+        throw new TypeError("Pagination total must be a non-negative safe integer");
+      }
+      total = page.total;
+    }
+
+    const accepted = batch.slice(0, remaining);
+    items.push(...accepted);
+    const loaded = offset + batch.length;
+
+    if (total !== null && loaded >= total) {
+      return { items, total, truncated: total > items.length };
+    }
+
+    if (batch.length < limit) {
+      if (total !== null) {
+        throw new Error(
+          "Pagination returned a short page at offset " + offset
+          + " before the reported total of " + total + " records",
+        );
+      }
+      return { items, total: null, truncated: false };
+    }
+
+    if (items.length >= maxItems && total !== null) {
+      return { items, total, truncated: total > items.length };
+    }
+    if (items.length >= maxItems && batch.length > accepted.length) {
+      return { items, total, truncated: true };
+    }
+  }
+}
+
+module.exports = { loadAllPages, loadBoundedPages };
