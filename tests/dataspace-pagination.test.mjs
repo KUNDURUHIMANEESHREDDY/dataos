@@ -159,3 +159,35 @@ test("uses an unambiguous fallback identity for endpoint IDs containing delimite
   assert.notEqual(first.id, third.id);
   assert.equal(first.id, JSON.stringify(["a-b", "c", "depends_on"]));
 });
+
+
+test("keeps fallback relationship identities unique across paginated pages", async () => {
+  const pages = new Map([
+    [0, {
+      total: 4,
+      relationships: [
+        { source: "a-b", target: "c", relation_type: "depends_on" },
+        { source: "a", target: "b-c", relation_type: "depends_on" },
+      ],
+    }],
+    [2, {
+      total: 4,
+      relationships: [
+        { source: "a-b", target: "c", relation_type: "related_to" },
+        { id: "explicit-1", source: "a-b", target: "c", relation_type: "related_to" },
+      ],
+    }],
+  ]);
+
+  const relationships = await loadAllPages(
+    async ({ offset }) => pages.get(offset),
+    "relationships",
+    2,
+  );
+  const edges = relationships.map(toGraphEdge);
+
+  assert.ok(edges.every(Boolean));
+  const ids = edges.map((edge) => edge.id);
+  assert.equal(new Set(ids).size, relationships.length);
+  assert.equal(ids[3], "explicit-1");
+});
