@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import paginate from "../src/lib/paginate.js";
 import { toGraphEdge } from "../src/lib/relationship-edge.js";
 
-const { loadAllPages } = paginate;
+const { loadAllPages, loadBoundedPages } = paginate;
 
 test("loads every page using bounded offsets and the reported total", async () => {
   const calls = [];
@@ -94,6 +94,59 @@ test("propagates page-fetch failures without returning partial results", async (
   );
 });
 
+test("caps collections using the server total and reports truncation", async () => {
+  const calls = [];
+  const pages = new Map([
+    [0, { total: 5, items: ["a", "b"] }],
+    [2, { total: 5, items: ["c", "d"] }],
+  ]);
+
+  const result = await loadBoundedPages(async (params) => {
+    calls.push(params);
+    return pages.get(params.offset);
+  }, "items", 2, 3);
+
+  assert.deepEqual(result, { items: ["a", "b", "c"], total: 5, truncated: true });
+  assert.deepEqual(calls, [
+    { limit: 2, offset: 0 },
+    { limit: 2, offset: 2 },
+  ]);
+});
+
+test("uses a one-record probe to distinguish an exact cap when total is omitted", async () => {
+  const calls = [];
+  const result = await loadBoundedPages(async (params) => {
+    calls.push(params);
+    return { items: params.offset === 0 ? ["a", "b"] : [] };
+  }, "items", 2, 2);
+
+  assert.deepEqual(result, { items: ["a", "b"], total: null, truncated: false });
+  assert.deepEqual(calls, [
+    { limit: 2, offset: 0 },
+    { limit: 1, offset: 2 },
+  ]);
+});
+
+test("reports truncation when the one-record probe finds more data", async () => {
+  const calls = [];
+  const result = await loadBoundedPages(async (params) => {
+    calls.push(params);
+    return { items: params.offset === 0 ? ["a", "b"] : ["c"] };
+  }, "items", 2, 2);
+
+  assert.deepEqual(result, { items: ["a", "b"], total: null, truncated: true });
+  assert.deepEqual(calls, [
+    { limit: 2, offset: 0 },
+    { limit: 1, offset: 2 },
+  ]);
+});
+
+test("rejects invalid bounded pagination limits", async () => {
+  await assert.rejects(
+    () => loadBoundedPages(async () => ({ items: [] }), "items", 2, 0),
+    /maxItems/,
+  );
+});
 
 test("maps canonical backend Relationship.to_dict source and target fields", () => {
   assert.deepEqual(
@@ -149,7 +202,6 @@ test("preserves relationship confidence at both valid contract boundaries", () =
   assert.equal(toGraphEdge({ source: "a", target: "b", confidence: 1 }).confidence, 1);
 });
 
-
 test("uses an unambiguous fallback identity for endpoint IDs containing delimiters", () => {
   const first = toGraphEdge({ source: "a-b", target: "c", relation_type: "depends_on" });
   const second = toGraphEdge({ source: "a", target: "b-c", relation_type: "depends_on" });
@@ -159,7 +211,6 @@ test("uses an unambiguous fallback identity for endpoint IDs containing delimite
   assert.notEqual(first.id, third.id);
   assert.equal(first.id, JSON.stringify(["a-b", "c", "depends_on"]));
 });
-
 
 test("keeps fallback relationship identities unique across paginated pages", async () => {
   const pages = new Map([
