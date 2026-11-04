@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import paginate from "../src/lib/paginate.js";
 import { toGraphEdge } from "../src/lib/relationship-edge.js";
 
-const { loadAllPages } = paginate;
+const { loadAllPages, loadBoundedPages } = paginate;
 
 test("loads every page using bounded offsets and the reported total", async () => {
   const calls = [];
@@ -126,6 +126,75 @@ test("does not start a page request when the signal is already aborted", async (
   );
 
   assert.deepEqual(calls, []);
+});
+
+test("caps collections using the server total and reports truncation", async () => {
+  const calls = [];
+  const pages = new Map([
+    [0, { total: 5, items: ["a", "b"] }],
+    [2, { total: 5, items: ["c", "d"] }],
+  ]);
+
+  const result = await loadBoundedPages(async (params) => {
+    calls.push(params);
+    return pages.get(params.offset);
+  }, "items", 2, 3);
+
+  assert.deepEqual(result, { items: ["a", "b", "c"], total: 5, truncated: true });
+  assert.deepEqual(calls.map(({ limit, offset }) => ({ limit, offset })), [
+    { limit: 2, offset: 0 },
+    { limit: 2, offset: 2 },
+  ]);
+});
+
+test("uses a one-record probe to distinguish an exact cap when total is omitted", async () => {
+  const calls = [];
+  const result = await loadBoundedPages(async (params) => {
+    calls.push(params);
+    return { items: params.offset === 0 ? ["a", "b"] : [] };
+  }, "items", 2, 2);
+
+  assert.deepEqual(result, { items: ["a", "b"], total: null, truncated: false });
+  assert.deepEqual(calls.map(({ limit, offset }) => ({ limit, offset })), [
+    { limit: 2, offset: 0 },
+    { limit: 1, offset: 2 },
+  ]);
+});
+
+test("reports truncation when the one-record probe finds more data", async () => {
+  const calls = [];
+  const result = await loadBoundedPages(async (params) => {
+    calls.push(params);
+    return { items: params.offset === 0 ? ["a", "b"] : ["c"] };
+  }, "items", 2, 2);
+
+  assert.deepEqual(result, { items: ["a", "b"], total: null, truncated: true });
+  assert.deepEqual(calls.map(({ limit, offset }) => ({ limit, offset })), [
+    { limit: 2, offset: 0 },
+    { limit: 1, offset: 2 },
+  ]);
+});
+
+test("forwards abort signals through bounded pagination", async () => {
+  const controller = new AbortController();
+  const calls = [];
+  await assert.rejects(
+    () => loadBoundedPages(async ({ offset, signal }) => {
+      calls.push({ offset, signal });
+      controller.abort();
+      return { items: ["first"] };
+    }, "items", 1, 2, controller.signal),
+    { name: "AbortError" },
+  );
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].signal, controller.signal);
+});
+
+test("rejects invalid bounded pagination limits", async () => {
+  await assert.rejects(
+    () => loadBoundedPages(async () => ({ items: [] }), "items", 2, 0),
+    /maxItems/,
+  );
 });
 
 test("maps canonical backend Relationship.to_dict source and target fields", () => {
