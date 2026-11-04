@@ -17,7 +17,10 @@ import EmptyState from "@/components/canvas/EmptyState";
 import CommandPalette from "@/components/ai/CommandPalette";
 
 const SpatialCanvas3D = lazy(() => import("@/components/canvas/SpatialCanvas3D"));
-const { loadAllPages } = paginate;
+const { loadBoundedPages } = paginate;
+
+const MAX_GRAPH_OBJECTS = 10_000;
+const MAX_GRAPH_RELATIONSHIPS = 20_000;
 
 function Canvas3DFallback() {
   return (
@@ -31,23 +34,43 @@ function Canvas3DFallback() {
 }
 
 async function loadAllObjects() {
-  const objects = await loadAllPages<any>(
+  const result = await loadBoundedPages<any>(
     ({ limit, offset }) => api.listObjects({ limit, offset }),
     "objects",
     500,
+    MAX_GRAPH_OBJECTS,
   );
-  return { objects, total: objects.length };
+  return { objects: result.items, total: result.total, truncated: result.truncated };
 }
 
 async function loadAllRelationships() {
-  // The API caps each relationship page at 1,000 rows. Fetch every page rather
-  // than requesting 5,000 in one call (which FastAPI rejects with HTTP 422).
-  const relationships = await loadAllPages<any>(
+  // The API caps each relationship page at 1,000 rows. Fetch bounded pages
+  // rather than requesting 5,000 in one call or accumulating an unbounded graph.
+  const result = await loadBoundedPages<any>(
     ({ limit, offset }) => api.listRelationships({ limit, offset }),
     "relationships",
     1000,
+    MAX_GRAPH_RELATIONSHIPS,
   );
-  return { relationships, total: relationships.length };
+  return { relationships: result.items, total: result.total, truncated: result.truncated };
+}
+
+function buildGraphNotice(
+  objects: { objects: unknown[]; total: number | null; truncated: boolean },
+  relationships: { relationships: unknown[]; total: number | null; truncated: boolean },
+) {
+  const limits: string[] = [];
+  if (objects.truncated) {
+    const total = objects.total === null ? "more than " + objects.objects.length.toLocaleString() : objects.total.toLocaleString();
+    limits.push(objects.objects.length.toLocaleString() + " of " + total + " objects");
+  }
+  if (relationships.truncated) {
+    const total = relationships.total === null ? "more than " + relationships.relationships.length.toLocaleString() : relationships.total.toLocaleString();
+    limits.push(relationships.relationships.length.toLocaleString() + " of " + total + " relationships");
+  }
+  if (limits.length === 0) return null;
+  return "Graph view is bounded to " + limits.join(" and ")
+    + " to protect browser memory and rendering performance. All records remain in storage; use search to locate specific objects.";
 }
 
 export default function DataspacePage() {
@@ -56,6 +79,7 @@ export default function DataspacePage() {
   const viewMode = useSpatialStore((s) => s.viewMode);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
 
   useKeyboard();
@@ -64,6 +88,7 @@ export default function DataspacePage() {
     async function load() {
       setLoading(true);
       setError(null);
+      setNotice(null);
       try {
         const [objsRes, relsRes] = await Promise.all([
           loadAllObjects(),
@@ -95,6 +120,7 @@ export default function DataspacePage() {
 
         setObjects(objects);
         setEdges(edges);
+        setNotice(buildGraphNotice(objsRes, relsRes));
       } catch (err) {
         setError(err instanceof Error ? err.message : "An unknown error occurred while loading the workspace.");
       } finally {
@@ -139,6 +165,15 @@ export default function DataspacePage() {
           )}
 
           <div className="flex-1 relative overflow-hidden">
+            {notice && (
+              <div
+                className="absolute top-3 left-3 right-3 z-20 mx-auto max-w-3xl glass rounded-lg px-4 py-3 text-xs text-[var(--color-text-secondary)] shadow-lg"
+                role="status"
+                aria-live="polite"
+              >
+                {notice}
+              </div>
+            )}
             {viewMode === "2d" ? <SpatialCanvas /> : (
               <Suspense fallback={<Canvas3DFallback />}>
                 <SpatialCanvas3D />
