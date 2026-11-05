@@ -1,5 +1,8 @@
+export const MAX_INGEST_FILE_BYTES = 5 * 1024 * 1024;
+
 export type IngestionFile = {
   filename: string;
+  size?: number;
   read: () => Promise<string>;
 };
 
@@ -34,11 +37,24 @@ export async function ingestFiles(
   const outcomes: IngestionOutcome[] = [];
 
   for (const file of files) {
+    if (
+      file.size !== undefined &&
+      (!Number.isSafeInteger(file.size) || file.size < 0 || file.size > MAX_INGEST_FILE_BYTES)
+    ) {
+      outcomes.push({ filename: file.filename, ok: false, error: "file exceeds the 5 MiB limit" });
+      continue;
+    }
+
     let content: string;
     try {
       content = await file.read();
     } catch {
       outcomes.push({ filename: file.filename, ok: false, error: "unable to read file" });
+      continue;
+    }
+
+    if (new TextEncoder().encode(content).byteLength > MAX_INGEST_FILE_BYTES) {
+      outcomes.push({ filename: file.filename, ok: false, error: "file exceeds the 5 MiB limit" });
       continue;
     }
 
