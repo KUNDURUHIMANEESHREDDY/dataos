@@ -2,6 +2,7 @@
 
 import { useSpatialStore } from "@/hooks/useSpatialStore";
 import { api } from "@/lib/api";
+import { ingestFiles } from "@/lib/ingestion";
 import { useState } from "react";
 
 export default function EmptyState() {
@@ -36,31 +37,14 @@ export default function EmptyState() {
     ];
 
     try {
-      // A fulfilled fetch promise is not necessarily a successful HTTP request.
-      // Keep processing independent samples so one rejected item does not hide
-      // successful writes from the subsequent catalog refresh.
-      const outcomes = await Promise.allSettled(
-        samples.map(async (sample) => {
-          const response = await fetch("/api/ingest/universal", {
-            method: "POST",
-            headers: { "Content-Type": "application/x-www-form-urlencoded" },
-            body: new URLSearchParams({
-              filename: sample.filename,
-              content: sample.content,
-              discover_relations: "true",
-            }),
-          });
-          if (!response.ok) {
-            throw new Error(`HTTP ${response.status}`);
-          }
-          return response.json();
-        }),
+      const outcomes = await ingestFiles(
+        samples.map((sample) => ({
+          filename: sample.filename,
+          read: async () => sample.content,
+        })),
       );
-
-      const failures = outcomes.flatMap((outcome, index) =>
-        outcome.status === "rejected"
-          ? [`${samples[index].filename}: ${outcome.reason instanceof Error ? outcome.reason.message : "request failed"}`]
-          : [],
+      const failures = outcomes.flatMap((outcome) =>
+        outcome.ok ? [] : [`${outcome.filename}: ${outcome.error}`],
       );
 
       // Refresh even after partial failure so successfully ingested samples are
