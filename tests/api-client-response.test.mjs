@@ -65,16 +65,25 @@ test("bounds plain-text error response reads and displayed details", async (t) =
   assert.equal(cancelled, true);
 });
 
-test("rejects successful non-JSON responses with a contract error", async (t) => {
-  withFetch(t, async () => new Response(
-    "upstream diagnostic page",
-    { status: 200, headers: { "content-type": "text/html" } },
-  ));
+test("cancels successful non-JSON response bodies before reporting a contract error", async (t) => {
+  let cancelled = false;
+  withFetch(t, async () => new Response(new ReadableStream({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode("upstream diagnostic page"));
+    },
+    cancel() {
+      cancelled = true;
+    },
+  }), {
+    status: 200,
+    headers: { "content-type": "text/html" },
+  }));
 
   await assert.rejects(api.health(), {
     name: "Error",
     message: "API 200: expected a JSON response",
   });
+  assert.equal(cancelled, true);
 });
 
 test("rejects malformed JSON success responses with a stable error", async (t) => {
