@@ -73,12 +73,15 @@ class IngestionBodyLimitMiddleware:
             await self._reject(send, 400, b'{"detail":"Invalid Content-Length."}')
             return
         if lengths:
-            try:
-                content_length = int(lengths[0])
-            except (TypeError, ValueError, OverflowError):
+            raw_content_length = lengths[0]
+            # HTTP Content-Length is 1*DIGIT. int() alone also accepts signs
+            # and surrounding whitespace, which are not valid field syntax.
+            if not raw_content_length or not raw_content_length.isdigit():
                 await self._reject(send, 400, b'{"detail":"Invalid Content-Length."}')
                 return
-            if content_length < 0:
+            try:
+                content_length = int(raw_content_length)
+            except (ValueError, OverflowError):
                 await self._reject(send, 400, b'{"detail":"Invalid Content-Length."}')
                 return
             if content_length > self.max_body_bytes:
