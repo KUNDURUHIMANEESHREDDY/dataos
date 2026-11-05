@@ -21,10 +21,10 @@ export async function loadGraphCollections(controller, loadObjects, loadRelation
   }
 
   try {
-    return await Promise.all([
-      loadObjects(controller.signal),
-      loadRelationships(controller.signal),
-    ]);
+    const signal = controller.signal;
+    const objectRequest = Promise.resolve().then(() => loadObjects(signal));
+    const relationshipRequest = Promise.resolve().then(() => loadRelationships(signal));
+    return await Promise.all([objectRequest, relationshipRequest]);
   } catch (error) {
     if (!controller.signal.aborted) controller.abort();
     throw error;
