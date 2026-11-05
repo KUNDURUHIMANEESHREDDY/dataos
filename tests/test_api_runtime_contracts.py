@@ -340,3 +340,99 @@ def test_non_api_health_path_remains_available_without_api_token(monkeypatch):
         any(dependency.call is api.require_production_api_token for dependency in route.dependant.dependencies)
         for route in api_routes
     )
+
+
+
+def test_universal_ingest_rejects_oversized_utf8_content_before_kernel(monkeypatch):
+    monkeypatch.setattr(
+        api.dataos,
+        "ingest",
+        lambda *args, **kwargs: pytest.fail("oversized content must be rejected before ingestion"),
+    )
+    content = "é" * (api.MAX_INGEST_CONTENT_BYTES // 2 + 1)
+    with pytest.raises(HTTPException) as exc:
+        run(api.universal_ingest_api(filename="large.txt", content=content, discover_relations=True))
+    assert exc.value.status_code == 413
+
+
+def test_ingestion_body_limit_rejects_declared_oversize_without_reading_body():
+    async def downstream(scope, receive, send):
+        pytest.fail("oversized Content-Length must be rejected before the route runs")
+
+    middleware = api.IngestionBodyLimitMiddleware(downstream, max_body_bytes=4)
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "path": "/api/ingest/universal",
+        "headers": [(b"content-length", b"5")],
+    }
+    sent = []
+
+    async def receive():
+        pytest.fail("declared oversized request body must not be read")
+
+    async def send(message):
+        sent.append(message)
+
+    run(middleware(scope, receive, send))
+    assert sent[0]["status"] == 413
+    assert b"request-size limit" in sent[1]["body"]
+
+
+def test_ingestion_body_limit_rejects_oversized_streaming_body():
+    messages = [
+        {"type": "http.request", "body": b"123", "more_body": True},
+        {"type": "http.request", "body": b"45", "more_body": False},
+    ]
+
+    async def receive():
+        return messages.pop(0)
+
+    async def downstream(scope, limited_receive, send):
+        while True:
+            message = await limited_receive()
+            if message["type"] != "http.request" or not message.get("more_body", False):
+                break
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"ok"})
+
+    middleware = api.IngestionBodyLimitMiddleware(downstream, max_body_bytes=4)
+    sent = []
+
+    async def send(message):
+        sent.append(message)
+
+    run(middleware(
+        {"type": "http", "method": "POST", "path": "/api/ingest/universal", "headers": []},
+        receive,
+        send,
+    ))
+    assert sent[0]["status"] == 413
+    assert b"request-size limit" in sent[1]["body"]
+
+
+def test_ingestion_body_limit_does_not_restrict_other_routes():
+    async def downstream(scope, receive, send):
+        await send({"type": "http.response.start", "status": 204, "headers": []})
+        await send({"type": "http.response.body", "body": b""})
+
+    middleware = api.IngestionBodyLimitMiddleware(downstream, max_body_bytes=4)
+    sent = []
+
+    async def receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message):
+        sent.append(message)
+
+    run(middleware(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/api/objects",
+            "headers": [(b"content-length", b"100")],
+        },
+        receive,
+        send,
+    ))
+    assert sent[0]["status"] == 204
