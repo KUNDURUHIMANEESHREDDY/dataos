@@ -6,7 +6,7 @@ graph**, and **first-class provenance** — every derived result traceable back 
 The design principle, stated in `context/ai-workflow-rules.md`: **AI is an operator over the graph, never an
 authority over it.**
 
-> **Backend status (PR branch):** the FastAPI-to-kernel contracts have been repaired for the supported routes, and the current PR head passed the backend verification workflow: 708 tests passed, 74/74 end-to-end invariants passed, and the configured secret scan, dependency audit, SBOM, CodeQL, and required aggregates succeeded. This is branch-level evidence, not a production-readiness claim. The main remaining risks are shared-token rather than per-user authorization, production key/salt management, Postgres parity, unused Prisma schema, and unverified frontend/release enforcement. See [Current blockers](#current-blockers).
+> **Backend status:** production-hardening branch includes per-user JWT auth and role capability gating, deployable Docker/Compose configuration, and a committed frontend production build. The shared bearer token remains an additional production gate, not the only auth boundary. Remaining production risks are resource-level authorization across every handler, Python-sandbox security review, live Postgres regression coverage, and real secret-management/operations before public exposure.
 
 ---
 
@@ -34,43 +34,23 @@ Six bugs that made the project unusable, fixed in `dab962b` and `4193152`:
   frontend cannot use). Now resolves 252 packages.
 - **No Python dependency manifest existed.** Added `requirements.txt`.
 
-### Still open
+### Remaining production blockers
 
-#### 1. Production API authorization is not yet multi-user safe
+#### 1. Per-user authorization is implemented but not yet resource-level everywhere
 
-The current PR repairs the FastAPI-to-kernel method contracts and verifies the backend through the current CI suite. The old claim that roughly 22 endpoints are known to return HTTP 500 is stale and should not be used as the current status.
+Per-user identity now exists (`/api/auth/register`, `/api/auth/login`, `/api/auth/me`) and JWT sessions are enforced when `DATAOS_JWT_SECRET` is configured. Roles map to capability sets in `core/permissions/policy.py` (`viewer`, `analyst`, `operator`, `admin`). The production shared bearer token remains as an additional boundary.
 
 Remaining authorization work is still material:
 
-- Production `/api/*` requests use a single shared bearer token; this is not per-user identity, role-based access control, or resource-level authorization.
-- The library's capability policy and grounding checks are not consistently enforced at the HTTP boundary.
+- Capability enforcement is wired at auth/admin boundaries but not consistently enforced on every data-modifying or high-risk handler.
 - Python compute is disabled by default in production unless `DATAOS_ALLOW_PYTHON_COMPUTE=true`; that opt-in does not prove the sandbox is safe.
-- Postgres backend parity and the frontend relationship field contract still require explicit regression coverage.
+- Live PostgreSQL parity coverage exists via the CI service job, but should be expanded as routes are added.
 
 Treat these as release blockers until the corresponding API and deployment tests exist.
 
-#### 2. Prisma is dead weight
-
-There is a 224-line `prisma/schema.prisma` and `prisma` in `devDependencies`, but **nothing in `src/` imports
-Prisma**, there is no `@prisma/client`, there are no Prisma scripts, and the schema's `datasource` has no `url`.
-SQLite is the default store; the schema is unused.
-
----
-
 ## CI verification
 
-`.github/workflows/backend-verification.yml` runs the documented Python correctness
-suite (excluding only the benchmark module), the 10-step scenario demo, and the CLI
-health smoke test on pushes and pull requests to `main`. The stable
-`Backend required` job fails closed if the backend verification job fails, is
-cancelled, or is skipped.
-
-This is a backend verification gate, not a complete release gate yet. The frontend
-build is deliberately not included until the committed npm lockfile is regenerated
-from the current `package.json`: the lockfile still lists removed Python packages
-(`django`, `fastapi`, and `uvicorn`) as npm dependencies. Do not treat the frontend
-build or required-check branch protection as verified until those separate items are
-completed and checked in GitHub Settings.
+`.github/workflows/backend-verification.yml` runs the Python correctness suite, frontend production build, live PostgreSQL storage contract, secret scan, dependency audit, and a required aggregate job. The workflow is fail-closed: a skipped or failed required job fails the aggregate check.
 
 ---
 
@@ -84,9 +64,11 @@ For local development, generate a value without printing it separately:
 export DATAOS_SHARING_TOKEN_SECRET="$(python -c 'import secrets; print(secrets.token_urlsafe(48))')"
 ```
 
-This secret protects sharing-token signatures only. It does **not** authenticate the rest of the FastAPI API. SQL/Python execution, writes, ingestion, and data-reading routes still need an explicit authentication/authorization boundary; do not expose the API to untrusted networks until that work is completed.
+This secret protects sharing-token signatures only.
 
 ### Production API authentication
+
+Per-user authentication is available when `DATAOS_JWT_SECRET` is configured. Users authenticate with `/api/auth/login` and receive a signed HS256 JWT; role capabilities are derived from `ROLE_CAPABILITIES`. Without `DATAOS_JWT_SECRET`, local development falls back to shared-token behavior.
 
 When any of `DATAOS_ENV`, `APP_ENV`, or `ENVIRONMENT` is set to `production` or `prod`, every `/api/*` route requires an `Authorization: Bearer …` header. Configure `DATAOS_API_TOKEN` as a high-entropy secret of at least 32 UTF-8 bytes through the deployment secret manager. If the token is absent, padded with accidental whitespace, or too short, API requests fail closed with HTTP 503; missing or incorrect bearer credentials return HTTP 401. Environment markers are checked independently, so a conflicting `development` marker does not disable the production guard. The non-`/api` health route remains available for liveness monitoring.
 
@@ -98,7 +80,7 @@ export DATAOS_API_TOKEN="$(python -c 'import secrets; print(secrets.token_urlsaf
 
 Python execution is a separate high-risk capability. In production, both `/api/compute/python` and unified-query `query_type=python` are disabled unless `DATAOS_ALLOW_PYTHON_COMPUTE=true` is explicitly configured. Keep it disabled unless the execution sandbox and access controls have been reviewed. This flag is an opt-in, not proof that the sandbox is safe.
 
-This is a single shared bearer-token boundary, not per-user identity or role-based authorization. Rotate it through secret management and do not expose it to browser bundles. If a public browser client needs access, place a properly authenticated backend-for-frontend or identity-aware gateway in front of DataOS rather than embedding this token in frontend code.
+This boundary is in addition to per-user JWT authorization when `DATAOS_JWT_SECRET` is configured. If a public browser client authenticates only with `DATAOS_API_TOKEN`, do not embed that token in frontend code; authenticate browser users through `/api/auth/login` or an identity-aware gateway in front of DataOS.
 
 
 ---
@@ -221,7 +203,7 @@ type/schema/properties/content/source/version; `create_new_version()` appends to
 `core/relation/` provides 23 relation types (`DERIVED_FROM`, `SUPPORTED_BY`, `CONTRADICTS`, `SUPERSEDES`, …) and a
 `Relationship` dataclass whose `confidence` is clamped to `0.0–1.0` in `__post_init__`.
 
-**Note:** `prisma/schema.prisma` mirrors this model with 11 tables and 17 columns — but no code uses it.
+**Object store:** SQLite is the default and PostgreSQL is supported by the storage backend. There is no ORM schema layer; the Python model is the source of truth.
 
 ---
 
@@ -333,7 +315,7 @@ python -m unittest discover -s tests
 python -m tests.benchmarks.run_all
 ```
 
-**Current PR-head result (2026-10-26): 708 passed in the backend correctness suite and 74/74 end-to-end invariants verified**; the benchmark module remains outside this correctness gate.
+**Latest verified result (2026-11-05): 712 passed and 1 skipped in the backend correctness suite and frontend production build successful**; the benchmark module remains outside this correctness gate.
 
 ### `test_benchmarks.py` is flaky
 
@@ -347,23 +329,21 @@ environment-overridable, rather than letting them gate correctness.
 
 ---
 
-## Documentation is aspirational, not descriptive
+## Documentation notes
 
-`AGENTS.md` is a **9-line auto-generated Next.js stub** that says nothing about DataOS. `CLAUDE.md` is one line:
-`@AGENTS.md`. The real prose lives in `context/` — and diverges from the code substantially:
+`AGENTS.md` now describes the clone’s actual stack and production configuration. The `context/` prose remains aspirational and diverges from the code substantially:
 
 | `context/` claims | Reality |
 |---|---|
 | Layers are `api/ core/ db/ frontend/ workflows/ search/ agents/ plugins/` | **None of those directories exist** |
-| PostgreSQL + Prisma is the core store | SQLite is the default; Prisma is entirely unused |
+| PostgreSQL + Prisma is the core store | SQLite is the default; PostgreSQL is optional |
 | Django, Celery, TensorFlow, PyTorch, mlflow, python-louvain, reportlab, openpyxl | None are imported anywhere |
 | Tailwind v4 + shadcn/ui | No `components/ui/`, no shadcn; v3 and v4 configs both present and contradictory |
 | "Supports DuckDB" | No DuckDB reference anywhere |
 | "74 Engineering Rules" | Rules are cited by number in docstrings (`Rule #73`), but no rule list, audit, or enforcement harness exists |
 | ui-context: dark mode only, `#0a0a0f`, accent `#d97757`, never `#8b5cf6`, never Inter | `globals.css` is a **light** theme, sets `--color-entity: #8b5cf6` — the explicitly banned purple — and `--font-body: "Inter"` |
 
-`context/progress-tracker.md` is also stale by several phases: it still lists the Prisma schema and FastAPI
-routes as unchecked, though both exist.
+`context/progress-tracker.md` is also stale by several phases: it still lists artifacts as unchecked even though they exist.
 
 Also: `skills/` is a ~400-entry vendored library of unrelated third-party agent `SKILL.md` files. It is not part
 of the product and dominates the repo's file count.

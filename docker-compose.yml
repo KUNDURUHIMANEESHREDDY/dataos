@@ -12,7 +12,11 @@ services:
       DATAOS_SHARING_TOKEN_SECRET: "${DATAOS_SHARING_TOKEN_SECRET:-}"
       # Required in production for /api/* — leave empty for local dev
       DATAOS_API_TOKEN: "${DATAOS_API_TOKEN:-}"
+      # Required for per-user /api/auth/* JWT register/login/me
+      DATAOS_JWT_SECRET: "${DATAOS_JWT_SECRET:-}"
       DATAOS_ALLOW_PYTHON_COMPUTE: "${DATAOS_ALLOW_PYTHON_COMPUTE:-false}"
+      DATAOS_DB_PATH: "${DATAOS_DB_PATH:-/app/data/dataos.db}"
+      DATAOS_BLOB_DIR: "${DATAOS_BLOB_DIR:-/app/data/.dataos_blobs}"
     volumes:
       - ./data:/app/data
     healthcheck:

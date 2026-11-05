@@ -1,0 +1,26 @@
+.git
+.github
+node_modules
+.next
+__pycache__
+*.pyc
+.pytest_cache
+.mypy_cache
+.venv
+venv
+
+# Local runtime data and secrets
+.env
+.dataos_blobs
+dataos.db
+data/
+*.db
+
+# Build/test artifacts
+coverage
+htmlcov
+dist
+build
+
+# Large vendored agent library (not required for runtime/build)
+skills

@@ -37,7 +37,7 @@ from runtime.workflows.workflow_engine import WorkflowEngine
 
 
 # Single user store for this process (same SQLite file as the kernel).
-user_store = UserStore(db_path="dataos.db")
+user_store = UserStore(db_path=os.getenv("DATAOS_DB_PATH", "dataos.db"))
 
 class RegisterRequest(BaseModel):
     username: str = Field(min_length=1, max_length=100)
@@ -147,8 +147,11 @@ def require_python_compute_enabled() -> None:
         )
 
 
-# Initialize single DataOS kernel
-dataos = DataOS(db_path="dataos.db", blob_dir=".dataos_blobs")
+# Initialize single DataOS kernel using deployment-configured paths.
+dataos = DataOS(
+    db_path=os.getenv("DATAOS_DB_PATH", "dataos.db"),
+    blob_dir=os.getenv("DATAOS_BLOB_DIR", ".dataos_blobs"),
+)
 workflow_engine = WorkflowEngine(storage=dataos.storage)
 # Bound concurrent synchronous DAG runs so API clients cannot exhaust the worker pool.
 workflow_slots = threading.BoundedSemaphore(value=4)
