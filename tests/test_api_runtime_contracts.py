@@ -436,3 +436,31 @@ def test_ingestion_body_limit_does_not_restrict_other_routes():
         send,
     ))
     assert sent[0]["status"] == 204
+
+
+def test_ingestion_body_limit_rejects_non_digit_content_length_without_reading_body():
+    for raw_length in (b"+4", b" 4", b"4 ", b"4,4", b"\\xff"):
+        async def downstream(scope, receive, send):
+            pytest.fail("invalid Content-Length must be rejected before the route runs")
+
+        middleware = api.IngestionBodyLimitMiddleware(downstream, max_body_bytes=4)
+        sent = []
+
+        async def receive():
+            pytest.fail("invalid Content-Length must not consume the request body")
+
+        async def send(message):
+            sent.append(message)
+
+        run(middleware(
+            {
+                "type": "http",
+                "method": "POST",
+                "path": "/api/ingest/universal",
+                "headers": [(b"content-length", raw_length)],
+            },
+            receive,
+            send,
+        ))
+        assert sent[0]["status"] == 400
+        assert b"Invalid Content-Length." in sent[1]["body"]
