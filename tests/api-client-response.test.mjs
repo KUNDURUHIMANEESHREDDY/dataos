@@ -31,7 +31,7 @@ test("preserves JSON API error details", async (t) => {
 test("does not expose HTML error pages to callers", async (t) => {
   withFetch(t, async () => new Response(
     "<html><body>internal proxy stack trace</body></html>",
-    { status: 502, headers: { "content-type": "text/html" } },
+    { status: 502, statusText: "Bad Gateway", headers: { "content-type": "text/html" } },
   ));
 
   await assert.rejects(api.health(), {
