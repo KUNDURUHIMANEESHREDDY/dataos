@@ -16,9 +16,10 @@ export type IngestionOutcome =
       error: string;
     };
 
-function readCount(value: unknown): number {
-  const parsed = typeof value === "number" ? value : Number(value);
-  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : 0;
+function readCount(value: unknown): number | null {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0
+    ? value
+    : null;
 }
 
 /**
@@ -83,11 +84,24 @@ export async function ingestFiles(
     }
 
     const data = payload as Record<string, unknown>;
+    // Keep this aligned with UniversalIngestionPipeline.ingest()'s public
+    // response: created_objects_count and discovered_relations_count.
+    const objectsCreated = readCount(data.created_objects_count);
+    const relationsCreated = readCount(data.discovered_relations_count);
+    if (
+      data.status !== "ingested" ||
+      objectsCreated === null ||
+      relationsCreated === null
+    ) {
+      outcomes.push({ filename: file.filename, ok: false, error: "invalid ingestion response" });
+      continue;
+    }
+
     outcomes.push({
       filename: file.filename,
       ok: true,
-      objectsCreated: readCount(data.objects_created),
-      relationsCreated: readCount(data.relations_created),
+      objectsCreated,
+      relationsCreated,
     });
   }
 
