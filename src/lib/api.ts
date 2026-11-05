@@ -1,6 +1,10 @@
 const API_BASE = "";
 
 const MAX_ERROR_BODY_BYTES = 4096;
+const MAX_ERROR_DETAIL_CHARS = 1000;
+
+const truncateText = (value: string, maxChars = MAX_ERROR_DETAIL_CHARS): string =>
+  value.length > maxChars ? `${value.slice(0, maxChars - 1)}…` : value;
 
 const pathSegment = (value: string): string => {
   if (value.length === 0 || value === "." || value === "..") {
@@ -57,8 +61,8 @@ function errorDetail(body: string, contentType: string, statusText: string): str
       if (payload && typeof payload === "object") {
         const record = payload as Record<string, unknown>;
         const detail = record.detail ?? record.message ?? record.error;
-        if (typeof detail === "string" && detail.trim()) return detail.trim().slice(0, 1000);
-        if (detail !== undefined) return JSON.stringify(detail).slice(0, 1000);
+        if (typeof detail === "string" && detail.trim()) return truncateText(detail.trim());
+        if (detail !== undefined) return truncateText(JSON.stringify(detail));
       }
     } catch {
       return fallback;
@@ -69,7 +73,8 @@ function errorDetail(body: string, contentType: string, statusText: string): str
   // Never surface an upstream HTML error page or an unbounded response body
   // in the application UI. Plain-text API errors remain useful when bounded.
   if (contentType.includes("text/plain")) {
-    return body.replace(/[\\u0000-\\u0008\\u000B\\u000C\\u000E-\\u001F\\u007F]/g, "").trim().slice(0, 1000) || fallback;
+    const safeText = body.replace(/[\\u0000-\\u0008\\u000B\\u000C\\u000E-\\u001F\\u007F]/g, "").trim();
+    return truncateText(safeText) || fallback;
   }
   return fallback;
 }
