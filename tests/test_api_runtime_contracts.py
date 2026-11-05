@@ -43,6 +43,49 @@ def test_graph_traversal_uses_engine_contract(monkeypatch):
     assert result == {"visited": ["root"], "hops": 2}
 
 
+@pytest.mark.parametrize("direction", ["sideways", "", "UPSTREAM"])
+def test_lineage_rejects_unknown_direction_before_traversal(monkeypatch, direction):
+    def unexpected(*args, **kwargs):
+        pytest.fail("lineage traversal must not run for an invalid direction")
+
+    monkeypatch.setattr(api.dataos.lineage, "trace_upstream_lineage", unexpected)
+    monkeypatch.setattr(api.dataos.lineage, "trace_downstream_impact", unexpected)
+    with pytest.raises(HTTPException) as exc:
+        run(api.get_lineage("root", direction=direction, max_depth=1))
+    assert exc.value.status_code == 400
+
+
+@pytest.mark.parametrize("max_depth", [0, -1, 33, 10_000])
+def test_lineage_rejects_unbounded_depth_before_traversal(monkeypatch, max_depth):
+    def unexpected(*args, **kwargs):
+        pytest.fail("lineage traversal must not run for an out-of-range depth")
+
+    monkeypatch.setattr(api.dataos.lineage, "trace_upstream_lineage", unexpected)
+    monkeypatch.setattr(api.dataos.lineage, "trace_downstream_impact", unexpected)
+    with pytest.raises(HTTPException) as exc:
+        run(api.get_lineage("root", direction="upstream", max_depth=max_depth))
+    assert exc.value.status_code == 422
+
+
+def test_lineage_accepts_only_supported_directions_with_bounded_depth(monkeypatch):
+    monkeypatch.setattr(
+        api.dataos.lineage,
+        "trace_upstream_lineage",
+        lambda object_id, max_depth: {"direction": "upstream", "depth": max_depth},
+    )
+    monkeypatch.setattr(
+        api.dataos.lineage,
+        "trace_downstream_impact",
+        lambda object_id, max_depth: {"direction": "downstream", "depth": max_depth},
+    )
+    assert run(api.get_lineage("root", direction="upstream", max_depth=32)) == {
+        "direction": "upstream", "depth": 32
+    }
+    assert run(api.get_lineage("root", direction="downstream", max_depth=1)) == {
+        "direction": "downstream", "depth": 1
+    }
+
+
 def test_graph_analytics_uses_supported_namespace(monkeypatch):
     metrics = {
         "pagerank": {"a": 1.0},
