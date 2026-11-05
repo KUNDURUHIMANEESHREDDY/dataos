@@ -28,6 +28,99 @@ from backend.cors_config import cors_middleware_options
 from backend.workflow_api import WorkflowRequestError, execute_safe_workflow
 from runtime.workflows.workflow_engine import WorkflowEngine
 
+
+MAX_INGEST_CONTENT_BYTES = 5 * 1024 * 1024
+# URL-encoded form bodies can expand UTF-8 bytes to three ASCII bytes each.
+MAX_INGEST_REQUEST_BYTES = 16 * 1024 * 1024
+
+
+class _IngestionBodyTooLarge(Exception):
+    pass
+
+
+class IngestionBodyLimitMiddleware:
+    """Bound the universal-ingestion request before Starlette buffers form data."""
+
+    def __init__(self, app, max_body_bytes: int = MAX_INGEST_REQUEST_BYTES):
+        self.app = app
+        self.max_body_bytes = max_body_bytes
+
+    async def _reject(self, send, status: int, body: bytes) -> None:
+        await send({
+            "type": "http.response.start",
+            "status": status,
+            "headers": [
+                (b"content-type", b"application/json"),
+                (b"content-length", str(len(body)).encode("ascii")),
+            ],
+        })
+        await send({"type": "http.response.body", "body": body})
+
+    async def __call__(self, scope, receive, send):
+        if (
+            scope.get("type") != "http"
+            or scope.get("method") != "POST"
+            or scope.get("path") != "/api/ingest/universal"
+        ):
+            await self.app(scope, receive, send)
+            return
+
+        lengths = [
+            value for name, value in scope.get("headers", [])
+            if name.lower() == b"content-length"
+        ]
+        if len(lengths) > 1:
+            await self._reject(send, 400, b'{"detail":"Invalid Content-Length."}')
+            return
+        if lengths:
+            try:
+                content_length = int(lengths[0])
+            except (TypeError, ValueError, OverflowError):
+                await self._reject(send, 400, b'{"detail":"Invalid Content-Length."}')
+                return
+            if content_length < 0:
+                await self._reject(send, 400, b'{"detail":"Invalid Content-Length."}')
+                return
+            if content_length > self.max_body_bytes:
+                await self._reject(
+                    send,
+                    413,
+                    b'{"detail":"Ingestion request exceeds the configured request-size limit."}',
+                )
+                return
+
+        received = 0
+        response_started = False
+
+        async def limited_receive():
+            nonlocal received
+            message = await receive()
+            if message.get("type") == "http.request":
+                received += len(message.get("body", b""))
+                if received > self.max_body_bytes:
+                    raise _IngestionBodyTooLarge
+            return message
+
+        async def tracked_send(message):
+            nonlocal response_started
+            if message.get("type") == "http.response.start" and message.get("status", 0) >= 200:
+                response_started = True
+            await send(message)
+
+        try:
+            await self.app(scope, limited_receive, tracked_send)
+        except _IngestionBodyTooLarge:
+            # FastAPI parses Form bodies before invoking the endpoint, so an
+            # oversized request is rejected before any application response starts.
+            if not response_started:
+                await self._reject(
+                    send,
+                    413,
+                    b'{"detail":"Ingestion request exceeds the configured request-size limit."}',
+                )
+
+
+
 def require_production_api_token(request: Request, authorization: Optional[str] = Header(default=None)) -> None:
     """Require a high-entropy bearer token for API routes in production.
 
@@ -105,6 +198,11 @@ app = FastAPI(
     dependencies=[Depends(require_production_api_token)],
 )
 
+# Add the body limiter before CORS so the CORS layer also decorates 413 responses.
+app.add_middleware(
+    IngestionBodyLimitMiddleware,
+    max_body_bytes=MAX_INGEST_REQUEST_BYTES,
+)
 app.add_middleware(
     CORSMiddleware,
     **cors_middleware_options(os.getenv("DATAOS_CORS_ORIGINS")),
@@ -714,6 +812,11 @@ async def universal_ingest_api(
     content: str = Form(...),
     discover_relations: bool = Form(True)
 ):
+    if len(content.encode("utf-8")) > MAX_INGEST_CONTENT_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail="Ingestion file exceeds the 5 MiB content limit.",
+        )
     res = dataos.ingest(content, filename=filename, discover_relations=discover_relations)
     return res
 
