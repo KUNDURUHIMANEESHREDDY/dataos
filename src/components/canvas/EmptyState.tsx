@@ -44,7 +44,7 @@ export default function EmptyState() {
         })),
       );
       const failures = outcomes.flatMap((outcome) =>
-        outcome.ok ? [] : [`${outcome.filename}: ${outcome.error}`],
+        outcome.ok === false ? [`${outcome.filename}: ${outcome.error}`] : [],
       );
 
       // Refresh even after partial failure so successfully ingested samples are

@@ -54,7 +54,7 @@ export default function DropZone() {
         files.map((file) => ({ filename: file.name, read: () => file.text() })),
       );
       for (const outcome of outcomes) {
-        if (outcome.ok) {
+        if (outcome.ok === true) {
           successfulFiles += 1;
           objectsCreated += outcome.objectsCreated;
           relationsCreated += outcome.relationsCreated;
