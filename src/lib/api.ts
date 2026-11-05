@@ -80,9 +80,12 @@ function errorDetail(body: string, contentType: string, statusText: string): str
 }
 
 async function apiFetch(path: string, options?: RequestInit): Promise<any> {
+  const headers = new Headers({ "Content-Type": "application/json" });
+  new Headers(options?.headers).forEach((value, name) => headers.set(name, value));
+
   const res = await fetch(`${API_BASE}${path}`, {
-    headers: { "Content-Type": "application/json" },
     ...options,
+    headers,
   });
   if (!res.ok) {
     const contentType = (res.headers.get("content-type") || "").toLowerCase();
@@ -103,12 +106,14 @@ async function apiFetch(path: string, options?: RequestInit): Promise<any> {
   }
 }
 
+type ReadOptions = Pick<RequestInit, "signal" | "headers">;
+
 export const api = {
   health: () => apiFetch("/api/catalog/health"),
 
   listObjects: (
     params?: { object_type?: string; limit?: number; offset?: number },
-    options?: Pick<RequestInit, "signal">,
+    options?: ReadOptions,
   ) => {
     const qs = new URLSearchParams();
     if (params?.object_type) qs.set("object_type", params.object_type);
@@ -127,7 +132,7 @@ export const api = {
 
   listRelationships: (
     params?: { source_id?: string; target_id?: string; limit?: number; offset?: number },
-    options?: Pick<RequestInit, "signal">,
+    options?: ReadOptions,
   ) => {
     const qs = new URLSearchParams();
     if (params?.source_id) qs.set("source_id", params.source_id);
