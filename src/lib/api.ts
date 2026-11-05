@@ -93,6 +93,7 @@ async function apiFetch(path: string, options?: RequestInit): Promise<any> {
 
   const contentType = (res.headers.get("content-type") || "").toLowerCase();
   if (contentType && !contentType.includes("json")) {
+    if (res.body) await res.body.cancel().catch(() => undefined);
     throw new Error(`API ${res.status}: expected a JSON response`);
   }
   try {
