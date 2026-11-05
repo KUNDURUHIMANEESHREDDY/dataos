@@ -69,15 +69,15 @@ export default function DataspacePage() {
 
         const objects = (objsRes.objects || []).map((o: any) => ({
           id: o.id,
-          type: typeMap[o.type] || "dataset",
+          type: (typeMap[o.type] || "dataset") as import("@/hooks/useSpatialStore").ObjectType,
           name: o.properties?.filename || o.properties?.name || o.id.slice(0, 8),
           properties: o.properties || {},
         }));
 
         const edges = (relsRes.relationships || []).map((r: any) => ({
-          id: r.id || `${r.source_id}-${r.target_id}`,
-          source: r.source_id,
-          target: r.target_id,
+          id: r.id || `${r.source}-${r.target}`,
+          source: r.source,
+          target: r.target,
           type: r.relation_type || "related_to",
           confidence: r.confidence ?? 1.0,
         }));
@@ -140,3 +140,4 @@ export default function DataspacePage() {
     </div>
   );
 }
+

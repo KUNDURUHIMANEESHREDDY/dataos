@@ -23,10 +23,68 @@ from dataos_system import DataOS
 from core.object.model import DataObject, ObjectType
 from core.relation.model import Relationship, RelationType
 from core.permissions.policy import Capability
+from core.permissions.auth import (
+    UserStore,
+    User,
+    issue_jwt,
+    decode_jwt,
+    jwt_configured,
+)
 from backend.knowledge_rag import create_knowledge_router
 from backend.cors_config import cors_middleware_options
 from backend.workflow_api import WorkflowRequestError, execute_safe_workflow
 from runtime.workflows.workflow_engine import WorkflowEngine
+
+
+# Single user store for this process (same SQLite file as the kernel).
+user_store = UserStore(db_path="dataos.db")
+
+class RegisterRequest(BaseModel):
+    username: str = Field(min_length=1, max_length=100)
+    email: str = Field(min_length=3, max_length=200)
+    password: str = Field(min_length=8, max_length=200)
+    role: str = "viewer"
+
+
+class LoginRequest(BaseModel):
+    login: str = Field(min_length=1, max_length=200)
+    password: str = Field(min_length=1, max_length=200)
+
+
+def get_current_user(authorization: Optional[str] = Header(default=None)) -> Optional[User]:
+    """Resolve the JWT bearer token to a user, or None in dev (no JWT configured).
+
+    In production with JWT configured, a missing/invalid token is a 401.
+    When JWT is not configured at all, this is a no-op for local dev — the
+    shared DATAOS_API_TOKEN gate (require_production_api_token) still applies.
+    """
+    if not jwt_configured():
+        return None
+    if not authorization or not authorization.lower().startswith("bearer "):
+        raise HTTPException(status_code=401, detail="A bearer token is required.", headers={"WWW-Authenticate": "Bearer"})
+    try:
+        payload = decode_jwt(authorization[7:].strip())
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(status_code=401, detail=str(exc), headers={"WWW-Authenticate": "Bearer"}) from exc
+    user = user_store.get_by_id(payload.get("sub", ""))
+    if user is None:
+        raise HTTPException(status_code=401, detail="Unknown user.", headers={"WWW-Authenticate": "Bearer"})
+    return user
+
+
+def require_capability(capability: str):
+    """FastAPI dependency factory enforcing a Capability for the current user."""
+    def _check(current_user: Optional[User] = Depends(get_current_user)) -> Optional[User]:
+        if current_user is None:
+            return None  # No JWT configured -> dev mode, no per-user gating.
+        if not current_user.has_capability(capability):
+            raise HTTPException(
+                status_code=403,
+                detail=f"Capability '{capability}' is not permitted for role '{current_user.role}'.",
+            )
+        return current_user
+    return _check
+
 
 def require_production_api_token(request: Request, authorization: Optional[str] = Header(default=None)) -> None:
     """Require a high-entropy bearer token for API routes in production.
@@ -166,6 +224,58 @@ class AgentExecutionRequest(BaseModel):
 class WorkflowExecutionRequest(BaseModel):
     definition: Dict[str, Any]
     context: Dict[str, Any] = Field(default_factory=dict)
+
+
+# =============================================================================
+# AUTH ROUTES
+# =============================================================================
+
+@app.post("/api/auth/register", summary="Register a new DataOS user", status_code=201)
+async def register_user(req: RegisterRequest):
+    if not jwt_configured():
+        raise HTTPException(
+            status_code=503,
+            detail="User auth is disabled until DATAOS_JWT_SECRET is configured.",
+        )
+    try:
+        user = user_store.register(req.username, req.email, req.password, role=req.role)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return user.to_dict()
+
+
+@app.post("/api/auth/login", summary="Authenticate and receive a JWT")
+async def login_user(req: LoginRequest):
+    if not jwt_configured():
+        raise HTTPException(
+            status_code=503,
+            detail="User auth is disabled until DATAOS_JWT_SECRET is configured.",
+        )
+    user = user_store.authenticate(req.login, req.password)
+    if user is None:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid credentials.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    token = issue_jwt(user.id, user.role)
+    return {"access_token": token, "token_type": "bearer", "user": user.to_dict()}
+
+
+@app.get("/api/auth/me", summary="Current authenticated user")
+async def get_me(current_user: Optional[User] = Depends(get_current_user)):
+    if current_user is None:
+        return {"authenticated": False, "detail": "JWT auth is not configured; running in shared-token/dev mode."}
+    return {"authenticated": True, "user": current_user.to_dict()}
+
+
+@app.get("/api/auth/users", summary="List registered users (admin)", dependencies=[Depends(require_capability(Capability.EXPORT_DATA.value))])
+async def list_users(current_user: Optional[User] = Depends(get_current_user)):
+    if current_user is None:
+        raise HTTPException(status_code=503, detail="User auth is not configured.")
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin role required.")
+    return {"total": len(user_store.list_users()), "users": user_store.list_users()}
 
 
 # =============================================================================
@@ -611,10 +721,11 @@ async def detect_duplicates_api(
     object_id: Optional[str] = None,
     min_similarity: float = 0.75
 ):
-    raise HTTPException(
-        status_code=501,
-        detail="Fuzzy duplicate detection is not implemented in the current DataOS runtime.",
+    results = dataos.duplicates.find_duplicates(
+        target_object_id=object_id,
+        min_similarity=min_similarity,
     )
+    return {"total": len(results), "duplicates": results}
 
 
 @app.get("/api/governance/quota/{principal_id}", summary="Get Principal Quota & Usage Status (Rule #61)")
