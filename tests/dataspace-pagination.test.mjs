@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import paginate from "../src/lib/paginate.js";
 import { toGraphEdge } from "../src/lib/relationship-edge.js";
+import { loadGraphCollections } from "../src/lib/load-graph-collections.js";
 
 const { loadAllPages, loadBoundedPages } = paginate;
 
@@ -291,4 +292,53 @@ test("keeps fallback relationship identities unique across paginated pages", asy
   const ids = edges.map((edge) => edge.id);
   assert.equal(new Set(ids).size, relationships.length);
   assert.equal(ids[3], "explicit-1");
+});
+
+
+test("aborts the sibling graph collection when one loader fails", async () => {
+  const controller = new AbortController();
+  const originalError = new Error("relationships unavailable");
+  let siblingAborted = false;
+
+  const siblingLoader = (signal) => new Promise((resolve, reject) => {
+    signal.addEventListener("abort", () => {
+      siblingAborted = true;
+      const error = new Error("sibling request aborted");
+      error.name = "AbortError";
+      reject(error);
+    }, { once: true });
+  });
+
+  await assert.rejects(
+    () => loadGraphCollections(
+      controller,
+      siblingLoader,
+      async () => { throw originalError; },
+    ),
+    (error) => error === originalError,
+  );
+
+  assert.equal(controller.signal.aborted, true);
+  assert.equal(siblingAborted, true);
+});
+
+test("does not abort graph collection requests after successful completion", async () => {
+  const controller = new AbortController();
+  const result = await loadGraphCollections(
+    controller,
+    async (signal) => {
+      assert.equal(signal, controller.signal);
+      return { objects: ["object-1"] };
+    },
+    async (signal) => {
+      assert.equal(signal, controller.signal);
+      return { relationships: ["relationship-1"] };
+    },
+  );
+
+  assert.deepEqual(result, [
+    { objects: ["object-1"] },
+    { relationships: ["relationship-1"] },
+  ]);
+  assert.equal(controller.signal.aborted, false);
 });
