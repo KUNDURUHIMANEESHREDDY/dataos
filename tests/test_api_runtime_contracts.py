@@ -83,7 +83,7 @@ def test_python_compute_is_disabled_by_default_in_production(monkeypatch):
     assert direct_exc.value.status_code == 403
 
     with pytest.raises(HTTPException) as unified_exc:
-        run(api.query_unified(api.UnifiedQueryRequest(query="print('blocked')", query_type="python")))
+        run(api.query_unified(api.UnifiedQueryRequest(query="print('blocked')", query_type="python"), current_user=None))
     assert unified_exc.value.status_code == 403
 
 
@@ -100,17 +100,17 @@ def test_python_compute_requires_explicit_production_opt_in(monkeypatch):
 def test_unified_query_auto_dispatches_sql_and_natural_language(monkeypatch):
     monkeypatch.setattr(api.dataos, "sql", lambda query: {"kind": "sql", "query": query})
     monkeypatch.setattr(api.dataos, "ask", lambda query: {"kind": "ask", "query": query})
-    assert run(api.query_unified(api.UnifiedQueryRequest(query="SELECT 1"))) == {
+    assert run(api.query_unified(api.UnifiedQueryRequest(query="SELECT 1"), current_user=None)) == {
         "kind": "sql", "query": "SELECT 1"
     }
-    assert run(api.query_unified(api.UnifiedQueryRequest(query="Why is this dataset empty?"))) == {
+    assert run(api.query_unified(api.UnifiedQueryRequest(query="Why is this dataset empty?"), current_user=None)) == {
         "kind": "ask", "query": "Why is this dataset empty?"
     }
 
 
 def test_unified_query_rejects_unknown_type(monkeypatch):
     with pytest.raises(HTTPException) as exc:
-        run(api.query_unified(api.UnifiedQueryRequest(query="x", query_type="not-a-mode")))
+        run(api.query_unified(api.UnifiedQueryRequest(query="x", query_type="not-a-mode"), current_user=None))
     assert exc.value.status_code == 400
 
 

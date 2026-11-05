@@ -32,6 +32,7 @@ from core.permissions.auth import (
 )
 from backend.knowledge_rag import create_knowledge_router
 from backend.cors_config import cors_middleware_options
+from backend.authorization import CapabilityMiddleware
 from backend.workflow_api import WorkflowRequestError, execute_safe_workflow
 from runtime.workflows.workflow_engine import WorkflowEngine
 
@@ -105,19 +106,37 @@ def require_production_api_token(request: Request, authorization: Optional[str] 
         return
 
     expected = os.getenv("DATAOS_API_TOKEN", "")
-    if not expected or expected.strip() != expected or len(expected.encode("utf-8")) < 32:
+    shared_ready = not (not expected or expected.strip() != expected or len(expected.encode("utf-8")) < 32)
+    jwt_ready = jwt_configured()
+    if not shared_ready and not jwt_ready:
         raise HTTPException(
             status_code=503,
-            detail="Production API authentication is unavailable; configure DATAOS_API_TOKEN with at least 32 UTF-8 bytes.",
+            detail=(
+                "Production API authentication is unavailable; configure either "
+                "DATAOS_API_TOKEN or DATAOS_JWT_SECRET (each with at least 32 UTF-8 bytes)."
+            ),
         )
 
     scheme, separator, supplied = (authorization or "").partition(" ")
-    if not separator or scheme.lower() != "bearer" or not hmac.compare_digest(supplied.encode("utf-8"), expected.encode("utf-8")):
+    if not separator or scheme.lower() != "bearer":
         raise HTTPException(
             status_code=401,
             detail="A valid bearer token is required.",
             headers={"WWW-Authenticate": "Bearer"},
         )
+    if shared_ready and hmac.compare_digest(supplied.encode("utf-8"), expected.encode("utf-8")):
+        return
+    if jwt_ready:
+        try:
+            decode_jwt(supplied)
+            return
+        except (ValueError, RuntimeError):
+            pass
+    raise HTTPException(
+        status_code=401,
+        detail="A valid bearer token is required.",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
 
 
 def require_python_compute_enabled() -> None:
@@ -170,6 +189,7 @@ app.add_middleware(
     CORSMiddleware,
     **cors_middleware_options(os.getenv("DATAOS_CORS_ORIGINS")),
 )
+app.add_middleware(CapabilityMiddleware)
 
 
 app.include_router(create_knowledge_router(dataos))
@@ -421,10 +441,24 @@ async def compute_python(req: PythonComputeRequest):
 
 
 @app.post("/api/query/", summary="Unified Query Execution")
-async def query_unified(req: UnifiedQueryRequest):
+async def query_unified(req: UnifiedQueryRequest, current_user: Optional[User] = Depends(get_current_user)):
     query_type = req.query_type.strip().lower()
     if query_type == "auto":
         query_type = "sql" if req.query.lstrip().lower().startswith(("select ", "with ")) else "ask"
+
+    required_capability: Optional[str] = None
+    if query_type == "sql":
+        required_capability = Capability.QUERY_SQL.value
+    elif query_type == "python":
+        required_capability = Capability.COMPUTE_PYTHON.value
+    elif query_type in {"ask", "natural_language", "search"}:
+        required_capability = Capability.SEARCH.value
+
+    if current_user is not None and required_capability and not current_user.has_capability(required_capability):
+        raise HTTPException(
+            status_code=403,
+            detail=f"Capability '{required_capability}' is not permitted for role '{current_user.role}'.",
+        )
 
     if query_type == "sql":
         return dataos.sql(req.query)
@@ -672,7 +706,7 @@ async def recommend_datasets_api(
 
 
 @app.post("/api/agents/execute", summary="Execute Agent Capability")
-async def execute_agent(req: AgentExecutionRequest):
+async def execute_agent(req: AgentExecutionRequest, current_user: Optional[User] = Depends(get_current_user)):
     agents = {
         "agent_research": dataos.multi_agent.research_agent,
         "agent_analysis": dataos.multi_agent.analysis_agent,
@@ -684,6 +718,11 @@ async def execute_agent(req: AgentExecutionRequest):
         raise HTTPException(status_code=404, detail="Unknown built-in agent")
     try:
         capability = Capability(req.capability)
+        if current_user is not None and not current_user.has_capability(capability.value):
+            raise HTTPException(
+                status_code=403,
+                detail=f"Capability '{capability.value}' is not permitted for role '{current_user.role}'.",
+            )
         return agent.execute_capability(capability, req.params)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=f"Invalid capability: {req.capability}") from exc
