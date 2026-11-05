@@ -439,7 +439,7 @@ def test_ingestion_body_limit_does_not_restrict_other_routes():
 
 
 def test_ingestion_body_limit_rejects_non_digit_content_length_without_reading_body():
-    for raw_length in (b"+4", b" 4", b"4 ", b"4,4", b"\\xff"):
+    for raw_length in (b"+4", b" 4", b"4 ", b"4,4", bytes([0xff])):
         async def downstream(scope, receive, send):
             pytest.fail("invalid Content-Length must be rejected before the route runs")
 
