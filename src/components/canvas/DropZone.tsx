@@ -51,7 +51,7 @@ export default function DropZone() {
 
     try {
       const outcomes = await ingestFiles(
-        files.map((file) => ({ filename: file.name, read: () => file.text() })),
+        files.map((file) => ({ filename: file.name, size: file.size, read: () => file.text() })),
       );
       for (const outcome of outcomes) {
         if (outcome.ok === true) {
