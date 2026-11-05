@@ -5,6 +5,7 @@ import { useSpatialStore, type ObjectType } from "@/hooks/useSpatialStore";
 import { api } from "@/lib/api";
 import paginate from "@/lib/paginate.js";
 import { toGraphEdge } from "@/lib/relationship-edge.js";
+import { loadGraphCollections } from "@/lib/load-graph-collections.js";
 import { useKeyboard } from "@/hooks/useKeyboard";
 import TopBar from "@/components/layout/TopBar";
 import Sidebar from "@/components/layout/Sidebar";
@@ -105,10 +106,11 @@ export default function DataspacePage() {
       setError(null);
       setNotice(null);
       try {
-        const [objsRes, relsRes] = await Promise.all([
-          loadAllObjects(controller.signal),
-          loadAllRelationships(controller.signal),
-        ]);
+        const [objsRes, relsRes] = await loadGraphCollections(
+          controller,
+          loadAllObjects,
+          loadAllRelationships,
+        );
 
         if (!active) return;
 
@@ -139,7 +141,7 @@ export default function DataspacePage() {
         setEdges(edges);
         setNotice(buildGraphNotice(objsRes, relsRes));
       } catch (err) {
-        if (!active || controller.signal.aborted) return;
+        if (!active) return;
         setError(err instanceof Error ? err.message : "An unknown error occurred while loading the workspace.");
       } finally {
         if (active) setLoading(false);
