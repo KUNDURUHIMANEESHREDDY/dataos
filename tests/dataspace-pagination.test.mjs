@@ -313,7 +313,7 @@ test("aborts the sibling graph collection when one loader fails", async () => {
     () => loadGraphCollections(
       controller,
       siblingLoader,
-      async () => { throw originalError; },
+      () => { throw originalError; },
     ),
     (error) => error === originalError,
   );
