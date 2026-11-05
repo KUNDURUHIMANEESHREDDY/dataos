@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { ingestFiles } from "../src/lib/ingestion.ts";
+import { ingestFiles, MAX_INGEST_FILE_BYTES } from "../src/lib/ingestion.ts";
 
 const jsonResponse = (body, status = 200) => new Response(JSON.stringify(body), {
   status,
@@ -147,4 +147,49 @@ test("rejects legacy field names and invalid backend count values", async () => 
 
 test("returns an empty result for an empty batch", async () => {
   assert.deepEqual(await ingestFiles([]), []);
+});
+
+
+test("rejects files over 5 MiB before reading and continues with later files", async () => {
+  let oversizedRead = false;
+  const requested = [];
+  const outcomes = await ingestFiles([
+    {
+      filename: "oversized.csv",
+      size: MAX_INGEST_FILE_BYTES + 1,
+      read: async () => {
+        oversizedRead = true;
+        return "must not be read";
+      },
+    },
+    { filename: "accepted.csv", size: 2, read: async () => "ok" },
+  ], async (_url, init) => {
+    requested.push(new URLSearchParams(init.body).get("filename"));
+    return jsonResponse(ingested(1, 0));
+  });
+
+  assert.equal(oversizedRead, false);
+  assert.deepEqual(requested, ["accepted.csv"]);
+  assert.deepEqual(outcomes, [
+    { filename: "oversized.csv", ok: false, error: "file exceeds the 5 MiB limit" },
+    { filename: "accepted.csv", ok: true, objectsCreated: 1, relationsCreated: 0 },
+  ]);
+});
+
+test("enforces the UTF-8 byte limit when file size metadata is unavailable", async () => {
+  const oversizedContent = "é".repeat(Math.floor(MAX_INGEST_FILE_BYTES / 2) + 1);
+  const requested = [];
+  const outcomes = await ingestFiles([
+    { filename: "unicode.txt", read: async () => oversizedContent },
+    { filename: "small.txt", read: async () => "ok" },
+  ], async (_url, init) => {
+    requested.push(new URLSearchParams(init.body).get("filename"));
+    return jsonResponse(ingested(0, 0));
+  });
+
+  assert.deepEqual(requested, ["small.txt"]);
+  assert.deepEqual(outcomes, [
+    { filename: "unicode.txt", ok: false, error: "file exceeds the 5 MiB limit" },
+    { filename: "small.txt", ok: true, objectsCreated: 0, relationsCreated: 0 },
+  ]);
 });
