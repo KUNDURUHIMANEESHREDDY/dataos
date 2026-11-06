@@ -1,6 +1,10 @@
 mod auth;
 mod db;
+mod parity;
 mod sql_engine;
+
+#[cfg(test)]
+mod api_tests;
 
 use std::collections::{HashMap, HashSet};
 use std::env;
@@ -596,8 +600,14 @@ async fn main() {
         std::process::exit(1);
     });
     let state = AppState { db: Arc::new(db) };
+    let app = build_router(state);
 
-    let app = Router::new()
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:8000").await.expect("bind 0.0.0.0:8000");
+    axum::serve(listener, app).await.expect("serve");
+}
+
+fn build_router(state: AppState) -> Router {
+    Router::new()
         .route("/health", get(health))
         .route("/api/catalog/health", get(catalog_health))
         .route("/api/auth/register", post(auth_register))
@@ -612,7 +622,23 @@ async fn main() {
         .route("/api/relationships", get(list_relationships).post(create_relationship))
         .route("/api/relationships/", get(list_relationships).post(create_relationship))
         .route("/api/graph/neighbors/{id}", get(neighbors))
+        .route("/api/graph/traverse/{id}", get(parity::traverse))
         .route("/api/graph/analytics", get(analytics))
+        .route("/api/time_travel/object/{id}", get(parity::time_travel_object))
+        .route("/api/time_travel/graph", get(parity::time_travel_graph))
+        .route("/api/time_travel/changes", get(parity::time_travel_changes))
+        .route("/api/provenance/lineage/{id}", get(parity::lineage))
+        .route("/api/profiling/{id}", get(parity::profiling))
+        .route("/api/quality/{id}", post(parity::quality))
+        .route("/api/sync/resolve_conflict", post(parity::resolve_conflict))
+        .route("/api/vectors/search", get(parity::vectors_search))
+        .route("/api/vectors/recompute", post(parity::vectors_recompute))
+        .route("/api/notebooks/ingest", post(parity::notebooks_ingest))
+        .route("/api/documents/extract_rich", post(parity::documents_extract_rich))
+        .route("/api/sharing/issue_token", post(parity::sharing_issue_token))
+        .route("/api/sharing/verify_token", post(parity::sharing_verify_token))
+        .route("/api/workflows/execute", post(parity::workflows_execute))
+        .route("/api/agents/execute", post(parity::agents_execute))
         .route("/api/search/", get(search))
         .route("/api/search", get(search))
         .route("/api/compute/sql", post(compute_sql))
@@ -631,10 +657,7 @@ async fn main() {
         .layer(middleware::from_fn_with_state(state.clone(), security_middleware))
         .with_state(state)
         .layer(DefaultBodyLimit::max(32 * 1024 * 1024))
-        .fallback(fallback_route);
-
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:8000").await.expect("bind 0.0.0.0:8000");
-    axum::serve(listener, app).await.expect("serve");
+        .fallback(fallback_route)
 }
 
 async fn list_objects(State(state): State<AppState>, Query(params): Query<ListParams>) -> Result<Json<Value>, ApiError> {

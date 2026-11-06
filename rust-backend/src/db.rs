@@ -449,6 +449,90 @@ impl Db {
         }
         Ok(out)
     }
+
+    pub fn object_version_as_of(&self, object_id: &str, as_of: &str) -> Result<Option<Value>, String> {
+        let conn = self.conn.lock().map_err(|_| "database lock poisoned".to_string())?;
+        let snapshot: Option<String> = conn.query_row(
+            "SELECT data_snapshot FROM object_versions WHERE object_id = ? AND created_at <= ? ORDER BY created_at DESC, version DESC LIMIT 1",
+            params![object_id, as_of],
+            |row| row.get(0),
+        ).optional().map_err(|e| e.to_string())?;
+        match snapshot {
+            Some(text) => serde_json::from_str(&text)
+                .map(Some)
+                .map_err(|e| format!("stored version snapshot is not valid JSON: {e}")),
+            None => Ok(None),
+        }
+    }
+
+    pub fn objects_alive_at(&self, as_of: &str) -> Result<Vec<Value>, String> {
+        let conn = self.conn.lock().map_err(|_| "database lock poisoned".to_string())?;
+        let sql = format!("{} WHERE created_at <= ? AND (deleted_at IS NULL OR deleted_at > ?)", object_select_sql());
+        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+        let mut rows = stmt.query(params![as_of, as_of]).map_err(|e| e.to_string())?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+            out.push(object_from_row(row).map_err(|e| e.to_string())?);
+        }
+        Ok(out)
+    }
+
+    pub fn relationships_alive_at(&self, as_of: &str) -> Result<Vec<Value>, String> {
+        let conn = self.conn.lock().map_err(|_| "database lock poisoned".to_string())?;
+        let sql = format!("{} WHERE created_at <= ? AND (deleted_at IS NULL OR deleted_at > ?)", relationship_select_sql());
+        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+        let mut rows = stmt.query(params![as_of, as_of]).map_err(|e| e.to_string())?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+            out.push(relationship_from_row(row).map_err(|e| e.to_string())?);
+        }
+        Ok(out)
+    }
+
+    fn id_list(&self, sql: &str, bounds: &[&str]) -> Result<Vec<String>, String> {
+        let conn = self.conn.lock().map_err(|_| "database lock poisoned".to_string())?;
+        let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
+        let mut rows = stmt.query(rusqlite::params_from_iter(bounds.iter().copied())).map_err(|e| e.to_string())?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+            out.push(row.get(0).map_err(|e| e.to_string())?);
+        }
+        Ok(out)
+    }
+
+    pub fn changes_between(&self, t1: &str, t2: &str) -> Result<Value, String> {
+        let created = self.id_list(
+            "SELECT id FROM objects WHERE created_at > ? AND created_at <= ? ORDER BY created_at",
+            &[t1, t2],
+        )?;
+        let updated = self.id_list(
+            "SELECT id FROM objects WHERE updated_at > ? AND updated_at <= ? AND (deleted_at IS NULL OR deleted_at <= ?) AND id NOT IN (SELECT id FROM objects WHERE created_at > ? AND created_at <= ?) ORDER BY updated_at",
+            &[t1, t2, t1, t1, t2],
+        )?;
+        let deleted = self.id_list(
+            "SELECT id FROM objects WHERE deleted_at IS NOT NULL AND deleted_at > ? AND deleted_at <= ? ORDER BY deleted_at",
+            &[t1, t2],
+        )?;
+        let relationships_created = self.id_list(
+            "SELECT id FROM relationships WHERE created_at > ? AND created_at <= ? ORDER BY created_at",
+            &[t1, t2],
+        )?;
+        Ok(json!({
+            "t1": t1,
+            "t2": t2,
+            "objects_created": created.len(),
+            "objects_updated": updated.len(),
+            "objects_deleted": deleted.len(),
+            "relationships_created": relationships_created.len(),
+            "object_ids": {
+                "created": created,
+                "updated": updated,
+                "deleted": deleted
+            },
+            "relationship_ids": relationships_created,
+            "traced_at": Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Micros, true)
+        }))
+    }
 }
 
 fn param_value(value: &Value) -> Option<rusqlite::types::Value> {

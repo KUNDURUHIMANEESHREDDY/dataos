@@ -1,0 +1,660 @@
+//! Contract tests for the Rust API surface.
+//!
+//! These exercise the real router (`build_router`) over an isolated temp
+//! database, so they fail if a route, capability check, or engine regresses.
+
+use std::sync::Arc;
+use std::sync::OnceLock;
+
+use axum::body::Body;
+use axum::http::{Method, Request, StatusCode, header};
+use axum::Router;
+use http_body_util::BodyExt;
+use serde_json::{Value, json};
+use tower::ServiceExt;
+
+use crate::db::Db;
+use crate::AppState;
+
+fn setup_env() {
+    static INIT: OnceLock<()> = OnceLock::new();
+    INIT.get_or_init(|| {
+        // SAFETY: called once, before any test issues requests.
+        unsafe {
+            std::env::set_var("DATAOS_JWT_SECRET", "unit-test-secret-".repeat(3));
+            std::env::set_var("DATAOS_SHARING_TOKEN_SECRET", "sharing-secret-".repeat(3));
+            std::env::remove_var("DATAOS_ENV");
+            std::env::remove_var("DATAOS_API_TOKEN");
+        }
+    });
+}
+
+fn test_app() -> (Router, Arc<Db>) {
+    setup_env();
+    let path = std::env::temp_dir().join(format!("dataos-rust-test-{}.db", uuid::Uuid::new_v4()));
+    let db = Db::open(path.to_str().expect("temp path is valid")).expect("open test database");
+    let db = Arc::new(db);
+    (crate::build_router(AppState { db: db.clone() }), db)
+}
+
+async fn call(
+    app: &Router,
+    method: Method,
+    uri: &str,
+    body: Option<Value>,
+    token: Option<&str>,
+) -> (StatusCode, Value) {
+    let mut builder = Request::builder().method(method).uri(uri);
+    if let Some(token) = token {
+        builder = builder.header(header::AUTHORIZATION, format!("Bearer {token}"));
+    }
+    let request = match body {
+        Some(value) => builder
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(serde_json::to_vec(&value).expect("serialisable body")))
+            .expect("request"),
+        None => builder.body(Body::empty()).expect("request"),
+    };
+
+    let response = app.clone().oneshot(request).await.expect("router response");
+    let status = response.status();
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("body")
+        .to_bytes();
+    let parsed = if bytes.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_slice(&bytes)
+            .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&bytes).to_string()))
+    };
+    (status, parsed)
+}
+
+async fn register(app: &Router, role: &str) -> String {
+    let username = format!("user_{}", &uuid::Uuid::new_v4().simple().to_string()[..8]);
+    let (status, body) = call(
+        app,
+        Method::POST,
+        "/api/auth/register",
+        Some(json!({
+            "username": username,
+            "email": format!("{username}@example.com"),
+            "password": "password123",
+            "role": role
+        })),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "register failed: {body}");
+
+    let (status, body) = call(
+        app,
+        Method::POST,
+        "/api/auth/login",
+        Some(json!({"login": username, "password": "password123"})),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "login failed: {body}");
+    body["access_token"]
+        .as_str()
+        .expect("access_token present")
+        .to_string()
+}
+
+async fn create_dataset(app: &Router, token: &str, raw_csv: &str) -> String {
+    let (status, body) = call(
+        app,
+        Method::POST,
+        "/api/objects/",
+        Some(json!({
+            "type": "dataset",
+            "properties": {"filename": "demo.csv", "raw_csv": raw_csv},
+            "content": {},
+            "source": "test://fixture"
+        })),
+        Some(token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "create dataset failed: {body}");
+    body["id"].as_str().expect("object id").to_string()
+}
+
+const SAMPLE_CSV: &str = "id,name,score\n1,alpha,10\n2,beta,20\n";
+
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn health_reports_operational() {
+    let (app, _db) = test_app();
+    let (status, body) = call(&app, Method::GET, "/health", None, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["status"], "operational");
+    assert_eq!(body["storage_backend"], "RustObjectsSqlite");
+}
+
+#[tokio::test]
+async fn auth_roundtrip_issue_me_and_capability_gate() {
+    let (app, _db) = test_app();
+    let viewer = register(&app, "viewer").await;
+
+    let (status, body) = call(&app, Method::GET, "/api/auth/me", None, Some(&viewer)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["authenticated"], true);
+    assert_eq!(body["user"]["role"], "viewer");
+
+    // viewers must not create objects
+    let (status, body) = call(
+        &app,
+        Method::POST,
+        "/api/objects/",
+        Some(json!({"type": "document", "properties": {}, "content": {}})),
+        Some(&viewer),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "expected 403, got {body}");
+
+    // operators may
+    let operator = register(&app, "operator").await;
+    let (status, _) = call(
+        &app,
+        Method::POST,
+        "/api/objects/",
+        Some(json!({"type": "document", "properties": {}, "content": {}})),
+        Some(&operator),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn objects_relationships_and_traverse() {
+    let (app, _db) = test_app();
+    let token = register(&app, "operator").await;
+
+    let (status, first) = call(
+        &app,
+        Method::POST,
+        "/api/objects/",
+        Some(json!({"type": "document", "properties": {"name": "alpha"}, "content": {}})),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, second) = call(
+        &app,
+        Method::POST,
+        "/api/objects/",
+        Some(json!({"type": "document", "properties": {"name": "beta"}, "content": {}})),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let a = first["id"].as_str().unwrap().to_string();
+    let b = second["id"].as_str().unwrap().to_string();
+
+    let (status, _) = call(
+        &app,
+        Method::POST,
+        "/api/relationships",
+        Some(json!({"source_id": a, "target_id": b, "relation_type": "transforms_to", "confidence": 0.9})),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, listed) = call(&app, Method::GET, "/api/relationships/", None, Some(&token)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(listed["total"], 1);
+    // frontend contract: source/target, never source_id/target_id
+    assert!(listed["relationships"][0].get("source").is_some());
+    assert!(listed["relationships"][0].get("source_id").is_none());
+
+    let (status, traversal) = call(
+        &app,
+        Method::GET,
+        &format!("/api/graph/traverse/{a}?max_hops=3"),
+        None,
+        Some(&token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(traversal["root_id"], a);
+    assert_eq!(traversal["total_nodes_reached"], 2);
+    assert_eq!(traversal["total_edges_traversed"], 1);
+}
+
+#[tokio::test]
+async fn sql_executes_over_registered_dataset() {
+    let (app, _db) = test_app();
+    let token = register(&app, "operator").await;
+    let id = create_dataset(&app, &token, SAMPLE_CSV).await;
+    let table = format!("tbl_{}", &id[..8]);
+
+    let (status, body) = call(
+        &app,
+        Method::POST,
+        "/api/compute/sql",
+        Some(json!({"query": format!("SELECT name, score FROM {table} ORDER BY score")})),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["success"], true, "sql failed: {body}");
+    assert_eq!(body["row_count"], 2);
+    assert_eq!(body["rows"][0]["name"], "alpha");
+    assert_eq!(body["rows"][1]["score"], 20.0);
+
+    // write attempts must be rejected
+    let (status, body) = call(
+        &app,
+        Method::POST,
+        "/api/compute/sql",
+        Some(json!({"query": "DROP TABLE x"})),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["success"], false, "write query must be refused: {body}");
+}
+
+#[tokio::test]
+async fn profiling_and_quality_reports() {
+    let (app, _db) = test_app();
+    let token = register(&app, "operator").await;
+    let id = create_dataset(&app, &token, SAMPLE_CSV).await;
+
+    let (status, profile) = call(&app, Method::GET, &format!("/api/profiling/{id}"), None, Some(&token)).await;
+    assert_eq!(status, StatusCode::OK, "profiling failed: {profile}");
+    assert_eq!(profile["row_count"], 2);
+    assert_eq!(profile["column_count"], 3);
+    assert_eq!(profile["columns"]["name"]["null_count"], 0);
+    assert_eq!(profile["columns"]["score"]["stats"]["mean"], 15.0);
+    assert_eq!(profile["summary"]["completeness_ratio"], 1.0);
+
+    let (status, report) = call(
+        &app,
+        Method::POST,
+        &format!("/api/quality/{id}"),
+        Some(json!({"rules": [
+            {"type": "row_count_min", "min_rows": 1},
+            {"type": "unique", "column": "id"},
+            {"type": "range", "column": "score", "min": 0, "max": 100}
+        ]})),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "quality failed: {report}");
+    assert_eq!(report["schema"], "quality_report.v1");
+    assert_eq!(report["properties"]["total_checks"], 3);
+    assert_eq!(report["properties"]["overall_pass"], true);
+    assert_eq!(report["properties"]["quality_score"], 100.0);
+
+    // a failing rule must be reported, not hidden
+    let (status, report) = call(
+        &app,
+        Method::POST,
+        &format!("/api/quality/{id}"),
+        Some(json!({"rules": [{"type": "row_count_min", "min_rows": 50}]})),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(report["properties"]["overall_pass"], false);
+    assert_eq!(report["properties"]["failed_checks"], 1);
+}
+
+#[tokio::test]
+async fn sharing_tokens_roundtrip_and_tamper_detection() {
+    let (app, _db) = test_app();
+
+    let (status, issued) = call(
+        &app,
+        Method::POST,
+        "/api/sharing/issue_token",
+        Some(json!({
+            "issuer": "dataos-test",
+            "subject_principal": "analyst-1",
+            "subgraph_root_id": "root-1",
+            "duration_seconds": 300
+        })),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "issue failed: {issued}");
+    let token = issued["token"].as_str().expect("token").to_string();
+
+    let (status, verified) = call(
+        &app,
+        Method::POST,
+        "/api/sharing/verify_token",
+        Some(json!({"token": token})),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "verify failed: {verified}");
+    assert_eq!(verified["status"], "valid");
+    assert_eq!(verified["payload"]["subgraph_root_id"], "root-1");
+    assert_eq!(verified["payload"]["issuer"], "dataos-test");
+
+    // tampering must be detected
+    let mut tampered = token.clone();
+    let last = tampered.pop().expect("token has characters");
+    tampered.push(if last == 'A' { 'B' } else { 'A' });
+    let (status, body) = call(
+        &app,
+        Method::POST,
+        "/api/sharing/verify_token",
+        Some(json!({"token": tampered})),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "tampered token accepted: {body}");
+
+    let (status, body) = call(
+        &app,
+        Method::POST,
+        "/api/sharing/verify_token",
+        Some(json!({"token": "not-a-token"})),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "malformed token accepted: {body}");
+}
+
+#[tokio::test]
+async fn vector_index_recompute_and_search() {
+    let (app, _db) = test_app();
+    let token = register(&app, "operator").await;
+    create_dataset(&app, &token, SAMPLE_CSV).await;
+
+    let (status, body) = call(&app, Method::POST, "/api/vectors/recompute", Some(json!({})), Some(&token)).await;
+    assert_eq!(status, StatusCode::OK, "recompute failed: {body}");
+    assert!(body["recomputed"].as_u64().unwrap_or(0) >= 1);
+
+    let (status, results) = call(
+        &app,
+        Method::GET,
+        "/api/vectors/search?q=alpha&top_k=5",
+        None,
+        Some(&token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "search failed: {results}");
+    assert!(results["total_matches"].as_u64().unwrap_or(0) >= 1, "no matches: {results}");
+    assert!(results["results"][0]["score"].as_f64().unwrap_or(0.0) > 0.0);
+}
+
+#[tokio::test]
+async fn time_travel_returns_prior_version() {
+    let (app, db) = test_app();
+    let token = register(&app, "operator").await;
+
+    let (status, created) = call(
+        &app,
+        Method::POST,
+        "/api/objects/",
+        Some(json!({"type": "document", "properties": {"name": "v1"}, "content": {}})),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let id = created["id"].as_str().unwrap().to_string();
+    let t1 = created["timestamps"]["created_at"].as_str().unwrap().to_string();
+
+    // mutate through the store to produce version 2
+    let mut object = db.get_object(&id).unwrap().expect("object exists");
+    object["properties"]["name"] = json!("v2");
+    object["version"] = json!(2);
+    let t2 = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Micros, true);
+    object["timestamps"]["updated_at"] = json!(t2.clone());
+    db.save_object(&object).expect("save version 2");
+
+    let (status, as_t1) = call(
+        &app,
+        Method::GET,
+        &format!("/api/time_travel/object/{id}?as_of={}", urlencode(&t1)),
+        None,
+        Some(&token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "time travel failed: {as_t1}");
+    assert_eq!(as_t1["version"], 1);
+    assert_eq!(as_t1["properties"]["name"], "v1");
+
+    let (status, as_t2) = call(
+        &app,
+        Method::GET,
+        &format!("/api/time_travel/object/{id}?as_of={}", urlencode(&t2)),
+        None,
+        Some(&token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(as_t2["version"], 2);
+    assert_eq!(as_t2["properties"]["name"], "v2");
+
+    // invalid axis must be rejected
+    let (status, _) = call(
+        &app,
+        Method::GET,
+        &format!("/api/time_travel/object/{id}?as_of={}&temporal_axis=bogus", urlencode(&t1)),
+        None,
+        Some(&token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn lineage_traces_upstream_and_downstream() {
+    let (app, _db) = test_app();
+    let token = register(&app, "operator").await;
+
+    let (status, raw) = call(
+        &app,
+        Method::POST,
+        "/api/objects/",
+        Some(json!({"type": "dataset", "properties": {"filename": "raw.csv"}, "content": {}})),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, report) = call(
+        &app,
+        Method::POST,
+        "/api/objects/",
+        Some(json!({"type": "report", "properties": {"name": "summary"}, "content": {}})),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let raw_id = raw["id"].as_str().unwrap().to_string();
+    let report_id = report["id"].as_str().unwrap().to_string();
+
+    let (status, _) = call(
+        &app,
+        Method::POST,
+        "/api/relationships",
+        Some(json!({"source_id": raw_id, "target_id": report_id, "relation_type": "transforms_to"})),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, upstream) = call(
+        &app,
+        Method::GET,
+        &format!("/api/provenance/lineage/{report_id}?direction=upstream&max_depth=5"),
+        None,
+        Some(&token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "lineage failed: {upstream}");
+    assert_eq!(upstream["target_object_id"], report_id);
+    assert_eq!(upstream["total_ancestors"], 1);
+    let ancestor_ids: Vec<&str> = upstream["lineage_nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|node| node["object_id"].as_str())
+        .collect();
+    assert!(ancestor_ids.contains(&raw_id.as_str()));
+
+    let (status, downstream) = call(
+        &app,
+        Method::GET,
+        &format!("/api/provenance/lineage/{raw_id}?direction=downstream&max_depth=5"),
+        None,
+        Some(&token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(downstream["total_downstream_dependents"], 1);
+    assert_eq!(downstream["impacted_nodes"][0]["object_id"], report_id);
+}
+
+#[tokio::test]
+async fn workflow_execution_is_bounded_and_validated() {
+    let (app, _db) = test_app();
+
+    let (status, body) = call(
+        &app,
+        Method::POST,
+        "/api/workflows/execute",
+        Some(json!({
+            "definition": {
+                "name": "demo",
+                "nodes": {
+                    "a": {"action_type": "set_variable", "parameters": {"name": "x", "value": 1}},
+                    "b": {"action_type": "log", "parameters": {"message": "hello"}, "depends_on": ["a"]}
+                }
+            },
+            "context": {"run": "test"}
+        })),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "workflow failed: {body}");
+    assert_eq!(body["status"], "completed");
+    assert_eq!(body["nodes_total"], 2);
+    assert_eq!(body["variables"]["x"], 1);
+    assert_eq!(body["logs"].as_array().unwrap().len(), 1);
+
+    // arbitrary actions are rejected up front
+    let (status, body) = call(
+        &app,
+        Method::POST,
+        "/api/workflows/execute",
+        Some(json!({"definition": {"name": "bad", "nodes": {"a": {"action_type": "shell", "parameters": {}}}}})),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "unsafe action accepted: {body}");
+
+    // dependency cycles are rejected
+    let (status, body) = call(
+        &app,
+        Method::POST,
+        "/api/workflows/execute",
+        Some(json!({"definition": {"name": "cycle", "nodes": {
+            "a": {"action_type": "noop", "depends_on": ["b"]},
+            "b": {"action_type": "noop", "depends_on": ["a"]}
+        }}})),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "cycle accepted: {body}");
+}
+
+#[tokio::test]
+async fn agent_dispatch_is_capability_checked() {
+    let (app, _db) = test_app();
+    let token = register(&app, "operator").await;
+    create_dataset(&app, &token, SAMPLE_CSV).await;
+
+    let (status, body) = call(
+        &app,
+        Method::POST,
+        "/api/agents/execute",
+        Some(json!({"agent_id": "agent_unknown", "capability": "search", "params": {}})),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "unknown agent accepted: {body}");
+
+    let (status, body) = call(
+        &app,
+        Method::POST,
+        "/api/agents/execute",
+        Some(json!({"agent_id": "agent_research", "capability": "not_a_capability", "params": {}})),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "bad capability accepted: {body}");
+
+    let (status, body) = call(
+        &app,
+        Method::POST,
+        "/api/agents/execute",
+        Some(json!({"agent_id": "agent_research", "capability": "search", "params": {"query": "alpha"}})),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "agent search failed: {body}");
+    assert_eq!(body["runtime"], "rust-deterministic");
+    assert!(body["result"]["total_matches"].as_u64().unwrap_or(0) >= 1);
+
+    // LLM-backed capabilities must fail loudly instead of fabricating output
+    let (status, body) = call(
+        &app,
+        Method::POST,
+        "/api/agents/execute",
+        Some(json!({"agent_id": "agent_report", "capability": "compute_python", "params": {}})),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_IMPLEMENTED, "unmigrated capability must 501: {body}");
+}
+
+#[tokio::test]
+async fn unmigrated_routes_answer_501_not_fake_data() {
+    let (app, _db) = test_app();
+    let token = register(&app, "operator").await;
+
+    let (status, body) = call(
+        &app,
+        Method::POST,
+        "/api/ask",
+        Some(json!({"query": "what is in my data?"})),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
+    assert!(body["error"].as_str().unwrap_or("").contains("not been migrated"));
+
+    let (status, _body) = call(
+        &app,
+        Method::POST,
+        "/api/compute/python",
+        Some(json!({"code": "print(1)"})),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
+fn urlencode(value: &str) -> String {
+    value
+        .chars()
+        .map(|c| match c {
+            ':' => "%3A".to_string(),
+            '+' => "%2B".to_string(),
+            c if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' || c == '~' => c.to_string(),
+            c => format!("%{:02X}", c as u32),
+        })
+        .collect()
+}
