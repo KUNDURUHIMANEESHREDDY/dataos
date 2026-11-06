@@ -340,3 +340,46 @@ def test_non_api_health_path_remains_available_without_api_token(monkeypatch):
         any(dependency.call is api.require_production_api_token for dependency in route.dependant.dependencies)
         for route in api_routes
     )
+
+@pytest.mark.parametrize(
+    ("managed_key", "managed_value"),
+    [
+        ("content_hash", "0" * 64),
+        ("blob", {"sha256": "0" * 64, "path": "/untrusted/client/path"}),
+    ],
+)
+def test_object_creation_rejects_client_supplied_storage_metadata(
+    monkeypatch, managed_key, managed_value
+):
+    """Clients cannot forge deduplication hashes or attach server blob references."""
+    def unexpected_save(_obj):
+        pytest.fail("invalid server-managed metadata must be rejected before persistence")
+
+    monkeypatch.setattr(api.dataos.storage, "save_object", unexpected_save)
+    request = api.ObjectCreateRequest(metadata={managed_key: managed_value})
+
+    with pytest.raises(HTTPException) as exc:
+        run(api.create_object(request))
+
+    assert exc.value.status_code == 422
+    assert "managed by DataOS" in exc.value.detail
+    assert managed_key in exc.value.detail
+
+
+def test_object_creation_preserves_user_metadata_and_generates_hash(monkeypatch):
+    """Ordinary client metadata remains supported while the hash stays server-owned."""
+    saved = {}
+
+    def capture_object(obj):
+        saved["object"] = obj
+        return obj
+
+    monkeypatch.setattr(api.dataos.storage, "save_object", capture_object)
+    result = run(api.create_object(api.ObjectCreateRequest(
+        metadata={"source_note": "uploaded through API"},
+        content={"text": "verified payload"},
+    )))
+
+    assert result["metadata"]["source_note"] == "uploaded through API"
+    assert result["metadata"]["content_hash"] == saved["object"].compute_hash()
+    assert len(result["metadata"]["content_hash"]) == 64
