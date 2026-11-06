@@ -68,7 +68,7 @@ def main():
 
     try:
         if args.command == "ingest":
-            res = dataos.ingest(args.file_path)
+            res = dataos.ingest_file(args.file_path)
             print(json.dumps(res, indent=2, default=str))
 
         elif args.command == "sql":
