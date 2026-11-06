@@ -186,6 +186,14 @@ class TestGovernanceAndFederation(unittest.TestCase):
             "unrelated empty documents must not be reported as duplicates",
         )
 
+    def test_duplicate_detection_rejects_invalid_similarity_thresholds(self):
+        """A zero threshold must not classify every unrelated pair as a duplicate."""
+        invalid_thresholds = (0.0, -0.1, 1.01, float("nan"), float("inf"), True, "0.5")
+        for threshold in invalid_thresholds:
+            with self.subTest(threshold=threshold):
+                with self.assertRaises(ValueError):
+                    self.deduplication.find_duplicates(min_similarity=threshold)
+
     def test_duplicate_detection_bounds_results_and_reports_total_matches(self):
         """The API can retain top matches without allocating an unbounded result list."""
         for content in ("alpha", "bravo", "charlie"):
