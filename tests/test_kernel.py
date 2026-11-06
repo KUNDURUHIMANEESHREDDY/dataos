@@ -62,6 +62,27 @@ class TestDataOSKernel(unittest.TestCase):
         self.assertEqual(v2.id, obj.id)
         self.assertEqual(v2.properties["word_count"], 150)
         self.assertEqual(len(v2.provenance["transformations"]), 1)
+        self.assertEqual(v2.metadata["content_hash"], v2.compute_hash())
+        self.assertNotEqual(v2.metadata["content_hash"], obj.metadata["content_hash"])
+
+    def test_cached_content_hash_metadata_is_recomputed_before_persistence(self):
+        # Even a well-formed but caller-controlled digest is not authoritative.
+        for cached_hash in (None, "", "   ", 123, "0" * 64):
+            with self.subTest(cached_hash=cached_hash):
+                obj = DataObject(
+                    type="document",
+                    properties={"title": "Hash invariant"},
+                    content="persistable content",
+                    metadata={"content_hash": cached_hash},
+                )
+                expected_hash = obj.compute_hash()
+                self.assertEqual(obj.metadata["content_hash"], expected_hash)
+                self.assertEqual(len(expected_hash), 64)
+
+                self.storage.save_object(obj)
+                stored = self.storage.get_object(obj.id)
+                self.assertIsNotNone(stored)
+                self.assertEqual(stored.metadata["content_hash"], expected_hash)
 
     def test_schema_definition_and_validation(self):
         """Verify dynamic schema validation and constraints."""

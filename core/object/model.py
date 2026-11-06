@@ -106,9 +106,10 @@ class DataObject:
                 "input_sources": [self.source] if self.source else [],
                 "transformations": []
             }
-        # Compute content hash if applicable
-        if "content_hash" not in self.metadata:
-            self.metadata["content_hash"] = self.compute_hash()
+        # The hash is derived from canonical object fields on every construction.
+        # Trusting a cached value can preserve a stale hash across version updates
+        # or let imported metadata influence exact-duplicate detection.
+        self.metadata["content_hash"] = self.compute_hash()
 
     def compute_hash(self) -> str:
         """Compute deterministic SHA-256 hash of object content and properties."""

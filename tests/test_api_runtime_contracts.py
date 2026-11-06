@@ -288,6 +288,7 @@ def test_health_probe_returns_service_unavailable_when_storage_fails(monkeypatch
     assert exc.value.detail == "DataOS storage is unavailable"
 
 
+def test_workflow_route_rejects_malformed_definition():
 def test_workflow_route_rejects_malformed_definition_and_duplicate_route_uses_engine():
     # The workflow endpoint is implemented: an empty definition is invalid input,
     # so it must fail validation rather than claim the feature is unimplemented.
@@ -296,6 +297,146 @@ def test_workflow_route_rejects_malformed_definition_and_duplicate_route_uses_en
     assert workflow_exc.value.status_code == 422
     assert "nodes" in workflow_exc.value.detail
 
+
+@pytest.mark.parametrize("threshold", [0.0, -0.1, 1.01, float("nan"), float("inf")])
+def test_duplicate_detection_route_rejects_invalid_similarity_thresholds(threshold):
+    with pytest.raises(HTTPException) as exc:
+        run(api.detect_duplicates_api(min_similarity=threshold))
+    assert exc.value.status_code == 422
+
+
+def test_duplicate_detection_route_returns_candidates_without_graph_mutation(monkeypatch):
+    matches = [{
+        "object_a_id": "a",
+        "object_b_id": "b",
+        "similarity_score": 1.0,
+        "method": "exact_hash",
+        "is_exact_duplicate": True,
+    }]
+    called = {}
+
+    def find_duplicates(**kwargs):
+        called.update(kwargs)
+        return matches, len(matches)
+
+    monkeypatch.setattr(api.duplicate_detection_engine, "find_duplicates", find_duplicates)
+    monkeypatch.setattr(api.dataos.storage, "list_objects", lambda **kwargs: [object(), object()])
+    result = run(api.detect_duplicates_api(min_similarity=0.8))
+
+    assert result == {
+        "object_id": None,
+        "min_similarity": 0.8,
+        "catalog_objects_observed": 2,
+        "catalog_count_capped": False,
+        "scanned_objects": 2,
+        "truncated": False,
+        "result_limit": 1000,
+        "results_truncated": False,
+        "total": 1,
+        "duplicates": matches,
+    }
+    assert called == {
+        "target_object_id": None,
+        "min_similarity": 0.8,
+        "auto_link_graph": False,
+        "max_results": 1000,
+        "return_metadata": True,
+    }
+
+
+def test_duplicate_detection_route_reports_when_catalog_scan_is_truncated(monkeypatch):
+    monkeypatch.setattr(api.dataos.storage, "list_objects", lambda **kwargs: list(range(1001)))
+    monkeypatch.setattr(api.duplicate_detection_engine, "find_duplicates", lambda **kwargs: ([], 0))
+    result = run(api.detect_duplicates_api())
+    assert result["catalog_objects_observed"] == 1001
+    assert result["catalog_count_capped"] is True
+    assert result["scanned_objects"] == 1000
+    assert result["truncated"] is True
+
+
+
+def test_duplicate_detection_route_bounds_result_payload(monkeypatch):
+    candidates = [
+        {
+            "object_a_id": f"a-{index}",
+            "object_b_id": f"b-{index}",
+            "similarity_score": 1.0,
+            "method": "exact_hash",
+            "is_exact_duplicate": True,
+        }
+        for index in range(1000)
+    ]
+    called = {}
+
+    def find_duplicates(**kwargs):
+        called.update(kwargs)
+        return candidates, 1001
+
+    monkeypatch.setattr(api.duplicate_detection_engine, "find_duplicates", find_duplicates)
+    monkeypatch.setattr(api.dataos.storage, "list_objects", lambda **kwargs: [])
+
+    result = run(api.detect_duplicates_api())
+
+    assert result["total"] == 1001
+    assert result["result_limit"] == 1000
+    assert result["results_truncated"] is True
+    assert len(result["duplicates"]) == 1000
+    assert called["max_results"] == 1000
+    assert called["return_metadata"] is True
+
+
+def test_duplicate_detection_route_rejects_unknown_object(monkeypatch):
+    monkeypatch.setattr(api.dataos.storage, "get_object", lambda object_id: None)
+    monkeypatch.setattr(
+        api.duplicate_detection_engine,
+        "find_duplicates",
+        lambda **kwargs: pytest.fail("must not scan when target object does not exist"),
+    )
+    with pytest.raises(HTTPException) as exc:
+        run(api.detect_duplicates_api(object_id="missing"))
+    assert exc.value.status_code == 404
+
+
+def test_duplicate_detection_target_lookup_runs_in_threadpool(monkeypatch):
+    calls = []
+    target = object()
+
+    def get_object(object_id):
+        assert object_id == "known"
+        return target
+
+    original_run_in_threadpool = api.run_in_threadpool
+
+    async def tracking_run_in_threadpool(func, *args, **kwargs):
+        calls.append(func)
+        return await original_run_in_threadpool(func, *args, **kwargs)
+
+    monkeypatch.setattr(api.dataos.storage, "get_object", get_object)
+    monkeypatch.setattr(api.dataos.storage, "list_objects", lambda **kwargs: [])
+    monkeypatch.setattr(api.duplicate_detection_engine, "find_duplicates", lambda **kwargs: ([], 0))
+    monkeypatch.setattr(api, "run_in_threadpool", tracking_run_in_threadpool)
+
+    result = run(api.detect_duplicates_api(object_id="known"))
+
+    assert result["object_id"] == "known"
+    assert get_object in calls
+
+
+def test_duplicate_detection_route_validates_similarity_and_object_id():
+    with pytest.raises(HTTPException) as similarity_exc:
+        run(api.detect_duplicates_api(min_similarity=1.01))
+    assert similarity_exc.value.status_code == 422
+
+    with pytest.raises(HTTPException) as object_exc:
+        run(api.detect_duplicates_api(object_id="   "))
+    assert object_exc.value.status_code == 422
+
+
+@pytest.mark.parametrize("threshold", [float("nan"), float("inf"), float("-inf")])
+def test_duplicate_detection_rejects_non_finite_similarity_threshold(threshold):
+    with pytest.raises(HTTPException) as exc:
+        run(api.detect_duplicates_api(min_similarity=threshold))
+    assert exc.value.status_code == 422
     # Duplicate detection is implemented via DuplicateDetectionEngine and must
     # return a result payload (empty store -> no duplicates), not a 501 stub.
     result = run(api.detect_duplicates_api())
@@ -457,6 +598,48 @@ def test_non_api_health_path_remains_available_without_api_token(monkeypatch):
     )
 
 
+@pytest.mark.parametrize(
+    ("managed_key", "managed_value"),
+    [
+        ("content_hash", "0" * 64),
+        ("blob", {"sha256": "0" * 64, "path": "/untrusted/client/path"}),
+    ],
+)
+def test_object_creation_rejects_client_supplied_storage_metadata(
+    monkeypatch, managed_key, managed_value
+):
+    """Clients cannot forge deduplication hashes or attach server blob references."""
+    def unexpected_save(_obj):
+        pytest.fail("invalid server-managed metadata must be rejected before persistence")
+
+    monkeypatch.setattr(api.dataos.storage, "save_object", unexpected_save)
+    request = api.ObjectCreateRequest(metadata={managed_key: managed_value})
+
+    with pytest.raises(HTTPException) as exc:
+        run(api.create_object(request))
+
+    assert exc.value.status_code == 422
+    assert "managed by DataOS" in exc.value.detail
+    assert managed_key in exc.value.detail
+
+
+def test_object_creation_preserves_user_metadata_and_generates_hash(monkeypatch):
+    """Ordinary client metadata remains supported while the hash stays server-owned."""
+    saved = {}
+
+    def capture_object(obj):
+        saved["object"] = obj
+        return obj
+
+    monkeypatch.setattr(api.dataos.storage, "save_object", capture_object)
+    result = run(api.create_object(api.ObjectCreateRequest(
+        metadata={"source_note": "uploaded through API"},
+        content={"text": "verified payload"},
+    )))
+
+    assert result["metadata"]["source_note"] == "uploaded through API"
+    assert result["metadata"]["content_hash"] == saved["object"].compute_hash()
+    assert len(result["metadata"]["content_hash"]) == 64
 def test_graph_neighbors_publishes_supported_direction_contract():
     parameters = api.app.openapi()["paths"]["/api/graph/neighbors/{object_id}"]["get"]["parameters"]
     direction = next(parameter for parameter in parameters if parameter["name"] == "direction")
