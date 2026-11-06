@@ -50,6 +50,7 @@ RESULT_ENV = {
     "sbom": "SBOM_RESULT",
     "codeql": "CODEQL_RESULT",
     "backend": "BACKEND_RESULT",
+    "rust-backend": "RUST_BACKEND_RESULT",
     "postgres-storage": "POSTGRES_RESULT",
     "security-required": "SECURITY_RESULT",
     "workflow-lint": "WORKFLOW_LINT_RESULT",
@@ -198,6 +199,7 @@ def validate_gate_contract(path: Path, workflow: object) -> bool:
         "security-required": {"secret-scan", "dependency-audit", "sbom", "codeql"},
         "backend-required": {
             "backend",
+            "rust-backend",
             "postgres-storage",
             "security-required",
             "workflow-lint",
