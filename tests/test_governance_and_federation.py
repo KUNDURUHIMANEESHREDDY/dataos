@@ -6,6 +6,7 @@ import unittest
 import tempfile
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 from core.object.model import DataObject, ObjectType
 from core.relation.model import Relationship, RelationType
 from infrastructure.storage.sqlite_store import SQLiteStorage
@@ -19,7 +20,8 @@ from infrastructure.federation.federation_engine import DataOSFederationEngine
 class TestGovernanceAndFederation(unittest.TestCase):
 
     def setUp(self):
-        self.temp_db = tempfile.mktemp(suffix=".db")
+        fd, self.temp_db = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
         self.storage = SQLiteStorage(db_path=self.temp_db)
         self.deduplication = DuplicateDetectionEngine(self.storage)
         self.governor = ResourceGovernor()
@@ -72,6 +74,284 @@ class TestGovernanceAndFederation(unittest.TestCase):
         rels = self.storage.list_relationships(source_id=obj_original.id, relation_type=RelationType.SIMILAR_TO.value) + \
                self.storage.list_relationships(target_id=obj_original.id, relation_type=RelationType.SIMILAR_TO.value)
         self.assertTrue(len(rels) >= 1)
+
+    def test_duplicate_detection_auto_link_is_idempotent_under_concurrent_scans(self):
+        """Repeated and concurrent scans persist one symmetric similarity edge."""
+        first = self.storage.save_object(DataObject(
+            type="document",
+            properties={"title": "Shared report"},
+            content="shared duplicate payload",
+        ))
+        second = self.storage.save_object(DataObject(
+            type="document",
+            properties={"title": "Shared report"},
+            content="shared duplicate payload",
+        ))
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            list(executor.map(
+                lambda _: self.deduplication.find_duplicates(
+                    min_similarity=1.0,
+                    auto_link_graph=True,
+                ),
+                range(2),
+            ))
+
+        def matching_edges():
+            return [
+                rel
+                for rel in self.storage.list_relationships(
+                    relation_type=RelationType.SIMILAR_TO.value,
+                    limit=100,
+                )
+                if {rel.source, rel.target} == {first.id, second.id}
+            ]
+
+        self.assertEqual(len(matching_edges()), 1)
+
+        # A target-scoped scan reverses the pair orientation; it must reuse
+        # the same undirected edge rather than create a second relationship.
+        self.deduplication.find_duplicates(
+            target_object_id=first.id,
+            min_similarity=1.0,
+            auto_link_graph=True,
+        )
+        self.assertEqual(len(matching_edges()), 1)
+
+    def test_duplicate_detection_preserves_existing_similarity_metadata(self):
+        """Updating a similarity edge must preserve unrelated operator metadata."""
+        first = self.storage.save_object(DataObject(
+            type="document",
+            properties={"title": "Shared report"},
+            content="shared duplicate payload",
+        ))
+        second = self.storage.save_object(DataObject(
+            type="document",
+            properties={"title": "Shared report"},
+            content="shared duplicate payload",
+        ))
+        existing = self.storage.save_relationship(Relationship(
+            source=first.id,
+            target=second.id,
+            relation_type=RelationType.SIMILAR_TO.value,
+            confidence=0.7,
+            metadata={"operator_note": "preserve this field"},
+        ))
+
+        # Target-scoped scan reverses the existing edge's orientation.
+        self.deduplication.find_duplicates(
+            target_object_id=second.id,
+            min_similarity=1.0,
+            auto_link_graph=True,
+        )
+
+        edges = [
+            rel
+            for rel in self.storage.list_relationships(
+                relation_type=RelationType.SIMILAR_TO.value,
+                limit=100,
+            )
+            if {rel.source, rel.target} == {first.id, second.id}
+        ]
+        self.assertEqual(len(edges), 1)
+        self.assertEqual(edges[0].id, existing.id)
+        self.assertEqual(edges[0].metadata["operator_note"], "preserve this field")
+        self.assertEqual(edges[0].metadata["method"], "exact_hash")
+        self.assertTrue(edges[0].metadata["is_exact"])
+        self.assertEqual(edges[0].confidence, 1.0)
+
+    def test_empty_content_does_not_match_other_empty_documents(self):
+        """Blank payloads provide no evidence that two different objects are duplicates."""
+        first = self.storage.save_object(DataObject(
+            type="document",
+            properties={"title": "Invoice for January"},
+            content="",
+        ))
+        second = self.storage.save_object(DataObject(
+            type="document",
+            properties={"title": "Engineering design"},
+            content="",
+        ))
+
+        self.assertEqual(compute_minhash_jaccard("", ""), 0.0)
+        self.assertEqual(compute_minhash_jaccard("   ", "\t\n"), 0.0)
+
+        duplicates = self.deduplication.find_duplicates(
+            min_similarity=0.75,
+            auto_link_graph=False,
+        )
+        pair_ids = {first.id, second.id}
+        self.assertFalse(
+            any({item["object_a_id"], item["object_b_id"]} == pair_ids for item in duplicates),
+            "unrelated empty documents must not be reported as duplicates",
+        )
+
+    def test_duplicate_detection_rejects_invalid_similarity_thresholds(self):
+        """A zero threshold must not classify every unrelated pair as a duplicate."""
+        invalid_thresholds = (0.0, -0.1, 1.01, float("nan"), float("inf"), True, "0.5")
+        for threshold in invalid_thresholds:
+            with self.subTest(threshold=threshold):
+                with self.assertRaises(ValueError):
+                    self.deduplication.find_duplicates(min_similarity=threshold)
+
+    def test_duplicate_detection_ignores_non_string_title_metadata(self):
+        """Malformed JSON title metadata must not crash a catalog-wide scan."""
+        first = self.storage.save_object(DataObject(
+            type="document",
+            properties={"title": {"unexpected": "object"}},
+            content="independent payload alpha",
+        ))
+        second = self.storage.save_object(DataObject(
+            type="document",
+            properties={"title": ["unexpected", "list"]},
+            content="independent payload bravo",
+        ))
+
+        duplicates = self.deduplication.find_duplicates(
+            min_similarity=0.99,
+            auto_link_graph=False,
+        )
+        pair_ids = {first.id, second.id}
+        self.assertFalse(
+            any({item["object_a_id"], item["object_b_id"]} == pair_ids for item in duplicates),
+            "non-string title metadata must not be treated as title similarity evidence",
+        )
+
+    def test_duplicate_detection_bounds_results_and_reports_total_matches(self):
+        """The API can retain top matches without allocating an unbounded result list."""
+        for content in ("alpha", "bravo", "charlie"):
+            self.storage.save_object(DataObject(
+                type="document",
+                properties={"title": "Shared report"},
+                content=content,
+            ))
+
+        matches, total = self.deduplication.find_duplicates(
+            min_similarity=0.99,
+            auto_link_graph=False,
+            max_results=1,
+            return_metadata=True,
+        )
+
+        self.assertEqual(total, 3)
+        self.assertEqual(len(matches), 1)
+        self.assertEqual(matches[0]["similarity_score"], 1.0)
+
+    def test_duplicate_detection_hashes_each_object_once(self):
+        """A catalog scan computes fallback hashes per object, not per pair."""
+        class TrackedObject:
+            def __init__(self, object_id, content, title):
+                self.id = object_id
+                self.content = content
+                self.metadata = {}
+                self.properties = {"title": title}
+                self.hash_calls = 0
+
+            def compute_hash(self):
+                self.hash_calls += 1
+                return f"hash-{self.id}"
+
+        class MemoryStorage:
+            def __init__(self, objects):
+                self.objects = objects
+
+            def list_objects(self, limit):
+                return self.objects[:limit]
+
+        objects = [
+            TrackedObject("object-a", "alpha content", "Alpha report"),
+            TrackedObject("object-b", "bravo content", "Bravo report"),
+            TrackedObject("object-c", "charlie content", "Charlie report"),
+        ]
+        engine = DuplicateDetectionEngine(MemoryStorage(objects))
+
+        engine.find_duplicates(min_similarity=1.0, auto_link_graph=False)
+
+        self.assertEqual([obj.hash_calls for obj in objects], [1, 1, 1])
+
+    def test_duplicate_detection_ignores_mutated_cached_hash(self):
+        """A stale or forged non-empty metadata hash cannot create an exact match."""
+        first = DataObject(
+            type="document",
+            properties={"title": "First unrelated document"},
+            content="alpha payload",
+        )
+        second = DataObject(
+            type="document",
+            properties={"title": "Second unrelated document"},
+            content="omega payload",
+        )
+        # Simulate an importer or caller mutating public metadata after model
+        # construction. The cached value now falsely claims exact equality.
+        first.metadata["content_hash"] = second.metadata["content_hash"]
+
+        class MemoryStorage:
+            def list_objects(self, limit):
+                return [first, second][:limit]
+
+        engine = DuplicateDetectionEngine(MemoryStorage())
+        matches = engine.find_duplicates(
+            min_similarity=1.0,
+            auto_link_graph=False,
+        )
+
+        self.assertEqual(matches, [])
+
+    def test_empty_cached_hash_metadata_falls_back_to_computed_hash(self):
+        """Legacy storage objects with empty cached hashes must not compare as exact matches."""
+        class LegacyObject:
+            def __init__(self, object_id, cached_hash, content, title):
+                self.id = object_id
+                self.metadata = {"content_hash": cached_hash}
+                self.content = content
+                self.properties = {"title": title}
+                self.hash_calls = 0
+
+            def compute_hash(self):
+                self.hash_calls += 1
+                return f"computed-{self.id}"
+
+        class MemoryStorage:
+            def __init__(self, objects):
+                self.objects = objects
+
+            def list_objects(self, limit):
+                return self.objects[:limit]
+
+        for cached_hash in (None, ""):
+            objects = [
+                LegacyObject("alpha-object", cached_hash, "alpha payload", "Alpha source"),
+                LegacyObject("omega-object", cached_hash, "omega payload", "Omega source"),
+            ]
+            engine = DuplicateDetectionEngine(MemoryStorage(objects))
+            matches = engine.find_duplicates(min_similarity=1.0, auto_link_graph=False)
+
+            self.assertEqual(matches, [])
+            self.assertEqual([obj.hash_calls for obj in objects], [1, 1])
+
+    def test_duplicate_detection_skips_title_distance_when_length_bound_fails(self):
+        """Avoid quadratic edit-distance work when title lengths cannot meet the threshold."""
+        self.storage.save_object(DataObject(
+            type="document",
+            properties={"title": "tiny"},
+            content="alpha unique content",
+        ))
+        self.storage.save_object(DataObject(
+            type="document",
+            properties={"title": "x" * 100},
+            content="unrelated document body",
+        ))
+
+        with patch(
+            "engines.governance.deduplication.compute_levenshtein_similarity",
+            side_effect=AssertionError("impossible title match must be skipped"),
+        ):
+            matches = self.deduplication.find_duplicates(
+                min_similarity=0.75,
+                auto_link_graph=False,
+            )
+
+        self.assertEqual(matches, [])
 
     def test_resource_governance_and_rate_limiting(self):
         """Rule #61: Execution timeouts, query rate limits, and compute budgets."""
