@@ -153,6 +153,53 @@ async fn auth_roundtrip_issue_me_and_capability_gate() {
 
 
 #[tokio::test]
+async fn object_ownership_isolation_blocks_cross_user_reads_writes_and_relationships() {
+    let (app, db) = test_app();
+    let alice = register(&app, &db, "operator").await;
+    let bob = register(&app, &db, "operator").await;
+
+    let alice_object = create_dataset(&app, &alice, SAMPLE_CSV).await;
+    let bob_object = create_dataset(&app, &bob, SAMPLE_CSV).await;
+
+    // Each principal sees only their own objects in collection responses.
+    let (status, alice_list) = call(&app, Method::GET, "/api/objects/", None, Some(&alice)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(alice_list["total"], 1);
+    assert_eq!(alice_list["objects"][0]["id"], alice_object);
+
+    let (status, bob_list) = call(&app, Method::GET, "/api/objects/", None, Some(&bob)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(bob_list["total"], 1);
+    assert_eq!(bob_list["objects"][0]["id"], bob_object);
+
+    // Direct reads and deletes conceal foreign objects as not found.
+    let (status, _) = call(&app, Method::GET, &format!("/api/objects/{alice_object}"), None, Some(&bob)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    let (status, _) = call(&app, Method::DELETE, &format!("/api/objects/{alice_object}"), None, Some(&bob)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // A user cannot connect their own object to another user's object.
+    let (status, body) = call(
+        &app,
+        Method::POST,
+        "/api/relationships",
+        Some(json!({
+            "source_id": bob_object,
+            "target_id": alice_object,
+            "relation_type": "references"
+        })),
+        Some(&bob),
+    ).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "cross-user relationship unexpectedly succeeded: {body}");
+
+    // The owner retains normal access to their object.
+    let (status, own_object) = call(&app, Method::GET, &format!("/api/objects/{alice_object}"), None, Some(&alice)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(own_object["id"], alice_object);
+}
+
+#[tokio::test]
 async fn public_registration_cannot_assign_privileged_role() {
     let (app, _db) = test_app();
     let username = format!("self_register_{}", &uuid::Uuid::new_v4().simple().to_string()[..8]);
