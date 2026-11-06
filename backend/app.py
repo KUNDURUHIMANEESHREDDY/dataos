@@ -12,7 +12,7 @@ import datetime
 import hmac
 import threading
 from typing import Dict, Any, List, Literal, Optional
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Depends, Header, Request, Query as FastQuery
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Depends, Header, Request, Response, Query as FastQuery
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
@@ -29,6 +29,7 @@ from core.permissions.auth import (
     issue_jwt,
     decode_jwt,
     jwt_configured,
+    DEFAULT_TTL_SECONDS,
 )
 from backend.knowledge_rag import create_knowledge_router
 from backend.cors_config import cors_middleware_options
@@ -71,22 +72,31 @@ def _parse_time_travel_timestamp(value: str, field_name: str) -> datetime.dateti
         ) from None
 
 
-def require_production_api_token(request: Request, authorization: Optional[str] = Header(default=None)) -> None:
-    """Require a high-entropy bearer token for API routes in production.
-
-    All supported environment markers are checked so a conflicting development
-    marker cannot accidentally disable production authentication. The health
-    route outside /api remains available for liveness monitoring.
-    """
-    if not request.url.path.startswith("/api/"):
-        return
-
-    production_markers = (
-        os.getenv("DATAOS_ENV", ""),
-        os.getenv("APP_ENV", ""),
-        os.getenv("ENVIRONMENT", ""),
+def _production_mode() -> bool:
+    return any(
+        marker.strip().lower() in {"production", "prod"}
+        for marker in (
+            os.getenv("DATAOS_ENV", ""),
+            os.getenv("APP_ENV", ""),
+            os.getenv("ENVIRONMENT", ""),
+        )
     )
-    if not any(marker.strip().lower() in {"production", "prod"} for marker in production_markers):
+
+
+def require_production_api_token(request: Request, authorization: Optional[str] = Header(default=None)) -> None:
+    """Require an application bearer or per-user JWT for protected production API routes.
+
+    Login and registration must remain reachable before a browser has a session.
+    All other API routes accept a JWT from the HttpOnly session cookie or an
+    explicit Bearer header. The shared application token is accepted only from
+    the Authorization header and never treated as a user identity.
+    """
+    path = request.url.path
+    if not path.startswith("/api/"):
+        return
+    if path in {"/api/auth/login", "/api/auth/register"}:
+        return
+    if not _production_mode():
         return
 
     expected = os.getenv("DATAOS_API_TOKEN", "")
@@ -101,24 +111,27 @@ def require_production_api_token(request: Request, authorization: Optional[str] 
             ),
         )
 
-    scheme, separator, supplied = (authorization or "").partition(" ")
-    if not separator or scheme.lower() != "bearer":
+    scheme, separator, bearer_value = (authorization or "").partition(" ")
+    bearer_token = bearer_value.strip() if separator and scheme.lower() == "bearer" else ""
+    cookie_token = request.cookies.get("dataos_session", "")
+    token = bearer_token or cookie_token
+    if not token:
         raise HTTPException(
             status_code=401,
-            detail="A valid bearer token is required.",
+            detail="A valid session cookie or Bearer token is required.",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    if shared_ready and hmac.compare_digest(supplied.encode("utf-8"), expected.encode("utf-8")):
+    if bearer_token and shared_ready and hmac.compare_digest(bearer_token.encode("utf-8"), expected.encode("utf-8")):
         return
     if jwt_ready:
         try:
-            decode_jwt(supplied)
+            decode_jwt(token)
             return
         except (ValueError, RuntimeError):
             pass
     raise HTTPException(
         status_code=401,
-        detail="A valid bearer token is required.",
+        detail="A valid session cookie or Bearer token is required.",
         headers={"WWW-Authenticate": "Bearer"},
     )
 
@@ -180,18 +193,21 @@ app.include_router(create_knowledge_router(dataos))
 
 
 async def get_current_user(
+    request: Request,
     authorization: Optional[str] = Header(default=None),
 ) -> Optional[User]:
-    """Resolve an optional per-user JWT; shared deployment tokens are not user identities."""
+    """Resolve a per-user JWT from an HttpOnly session cookie or Bearer header."""
     if not jwt_configured():
         return None
 
-    scheme, separator, supplied = (authorization or "").partition(" ")
-    if not separator or scheme.lower() != "bearer" or not supplied.strip():
+    scheme, separator, bearer_value = (authorization or "").partition(" ")
+    bearer_token = bearer_value.strip() if separator and scheme.lower() == "bearer" else ""
+    token = bearer_token or request.cookies.get("dataos_session", "")
+    if not token:
         return None
 
     try:
-        claims = decode_jwt(supplied.strip())
+        claims = decode_jwt(token)
     except (ValueError, RuntimeError) as exc:
         raise HTTPException(
             status_code=401,
@@ -319,7 +335,7 @@ async def register_user(req: RegisterRequest):
 
 
 @app.post("/api/auth/login", summary="Authenticate and receive a JWT")
-async def login_user(req: LoginRequest):
+async def login_user(req: LoginRequest, response: Response):
     if not jwt_configured():
         raise HTTPException(
             status_code=503,
@@ -334,12 +350,37 @@ async def login_user(req: LoginRequest):
             headers={"WWW-Authenticate": "Bearer"},
         )
     token = issue_jwt(user.id, user.role)
+    response.set_cookie(
+        key="dataos_session",
+        value=token,
+        max_age=DEFAULT_TTL_SECONDS,
+        httponly=True,
+        secure=_production_mode(),
+        samesite="strict",
+        path="/",
+    )
+    response.headers["Cache-Control"] = "no-store"
     return {"access_token": token, "token_type": "bearer", "user": user.to_dict()}
+
+
+@app.post("/api/auth/logout", summary="Clear the current browser session", status_code=204)
+async def logout_user(response: Response):
+    response.delete_cookie(
+        key="dataos_session",
+        path="/",
+        httponly=True,
+        secure=_production_mode(),
+        samesite="strict",
+    )
+    response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 @app.get("/api/auth/me", summary="Current authenticated user")
 async def get_me(current_user: Optional[User] = Depends(get_current_user)):
     if current_user is None:
+        if jwt_configured():
+            return {"authenticated": False, "detail": "A session cookie or bearer token is required."}
         return {"authenticated": False, "detail": "JWT auth is not configured; running in shared-token/dev mode."}
     return {"authenticated": True, "user": current_user.to_dict()}
 
