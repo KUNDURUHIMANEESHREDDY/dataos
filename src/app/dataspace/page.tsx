@@ -5,6 +5,7 @@ import { useSpatialStore, type ObjectType } from "@/hooks/useSpatialStore";
 import { api } from "@/lib/api";
 import paginate from "@/lib/paginate.js";
 import { toGraphEdge } from "@/lib/relationship-edge.js";
+import { loadGraphCollections } from "@/lib/load-graph-collections.js";
 import { useKeyboard } from "@/hooks/useKeyboard";
 import TopBar from "@/components/layout/TopBar";
 import Sidebar from "@/components/layout/Sidebar";
@@ -17,7 +18,10 @@ import EmptyState from "@/components/canvas/EmptyState";
 import CommandPalette from "@/components/ai/CommandPalette";
 
 const SpatialCanvas3D = lazy(() => import("@/components/canvas/SpatialCanvas3D"));
-const { loadAllPages } = paginate;
+const { loadBoundedPages } = paginate;
+
+const MAX_GRAPH_OBJECTS = 10_000;
+const MAX_GRAPH_RELATIONSHIPS = 20_000;
 
 function Canvas3DFallback() {
   return (
@@ -31,33 +35,55 @@ function Canvas3DFallback() {
 }
 
 async function loadAllObjects(signal: AbortSignal) {
-  const objects = await loadAllPages<any>(
+  const result = await loadBoundedPages<any>(
     ({ limit, offset, signal: requestSignal }) => api.listObjects(
       { limit, offset },
       requestSignal ? { signal: requestSignal } : undefined,
     ),
     "objects",
     500,
-    undefined,
+    MAX_GRAPH_OBJECTS,
     signal,
   );
-  return { objects, total: objects.length };
+  return { objects: result.items, total: result.total, truncated: result.truncated };
 }
 
 async function loadAllRelationships(signal: AbortSignal) {
-  // The API caps each relationship page at 1,000 rows. Fetch every page rather
-  // than requesting 5,000 in one call (which FastAPI rejects with HTTP 422).
-  const relationships = await loadAllPages<any>(
+  // The API caps each relationship page at 1,000 rows. Fetch bounded pages
+  // rather than requesting 5,000 in one call or accumulating an unbounded graph.
+  const result = await loadBoundedPages<any>(
     ({ limit, offset, signal: requestSignal }) => api.listRelationships(
       { limit, offset },
-      { signal: requestSignal },
+      requestSignal ? { signal: requestSignal } : undefined,
     ),
     "relationships",
     1000,
-    undefined,
+    MAX_GRAPH_RELATIONSHIPS,
     signal,
   );
-  return { relationships, total: relationships.length };
+  return { relationships: result.items, total: result.total, truncated: result.truncated };
+}
+
+function buildGraphNotice(
+  objects: { objects: unknown[]; total: number | null; truncated: boolean },
+  relationships: { relationships: unknown[]; total: number | null; truncated: boolean },
+) {
+  const limits: string[] = [];
+  if (objects.truncated) {
+    const total = objects.total === null
+      ? "at least " + (objects.objects.length + 1).toLocaleString()
+      : objects.total.toLocaleString();
+    limits.push(objects.objects.length.toLocaleString() + " of " + total + " objects");
+  }
+  if (relationships.truncated) {
+    const total = relationships.total === null
+      ? "at least " + (relationships.relationships.length + 1).toLocaleString()
+      : relationships.total.toLocaleString();
+    limits.push(relationships.relationships.length.toLocaleString() + " of " + total + " relationships");
+  }
+  if (limits.length === 0) return null;
+  return "Graph view is bounded to " + limits.join(" and ")
+    + " to protect browser memory and rendering performance. All records remain in storage; use search to locate specific objects.";
 }
 
 export default function DataspacePage() {
@@ -67,6 +93,7 @@ export default function DataspacePage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
+  const [notice, setNotice] = useState<string | null>(null);
 
   useKeyboard();
 
@@ -77,11 +104,13 @@ export default function DataspacePage() {
     async function load() {
       setLoading(true);
       setError(null);
+      setNotice(null);
       try {
-        const [objsRes, relsRes] = await Promise.all([
-          loadAllObjects(controller.signal),
-          loadAllRelationships(controller.signal),
-        ]);
+        const [objsRes, relsRes] = await loadGraphCollections(
+          controller,
+          loadAllObjects,
+          loadAllRelationships,
+        );
 
         if (!active) return;
 
@@ -110,8 +139,9 @@ export default function DataspacePage() {
 
         setObjects(objects);
         setEdges(edges);
+        setNotice(buildGraphNotice(objsRes, relsRes));
       } catch (err) {
-        if (!active || controller.signal.aborted) return;
+        if (!active) return;
         setError(err instanceof Error ? err.message : "An unknown error occurred while loading the workspace.");
       } finally {
         if (active) setLoading(false);
@@ -160,6 +190,15 @@ export default function DataspacePage() {
           )}
 
           <div className="flex-1 relative overflow-hidden">
+            {notice && (
+              <div
+                className="absolute top-3 left-3 right-3 z-20 mx-auto max-w-3xl glass rounded-lg px-4 py-3 text-xs text-[var(--color-text-secondary)] shadow-lg"
+                role="status"
+                aria-live="polite"
+              >
+                {notice}
+              </div>
+            )}
             {viewMode === "2d" ? <SpatialCanvas /> : (
               <Suspense fallback={<Canvas3DFallback />}>
                 <SpatialCanvas3D />
