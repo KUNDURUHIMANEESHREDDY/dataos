@@ -1,10 +1,14 @@
-use std::collections::HashSet;
+use std::{collections::HashSet, time::{Duration, Instant}};
 
 use csv::StringRecord;
-use rusqlite::{Connection, types::ValueRef};
+use rusqlite::{Connection, hooks::{AuthAction, Authorization}, types::ValueRef};
 use serde_json::{Value, json};
 
 use crate::db::Db;
+
+const MAX_QUERY_BYTES: usize = 64 * 1024;
+const MAX_QUERY_SECONDS: u64 = 5;
+const MAX_RESULT_ROWS: usize = 10_000;
 
 const FORBIDDEN_KEYWORDS: &[&str] = &[
     "insert", "update", "delete", "drop", "alter", "attach", "detach", "pragma",
@@ -185,6 +189,21 @@ pub fn execute_sql_for_owner(query: &str, db: &Db, owner_id: &str) -> Value {
 }
 
 fn execute_sql_scoped(query: &str, db: &Db, owner_id: Option<&str>) -> Value {
+    if query.as_bytes().len() > MAX_QUERY_BYTES {
+        let error = format!("SQL query exceeds the {MAX_QUERY_BYTES}-byte limit");
+        return json!({
+            "success": false,
+            "query": query,
+            "columns": [],
+            "row_count": 0,
+            "rows": [],
+            "execution_time_ms": 0.0,
+            "registered_tables": [],
+            "provenance": {"engine": "rust-sqlite", "query_text": query, "error": error},
+            "error": error
+        });
+    }
+
     if !is_read_only(query) {
         return json!({
             "success": false,
@@ -247,12 +266,42 @@ fn execute_sql_inner(query: &str, db: &Db, owner_id: Option<&str>) -> Result<Val
         }
     }
 
+    // Dataset registration above is trusted setup. From this point onward, caller SQL
+    // is constrained by SQLite itself rather than relying on keyword matching alone.
+    conn.execute_batch("PRAGMA query_only = ON").map_err(|e| e.to_string())?;
+    conn.authorizer(Some(|context| match context.action {
+        AuthAction::Select | AuthAction::Read { .. } | AuthAction::Recursive => Authorization::Allow,
+        AuthAction::Function { function_name } => {
+            if function_name.eq_ignore_ascii_case("load_extension")
+                || function_name.eq_ignore_ascii_case("readfile")
+                || function_name.eq_ignore_ascii_case("writefile")
+                || function_name.eq_ignore_ascii_case("fts3_tokenizer")
+            {
+                Authorization::Deny
+            } else {
+                Authorization::Allow
+            }
+        }
+        // Deny writes, schema changes, PRAGMAs, transactions, ATTACH/DETACH,
+        // virtual-table operations, and unknown future SQLite authorizer actions.
+        _ => Authorization::Deny,
+    }));
+
+    let deadline = Instant::now() + Duration::from_secs(MAX_QUERY_SECONDS);
+    conn.progress_handler(1_000, Some(move || Instant::now() >= deadline));
+
     let mut stmt = conn.prepare(query).map_err(|e| e.to_string())?;
+    if !stmt.readonly() {
+        return Err("Only read-only SQL statements are permitted".to_string());
+    }
     let column_count = stmt.column_count();
     let columns: Vec<String> = (0..column_count).map(|index| stmt.column_name(index).unwrap_or("column").to_string()).collect();
     let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
     let mut records = Vec::new();
     while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+        if records.len() >= MAX_RESULT_ROWS {
+            return Err(format!("SQL query result exceeds the {MAX_RESULT_ROWS}-row limit"));
+        }
         let mut record = serde_json::Map::new();
         for index in 0..column_count {
             record.insert(columns[index].clone(), value_ref_to_json(row.get_ref(index).map_err(|e| e.to_string())?));
