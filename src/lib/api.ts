@@ -19,7 +19,7 @@ export const api = {
     const qs = new URLSearchParams();
     if (params?.object_type) qs.set("object_type", params.object_type);
     if (params?.limit) qs.set("limit", String(params.limit));
-    if (params?.offset) qs.set("offset", String(params.offset));
+    if (params?.offset !== undefined) qs.set("offset", String(params.offset));
     return apiFetch(`/api/objects/?${qs}`);
   },
 
@@ -31,11 +31,12 @@ export const api = {
   deleteObject: (id: string) =>
     apiFetch(`/api/objects/${id}`, { method: "DELETE" }),
 
-  listRelationships: (params?: { source_id?: string; target_id?: string; limit?: number }) => {
+  listRelationships: (params?: { source_id?: string; target_id?: string; limit?: number; offset?: number }) => {
     const qs = new URLSearchParams();
     if (params?.source_id) qs.set("source_id", params.source_id);
     if (params?.target_id) qs.set("target_id", params.target_id);
     if (params?.limit) qs.set("limit", String(params.limit));
+    if (params?.offset !== undefined) qs.set("offset", String(params.offset));
     return apiFetch(`/api/relationships/?${qs}`);
   },
 

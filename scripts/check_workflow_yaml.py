@@ -56,10 +56,21 @@ RESULT_ENV = {
 }
 
 
+def is_enforced_step(job: dict, step: dict) -> bool:
+    """Reject guards that a workflow can skip or mark as non-blocking."""
+    job_continue = job.get("continue-on-error")
+    step_continue = step.get("continue-on-error")
+    return (
+        (job_continue is None or job_continue is False)
+        and (step_continue is None or step_continue is False)
+        and "if" not in step
+    )
+
+
 def has_fail_closed_result_checks(job: dict, required_needs: set[str]) -> bool:
     """Require every prerequisite result to be explicitly checked for success."""
     for step in job.get("steps", []):
-        if not isinstance(step, dict):
+        if not isinstance(step, dict) or not is_enforced_step(job, step):
             continue
         env = step.get("env")
         run = step.get("run")
@@ -115,6 +126,7 @@ def has_critical_high_alert_gate(job: dict) -> bool:
         "exit 1",
     )
     for step in job.get("steps", []):
+        if not isinstance(step, dict) or not is_enforced_step(job, step):
         if not isinstance(step, dict):
             continue
         if step.get("name") != "Fail on open critical/high code-scanning alerts":
@@ -131,6 +143,22 @@ def has_critical_high_alert_gate(job: dict) -> bool:
         if all(fragment in run for fragment in required_fragments) and "sort -u" not in run:
             return True
     return False
+
+
+def has_unfiltered_pull_request_trigger(workflow: dict) -> bool:
+    """Require backend/security verification for PRs targeting stacked feature branches."""
+    # PyYAML's YAML 1.1 resolver may load the unquoted key on as boolean True.
+    triggers = workflow.get("on")
+    if triggers is None:
+        triggers = workflow.get(True)
+    if not isinstance(triggers, dict) or "pull_request" not in triggers:
+        return False
+    pull_request = triggers["pull_request"]
+    if isinstance(pull_request, dict) and (
+        "branches" in pull_request or "branches-ignore" in pull_request
+    ):
+        return False
+    return True
 
 
 def validate_gate_contract(path: Path, workflow: object) -> bool:
@@ -154,6 +182,12 @@ def validate_gate_contract(path: Path, workflow: object) -> bool:
         },
     }
     ok = True
+    if not has_unfiltered_pull_request_trigger(workflow):
+        print(
+            f"FAIL: {path}: pull_request must be unfiltered so stacked feature PRs receive backend and security verification",
+            file=sys.stderr,
+        )
+        ok = False
     for job_id, required_needs in expected.items():
         job = jobs.get(job_id)
         if not isinstance(job, dict):
@@ -187,6 +221,12 @@ def validate_gate_contract(path: Path, workflow: object) -> bool:
             ok = False
 
     security_job = jobs.get("security-required")
+    if isinstance(security_job, dict) and not has_critical_high_alert_gate(security_job):
+        print(
+            f"FAIL: {path}: security-required must fail closed on open critical/high code-scanning alerts",
+            file=sys.stderr,
+        )
+        ok = False
     if isinstance(security_job, dict):
         permissions = security_job.get("permissions", workflow.get("permissions", {}))
         security_events_permission = (
