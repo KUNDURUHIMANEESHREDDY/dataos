@@ -24,3 +24,4 @@ build
 
 # Large vendored agent library (not required for runtime/build)
 skills
+rust-backend/target

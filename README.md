@@ -6,7 +6,7 @@ graph**, and **first-class provenance** — every derived result traceable back 
 The design principle, stated in `context/ai-workflow-rules.md`: **AI is an operator over the graph, never an
 authority over it.**
 
-> **Backend status:** production-hardening branch includes per-user JWT auth and role capability gating, deployable Docker/Compose configuration, and a committed frontend production build. The shared bearer token remains an additional production gate, not the only auth boundary. Remaining production risks are resource-level authorization across every handler, Python-sandbox security review, live Postgres regression coverage, and real secret-management/operations before public exposure.
+> **Backend status:** the Docker backend now targets the Rust/Axum implementation in `rust-backend/`, which implements storage, auth, objects/relationships, graph basics, safe read-only SQL, ingest, and selected governance routes. It is not yet feature-for-feature with the Python backend; unimplemented routes return HTTP 501. Python backend remains as a legacy reference until Rust parity is complete. Remaining production risks are full route parity, per-object authorization, secrets/operations, TLS/reverse proxy, and live deployment testing.
 
 ---
 

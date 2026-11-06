@@ -40,6 +40,27 @@ jobs:
       - name: Smoke-test CLI health
         run: python -m cli health
 
+  rust-backend:
+    name: Rust production backend build
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust-backend
+      - name: Verify lockfile and build
+        working-directory: rust-backend
+        run: |
+          cargo test --locked
+          cargo build --release --locked
+
   frontend:
     name: Frontend production build
     runs-on: ubuntu-latest
@@ -136,7 +157,7 @@ jobs:
   backend-required:
     name: Release required
     if: always()
-    needs: [backend, frontend, postgres-storage, secret-scan, dependency-audit]
+    needs: [backend, frontend, postgres-storage, secret-scan, dependency-audit, rust-backend]
     runs-on: ubuntu-latest
     steps:
       - name: Fail closed unless verification passed
@@ -146,11 +167,13 @@ jobs:
           POSTGRES: ${{ needs.postgres-storage.result }}
           SECRET_SCAN: ${{ needs.secret-scan.result }}
           DEPENDENCY_AUDIT: ${{ needs.dependency-audit.result }}
+          RUST_BACKEND: ${{ needs.rust-backend.result }}
         run: |
           set -euo pipefail
-          echo "backend=$BACKEND frontend=$FRONTEND postgres=$POSTGRES secret-scan=$SECRET_SCAN dependency-audit=$DEPENDENCY_AUDIT"
+          echo "backend=$BACKEND frontend=$FRONTEND postgres=$POSTGRES secret-scan=$SECRET_SCAN dependency-audit=$DEPENDENCY_AUDIT rust-backend=$RUST_BACKEND"
           test "$BACKEND" = "success"
           test "$FRONTEND" = "success"
           test "$POSTGRES" = "success"
           test "$SECRET_SCAN" = "success"
           test "$DEPENDENCY_AUDIT" = "success"
+          test "$RUST_BACKEND" = "success"
