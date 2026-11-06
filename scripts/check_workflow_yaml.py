@@ -131,9 +131,13 @@ def has_critical_high_alert_gate(job: dict) -> bool:
         "github.rest.codeScanning.listAlertsForRepo",
         "github.paginate(",
         'state: "open"',
+        "refs/heads/",
+        "refs/pull/",
         "ref,",
         '["critical", "high"]',
-        "blocking.length > 0",
+        "location?.path",
+        "location.start_line",
+        "blockingCount > 0",
         "core.setFailed(",
     )
     for step in job.get("steps", []):
