@@ -142,6 +142,15 @@ Convenience methods that genuinely exist: `from_url`, `ingest`, `why`, `impact`,
 python -m uvicorn backend.app:app --reload    # port 8000, must run from repo root
 ```
 
+
+The authenticated API exposes a bounded catalog overview at GET /api/catalog/summary.
+It returns exact object and relationship totals plus type counts from bounded samples.
+The response includes metrics_scope, is_partial, and sample_limits; clients must not
+present sample-derived health metrics as whole-catalog metrics when is_partial is true.
+A health grade is reported as "unrated" when no quality or relationship evidence exists.
+The lightweight /api/catalog/health endpoint remains a storage liveness probe and does
+not perform the catalog scan.
+
 For direct browser-to-API development, set `DATAOS_CORS_ORIGINS` to a comma-separated
 list of exact origins (scheme, host, and optional port), for example
 `http://localhost:3000,http://127.0.0.1:3000`. Wildcards, paths, credentials in
