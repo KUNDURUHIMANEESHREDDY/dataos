@@ -1176,6 +1176,7 @@ pub struct KnowledgeQueryRequest {
 
 pub(crate) async fn knowledge_query(
     State(state): State<AppState>,
+    Extension(CurrentUser(user)): Extension<CurrentUser>,
     Json(request): Json<KnowledgeQueryRequest>,
 ) -> Result<Json<Value>, ApiError> {
     let unprocessable =
@@ -1203,6 +1204,12 @@ pub(crate) async fn knowledge_query(
     let mut selected: HashMap<String, Value> = HashMap::new();
     let mut missing: Vec<String> = Vec::new();
     for file_id in &selected_ids {
+        if let Some(user) = user.as_ref() {
+            if !state.db.can_access_object(file_id, &user.id, user.role == "admin").map_err(internal)? {
+                missing.push(file_id.clone());
+                continue;
+            }
+        }
         match state.db.get_object(file_id).map_err(internal)? {
             Some(object) => {
                 selected.insert(file_id.clone(), object);
@@ -1233,6 +1240,9 @@ pub(crate) async fn knowledge_query(
                 .list_relationships(None, Some(file_id), None, 0.0, 5000, 0)
                 .map_err(internal)?;
             for relation in outgoing.into_iter().chain(incoming) {
+                if !relationship_visible_to(state.db.as_ref(), &relation, user.as_ref())? {
+                    continue;
+                }
                 let key = format!(
                     "{}|{}|{}|{}",
                     relation.get("id").and_then(Value::as_str).unwrap_or(""),
