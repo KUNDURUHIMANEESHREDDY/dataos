@@ -152,6 +152,34 @@ class TestGovernanceAndFederation(unittest.TestCase):
 
         self.assertEqual([obj.hash_calls for obj in objects], [1, 1, 1])
 
+    def test_duplicate_detection_ignores_mutated_cached_hash(self):
+        """A stale or forged non-empty metadata hash cannot create an exact match."""
+        first = DataObject(
+            type="document",
+            properties={"title": "First unrelated document"},
+            content="alpha payload",
+        )
+        second = DataObject(
+            type="document",
+            properties={"title": "Second unrelated document"},
+            content="omega payload",
+        )
+        # Simulate an importer or caller mutating public metadata after model
+        # construction. The cached value now falsely claims exact equality.
+        first.metadata["content_hash"] = second.metadata["content_hash"]
+
+        class MemoryStorage:
+            def list_objects(self, limit):
+                return [first, second][:limit]
+
+        engine = DuplicateDetectionEngine(MemoryStorage())
+        matches = engine.find_duplicates(
+            min_similarity=1.0,
+            auto_link_graph=False,
+        )
+
+        self.assertEqual(matches, [])
+
     def test_empty_cached_hash_metadata_falls_back_to_computed_hash(self):
         """Legacy storage objects with empty cached hashes must not compare as exact matches."""
         class LegacyObject:

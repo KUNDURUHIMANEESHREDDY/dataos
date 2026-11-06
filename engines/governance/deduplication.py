@@ -131,14 +131,12 @@ class DuplicateDetectionEngine:
             metadata = obj.metadata or {}
             properties = obj.properties or {}
             content = str(obj.content)
-            cached_hash = metadata.get("content_hash")
-            # Metadata can originate from API callers. Empty or malformed cached
-            # values must never compare equal across unrelated objects.
-            content_hash = (
-                cached_hash.strip()
-                if isinstance(cached_hash, str) and cached_hash.strip()
-                else obj.compute_hash()
-            )
+            # DataObject and its metadata are mutable. A non-empty cached hash can
+            # become stale after content/properties change, or be modified by an
+            # importer after construction. Derive exact-match evidence from the
+            # current canonical fields instead. This runs once per object, outside
+            # the pairwise loop, so catalog scans remain O(n) in hash computations.
+            content_hash = obj.compute_hash()
             comparison_data[object_id] = {
                 "content": content,
                 "normalized_content": content.strip(),
