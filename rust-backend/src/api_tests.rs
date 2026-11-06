@@ -476,6 +476,56 @@ async fn sql_executes_over_registered_dataset() {
 }
 
 #[tokio::test]
+async fn sql_authorizer_rejects_extension_loading() {
+    let (app, db) = test_app();
+    let token = register(&app, &db, "operator").await;
+
+    let (status, body) = call(
+        &app,
+        Method::POST,
+        "/api/compute/sql",
+        Some(json!({"query": "SELECT load_extension('untrusted-extension')"})),
+        Some(&token),
+    ).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["success"], false, "extension loading must be denied: {body}");
+    assert!(
+        body["error"].as_str().unwrap_or("").to_ascii_lowercase().contains("not authorized"),
+        "expected SQLite authorizer denial, got: {body}"
+    );
+}
+
+#[tokio::test]
+async fn sql_enforces_query_and_result_limits() {
+    let (app, db) = test_app();
+    let token = register(&app, &db, "operator").await;
+
+    let oversized_query = format!("SELECT 1 -- {}", "x".repeat(64 * 1024));
+    let (status, body) = call(
+        &app,
+        Method::POST,
+        "/api/compute/sql",
+        Some(json!({"query": oversized_query})),
+        Some(&token),
+    ).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["success"], false);
+    assert!(body["error"].as_str().unwrap_or("").contains("byte limit"));
+
+    let recursive_query = "WITH RECURSIVE seq(x) AS (VALUES(1) UNION ALL SELECT x + 1 FROM seq WHERE x < 10001) SELECT x FROM seq";
+    let (status, body) = call(
+        &app,
+        Method::POST,
+        "/api/compute/sql",
+        Some(json!({"query": recursive_query})),
+        Some(&token),
+    ).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["success"], false, "oversized result must be rejected: {body}");
+    assert!(body["error"].as_str().unwrap_or("").contains("row limit"));
+}
+
+#[tokio::test]
 async fn profiling_and_quality_reports() {
     let (app, _db) = test_app();
     let token = register(&app, &_db, "operator").await;
