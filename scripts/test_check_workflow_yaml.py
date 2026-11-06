@@ -38,8 +38,10 @@ ALERT_GATE_RUN = """
 gh api --paginate --jq 'select((.rule.security_severity_level // "") == "critical" or (.rule.security_severity_level // "") == "high") | [((.number // 0) | tostring), (.rule.security_severity_level // "unknown")] | @tsv' "repos/${GITHUB_REPOSITORY}/code-scanning/alerts?state=open&per_page=100&${filter}"
 if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
   alerts="$(fetch_alerts "ref=refs/pull/${PR_NUMBER}/merge")"
-else
+elif [[ "$GITHUB_REF_NAME" == "main" || "$GITHUB_REF_NAME" == "production-hardening" ]]; then
   alerts="$(fetch_alerts "ref=refs/heads/${GITHUB_REF_NAME}")"
+else
+  echo "Feature-branch pushes are checked against the PR merge ref; default-branch alert baseline is enforced on main and production-hardening."
 fi
 if [[ "$count" != "0" ]]; then
   exit 1
@@ -234,5 +236,30 @@ class WorkflowYamlGateTests(unittest.TestCase):
         self.assertFalse(validate_gate_contract(Path("workflow.yml"), workflow))
 
 
+    def test_alert_gate_limits_branch_baseline_to_release_branches(self):
+        workflow = _valid_workflow()
+        alert_step = workflow["jobs"]["security-required"]["steps"][-1]
+        self.assertIn(
+            'elif [[ "$GITHUB_REF_NAME" == "main" || "$GITHUB_REF_NAME" == "production-hardening" ]]; then',
+            alert_step["run"],
+        )
+        self.assertIn(
+            "Feature-branch pushes are checked against the PR merge ref",
+            alert_step["run"],
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
+
+    def test_alert_gate_limits_branch_baseline_to_release_branches(self):
+        workflow = _valid_workflow()
+        alert_step = workflow["jobs"]["security-required"]["steps"][-1]
+        self.assertIn(
+            'elif [[ "$GITHUB_REF_NAME" == "main" || "$GITHUB_REF_NAME" == "production-hardening" ]]; then',
+            alert_step["run"],
+        )
+        self.assertIn(
+            "Feature-branch pushes are checked against the PR merge ref",
+            alert_step["run"],
+        )
