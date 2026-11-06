@@ -695,14 +695,33 @@ async fn federation_search(State(state): State<AppState>, Query(params): Query<F
     ok_json(local)
 }
 
-async fn recommendations_datasets(State(state): State<AppState>, Path(object_id): Path<String>) -> Result<Json<Value>, ApiError> {
-    let datasets = state.db.list_objects(Some("dataset"), None, 5, 0).map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+async fn recommendations_datasets(
+    State(state): State<AppState>,
+    Extension(CurrentUser(user)): Extension<CurrentUser>,
+    Path(object_id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let datasets = if let Some(user) = user.as_ref().filter(|user| user.role != "admin") {
+        state.db.list_objects_for_owner(&user.id, Some("dataset"), None, 5, 0)
+    } else {
+        state.db.list_objects(Some("dataset"), None, 5, 0)
+    }.map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     ok_json(json!({"target_object_id": object_id, "recommended_datasets": datasets.into_iter().filter(|o| o.get("id").and_then(Value::as_str) != Some(object_id.as_str())).collect::<Vec<_>>()}))
 }
 
-async fn recommendations_connections(State(state): State<AppState>, Path(object_id): Path<String>) -> Result<Json<Value>, ApiError> {
-    let relationships = state.db.list_relationships(Some(&object_id), None, None, 0.0, 10, 0).map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    ok_json(json!({"target_object_id": object_id, "recommendations": relationships}))
+async fn recommendations_connections(
+    State(state): State<AppState>,
+    Extension(CurrentUser(user)): Extension<CurrentUser>,
+    Path(object_id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let relationships = state.db.list_relationships(Some(&object_id), None, None, 0.0, 10, 0)
+        .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let mut visible = Vec::new();
+    for relation in relationships {
+        if relationship_visible_to_user(state.db.as_ref(), &relation, user.as_ref())? {
+            visible.push(relation);
+        }
+    }
+    ok_json(json!({"target_object_id": object_id, "recommendations": visible}))
 }
 
 async fn fallback_route() -> (StatusCode, Json<Value>) {
@@ -934,7 +953,19 @@ async fn create_relationship(
     ok_json(rel)
 }
 
-fn lineage_response(state: &Db, object_id: &str, upstream: bool) -> Result<Value, ApiError> {
+fn relationship_visible_to_user(state: &Db, relation: &Value, user: Option<&User>) -> Result<bool, ApiError> {
+    let Some(user) = user else { return Ok(true) };
+    if user.role == "admin" { return Ok(true); }
+    let Some(source) = relation.get("source").and_then(Value::as_str) else { return Ok(false) };
+    let Some(target) = relation.get("target").and_then(Value::as_str) else { return Ok(false) };
+    if !state.can_access_object(source, &user.id, false).map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e))? {
+        return Ok(false);
+    }
+    state.can_access_object(target, &user.id, false)
+        .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e))
+}
+
+fn lineage_response(state: &Db, object_id: &str, upstream: bool, user: Option<&User>) -> Result<Value, ApiError> {
     let relationships = state.list_relationships(
         if upstream { None } else { Some(object_id) },
         if upstream { Some(object_id) } else { None },
@@ -944,7 +975,13 @@ fn lineage_response(state: &Db, object_id: &str, upstream: bool) -> Result<Value
         0,
     ).map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     let lineage_types = ["derived_from", "transforms_to", "reads_from", "produces", "depends_on"];
-    let edges: Vec<Value> = relationships.into_iter().filter(|rel| rel.get("relation_type").and_then(Value::as_str).map(|kind| lineage_types.contains(&kind)).unwrap_or(false)).collect();
+    let mut edges = Vec::new();
+    for rel in relationships {
+        if !relationship_visible_to_user(state, &rel, user)? { continue; }
+        if rel.get("relation_type").and_then(Value::as_str).map(|kind| lineage_types.contains(&kind)).unwrap_or(false) {
+            edges.push(rel);
+        }
+    }
     Ok(json!({
         "object_id": object_id,
         "direction": if upstream { "upstream" } else { "downstream" },
@@ -953,19 +990,32 @@ fn lineage_response(state: &Db, object_id: &str, upstream: bool) -> Result<Value
     }))
 }
 
-async fn why_object(State(state): State<AppState>, Path(object_id): Path<String>) -> Result<Json<Value>, ApiError> {
+async fn why_object(
+    State(state): State<AppState>,
+    Extension(CurrentUser(user)): Extension<CurrentUser>,
+    Path(object_id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
     state.db.get_object(&object_id).map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?
         .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "Object not found"))?;
-    ok_json(lineage_response(state.db.as_ref(), &object_id, true)?)
+    ok_json(lineage_response(state.db.as_ref(), &object_id, true, user.as_ref())?)
 }
 
-async fn impact_object(State(state): State<AppState>, Path(object_id): Path<String>) -> Result<Json<Value>, ApiError> {
+async fn impact_object(
+    State(state): State<AppState>,
+    Extension(CurrentUser(user)): Extension<CurrentUser>,
+    Path(object_id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
     state.db.get_object(&object_id).map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?
         .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "Object not found"))?;
-    ok_json(lineage_response(state.db.as_ref(), &object_id, false)?)
+    ok_json(lineage_response(state.db.as_ref(), &object_id, false, user.as_ref())?)
 }
 
-async fn neighbors(State(state): State<AppState>, Path(object_id): Path<String>, Query(direction): Query<HashMap<String, String>>) -> Result<Json<Value>, ApiError> {
+async fn neighbors(
+    State(state): State<AppState>,
+    Extension(CurrentUser(user)): Extension<CurrentUser>,
+    Path(object_id): Path<String>,
+    Query(direction): Query<HashMap<String, String>>,
+) -> Result<Json<Value>, ApiError> {
     let direction = direction.get("direction").map(String::as_str).unwrap_or("both");
     let mut rels = Vec::new();
     if matches!(direction, "both" | "outgoing") {
@@ -983,6 +1033,12 @@ async fn neighbors(State(state): State<AppState>, Path(object_id): Path<String>,
             rel.get("source").and_then(Value::as_str).unwrap_or_default().to_string()
         };
         if neighbor_id.is_empty() || !seen.insert(neighbor_id.clone()) { continue; }
+        if let Some(user) = user.as_ref() {
+            if !state.db.can_access_object(&neighbor_id, &user.id, user.role == "admin")
+                .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e))? {
+                continue;
+            }
+        }
         match state.db.get_object(&neighbor_id) {
             Ok(Some(object)) => neighbors.push(json!({
                 "id": neighbor_id,
