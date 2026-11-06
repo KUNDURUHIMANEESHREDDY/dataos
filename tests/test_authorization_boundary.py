@@ -13,10 +13,12 @@ from core.permissions.auth import UserStore, issue_jwt
 from core.permissions.policy import Role
 
 
-def _request(path: str, method: str = "GET", authorization_header: str | None = None) -> Request:
+def _request(path: str, method: str = "GET", authorization_header: str | None = None, cookie: str | None = None) -> Request:
     headers = []
     if authorization_header is not None:
         headers.append((b"authorization", authorization_header.encode("utf-8")))
+    if cookie is not None:
+        headers.append((b"cookie", cookie.encode("latin-1")))
     return Request({
         "type": "http",
         "http_version": "1.1",
@@ -55,6 +57,32 @@ def test_production_accepts_valid_user_jwt(monkeypatch):
     monkeypatch.setenv("DATAOS_JWT_SECRET", "j" * 48)
     token = issue_jwt("user-1", Role.VIEWER.value)
     assert require_production_api_token(_request("/api/objects/"), authorization=f"Bearer {token}") is None
+
+
+def test_production_accepts_login_and_registration_before_authentication(monkeypatch):
+    monkeypatch.setenv("DATAOS_ENV", "production")
+    monkeypatch.delenv("DATAOS_API_TOKEN", raising=False)
+    monkeypatch.delenv("DATAOS_JWT_SECRET", raising=False)
+    assert require_production_api_token(_request("/api/auth/login", "POST")) is None
+    assert require_production_api_token(_request("/api/auth/register", "POST")) is None
+
+
+def test_production_accepts_a_valid_jwt_session_cookie(monkeypatch):
+    monkeypatch.setenv("DATAOS_ENV", "production")
+    monkeypatch.delenv("DATAOS_API_TOKEN", raising=False)
+    monkeypatch.setenv("DATAOS_JWT_SECRET", "c" * 48)
+    token = issue_jwt("cookie-user", Role.VIEWER.value)
+    request = _request("/api/objects/", cookie=f"dataos_session={token}")
+    assert require_production_api_token(request) is None
+
+
+def test_production_rejects_missing_user_session_when_jwt_is_configured(monkeypatch):
+    monkeypatch.setenv("DATAOS_ENV", "production")
+    monkeypatch.delenv("DATAOS_API_TOKEN", raising=False)
+    monkeypatch.setenv("DATAOS_JWT_SECRET", "j" * 48)
+    with pytest.raises(HTTPException) as exc:
+        require_production_api_token(_request("/api/objects/"))
+    assert exc.value.status_code == 401
 
 
 def _asgi_status(method: str, path: str, headers: dict | None = None):
