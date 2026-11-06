@@ -18,7 +18,7 @@ export default function DataspaceLayout({ children }: { children: ReactNode }) {
 
     api.authMe().then((session) => {
       if (!active) return;
-      if (!session?.authenticated) {
+      if (!session?.authenticated && !String(session?.detail || "").includes("JWT auth is not configured")) {
         router.replace("/login?next=%2Fdataspace");
         return;
       }
