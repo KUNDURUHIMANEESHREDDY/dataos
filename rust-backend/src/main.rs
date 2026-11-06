@@ -129,8 +129,15 @@ fn resource_id_for_path(path: &str) -> Option<&str> {
         ["api", "time_travel", "object", id] if !id.is_empty() => Some(id),
         ["api", "provenance", "lineage", id] if !id.is_empty() => Some(id),
         ["api", "profiling" | "quality", id] if !id.is_empty() => Some(id),
-        ["api", "governance", "quota", id] if !id.is_empty() => Some(id),
         ["api", "recommendations", "datasets" | "connections", id] if !id.is_empty() => Some(id),
+        _ => None,
+    }
+}
+
+fn principal_id_for_path(path: &str) -> Option<&str> {
+    let segments: Vec<&str> = path.trim_matches('/').split('/').collect();
+    match segments.as_slice() {
+        ["api", "governance", "quota", principal_id] if !principal_id.is_empty() => Some(principal_id),
         _ => None,
     }
 }
@@ -140,6 +147,7 @@ fn is_global_data_route(path: &str) -> bool {
         "/api/catalog/health" |
         "/api/graph/analytics" |
         "/api/time_travel/graph" |
+        "/api/time_travel/changes" |
         "/api/io/export" |
         "/api/governance/duplicates" |
         "/api/federation/search" |
@@ -220,6 +228,11 @@ async fn security_middleware(
         }
         if current_user.role != "admin" && is_global_data_route(&path) {
             return json_error_response(StatusCode::FORBIDDEN, "This aggregate or export endpoint is restricted until principal-scoped query support is enabled.");
+        }
+        if let Some(principal_id) = principal_id_for_path(&path) {
+            if current_user.role != "admin" && principal_id != current_user.id {
+                return json_error_response(StatusCode::NOT_FOUND, "Principal not found.");
+            }
         }
         if let Some(object_id) = resource_id_for_path(&path) {
             let allowed = state.db.can_access_object(object_id, &current_user.id, current_user.role == "admin").unwrap_or(false);
