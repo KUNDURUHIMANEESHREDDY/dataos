@@ -151,11 +151,17 @@ jobs:
           languages: python
           build-mode: none
       - uses: github/codeql-action/analyze@v4
+      - name: Stage exact-head CodeQL SARIF inside the workspace
+        run: |
+          set -euo pipefail
+          test -s ../results/python.sarif
+          mkdir -p codeql-artifacts
+          cp ../results/python.sarif codeql-artifacts/python.sarif
       - name: Preserve exact-head CodeQL SARIF for the release gate
         uses: actions/upload-artifact@v7
         with:
           name: dataos-codeql-sarif-${{ github.run_id }}
-          path: ../results/python.sarif
+          path: codeql-artifacts/python.sarif
           if-no-files-found: error
           retention-days: 7
 
