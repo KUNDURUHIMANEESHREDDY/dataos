@@ -171,12 +171,21 @@ class CapabilityMiddleware:
             return
 
         headers = {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope.get("headers", [])}
-        authorization = headers.get("authorization")
-        if not authorization or not authorization.lower().startswith("bearer "):
-            await _error_response(send, 401, "A bearer token is required.")
+        authorization = headers.get("authorization", "")
+        token = authorization[7:].strip() if authorization.lower().startswith("bearer ") else ""
+        if not token:
+            # Browser clients use the HttpOnly session cookie; non-browser clients
+            # may continue to send an explicit Bearer token.
+            for part in headers.get("cookie", "").split(";"):
+                name, separator, value = part.strip().partition("=")
+                if separator and name == "dataos_session":
+                    token = value.strip()
+                    break
+        if not token:
+            await _error_response(send, 401, "A bearer token or session cookie is required.")
             return
         try:
-            payload = decode_jwt(authorization[7:].strip())
+            payload = decode_jwt(token)
             user = _get_user_store().get_by_id(payload.get("sub", ""))
         except (ValueError, RuntimeError) as exc:
             await _error_response(send, 401, str(exc))

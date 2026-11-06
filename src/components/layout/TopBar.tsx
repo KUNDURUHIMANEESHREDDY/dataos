@@ -1,5 +1,8 @@
 "use client";
 
+import { useState } from "react";
+import { useRouter } from "next/navigation";
+import { api } from "@/lib/api";
 import { useSpatialStore } from "@/hooks/useSpatialStore";
 
 const TYPE_ICONS: Record<string, string> = {
@@ -12,6 +15,9 @@ const TYPE_ICONS: Record<string, string> = {
 };
 
 export default function TopBar() {
+  const router = useRouter();
+  const [signingOut, setSigningOut] = useState(false);
+  const [signOutError, setSignOutError] = useState<string | null>(null);
   const setCommandPaletteOpen = useSpatialStore((s) => s.setCommandPaletteOpen);
   const setChatOpen = useSpatialStore((s) => s.setChatOpen);
   const viewMode = useSpatialStore((s) => s.viewMode);
@@ -63,6 +69,29 @@ export default function TopBar() {
 
       {/* Right controls */}
       <div className="flex items-center gap-1 shrink-0">
+        <div className="flex flex-col items-end">
+          <button
+            type="button"
+            disabled={signingOut}
+            onClick={async () => {
+              setSigningOut(true);
+              setSignOutError(null);
+              try {
+                await api.logout();
+                router.replace("/login");
+                router.refresh();
+              } catch (cause) {
+                setSignOutError(cause instanceof Error ? cause.message : "Unable to sign out.");
+              } finally {
+                setSigningOut(false);
+              }
+            }}
+            className="rounded-md px-2 py-1.5 text-xs font-medium text-[var(--color-text-secondary)] transition hover:bg-[rgba(0,0,0,0.05)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--color-entity)] disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            {signingOut ? "Signing out…" : "Sign out"}
+          </button>
+          {signOutError && <span role="alert" className="absolute right-3 top-12 max-w-xs rounded-md bg-red-50 px-2 py-1 text-[10px] text-red-700">{signOutError}</span>}
+        </div>
         {/* Stats pill */}
         <div className="hidden lg:flex items-center gap-2 text-[10px] font-mono text-[var(--color-text-tertiary)] px-2 py-1 rounded-md bg-[rgba(0,0,0,0.03)] mr-1">
           <span>{objects_count} obj</span>

@@ -175,6 +175,16 @@ fn value_ref_to_json(value: ValueRef<'_>) -> Value {
 }
 
 pub fn execute_sql(query: &str, db: &Db) -> Value {
+    execute_sql_scoped(query, db, None)
+}
+
+/// Execute a read-only query against only the datasets owned by one principal.
+/// This is used by user-scoped workflows; global SQL remains an admin-only route.
+pub fn execute_sql_for_owner(query: &str, db: &Db, owner_id: &str) -> Value {
+    execute_sql_scoped(query, db, Some(owner_id))
+}
+
+fn execute_sql_scoped(query: &str, db: &Db, owner_id: Option<&str>) -> Value {
     if !is_read_only(query) {
         return json!({
             "success": false,
@@ -189,7 +199,7 @@ pub fn execute_sql(query: &str, db: &Db) -> Value {
         });
     }
 
-    match execute_sql_inner(query, db) {
+    match execute_sql_inner(query, db, owner_id) {
         Ok(value) => value,
         Err(error) => json!({
             "success": false,
@@ -205,9 +215,13 @@ pub fn execute_sql(query: &str, db: &Db) -> Value {
     }
 }
 
-fn execute_sql_inner(query: &str, db: &Db) -> Result<Value, String> {
+fn execute_sql_inner(query: &str, db: &Db, owner_id: Option<&str>) -> Result<Value, String> {
     let start = std::time::Instant::now();
-    let datasets = db.list_objects(Some("dataset"), None, 100, 0)?;
+    let datasets = if let Some(owner_id) = owner_id {
+        db.list_objects_for_owner(owner_id, Some("dataset"), None, 100, 0)?
+    } else {
+        db.list_objects(Some("dataset"), None, 100, 0)?
+    };
     let conn = Connection::open_in_memory().map_err(|e| e.to_string())?;
     let mut registered_tables = Vec::new();
     let mut source_object_ids = Vec::new();

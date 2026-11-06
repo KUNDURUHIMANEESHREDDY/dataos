@@ -13,6 +13,7 @@ use axum::{
     Json,
     extract::{Path, Query, State},
     http::StatusCode,
+    Extension,
 };
 use chrono::{Duration, Utc};
 use hmac::{Hmac, Mac};
@@ -21,7 +22,7 @@ use serde_json::{Map, Value, json};
 use sha2::Sha256;
 
 use crate::sql_engine;
-use crate::{AppState, ApiError, clamp_i64, search_objects};
+use crate::{AppState, ApiError, CurrentUser, clamp_i64, search_objects};
 use base64::Engine as _;
 
 const DERIVATION_TYPES: &[&str] = &["derived_from", "transforms_to", "reads_from", "produces"];
@@ -57,6 +58,21 @@ fn rel_side<'a>(rel: &'a Value, curr: &str) -> Option<&'a str> {
     } else {
         None
     }
+}
+
+fn relationship_visible_to(
+    db: &crate::db::Db,
+    relation: &Value,
+    user: Option<&crate::auth::User>,
+) -> Result<bool, ApiError> {
+    let Some(user) = user else { return Ok(true) };
+    if user.role == "admin" { return Ok(true); }
+    let Some(source) = relation.get("source").and_then(Value::as_str) else { return Ok(false) };
+    let Some(target) = relation.get("target").and_then(Value::as_str) else { return Ok(false) };
+    if !db.can_access_object(source, &user.id, false).map_err(internal)? {
+        return Ok(false);
+    }
+    db.can_access_object(target, &user.id, false).map_err(internal)
 }
 
 // ---------------------------------------------------------------------------
@@ -162,6 +178,7 @@ pub struct TraverseParams {
 
 pub(crate) async fn traverse(
     State(state): State<AppState>,
+    Extension(CurrentUser(user)): Extension<CurrentUser>,
     Path(root_id): Path<String>,
     Query(params): Query<TraverseParams>,
 ) -> Result<Json<Value>, ApiError> {
@@ -219,6 +236,9 @@ pub(crate) async fn traverse(
         }
 
         for relation in relations {
+            if !relationship_visible_to(state.db.as_ref(), &relation, user.as_ref())? {
+                continue;
+            }
             let Some(neighbor) = rel_side(&relation, &curr).map(str::to_string) else {
                 continue;
             };
@@ -397,18 +417,19 @@ pub struct LineageParams {
 
 pub(crate) async fn lineage(
     State(state): State<AppState>,
+    Extension(CurrentUser(user)): Extension<CurrentUser>,
     Path(object_id): Path<String>,
     Query(params): Query<LineageParams>,
 ) -> Result<Json<Value>, ApiError> {
     let max_depth = clamp_i64(params.max_depth, 10, 1, 50);
     if params.direction.as_deref().unwrap_or("upstream") == "upstream" {
-        upstream_lineage(&state, &object_id, max_depth)
+        upstream_lineage(&state, &object_id, max_depth, user.as_ref())
     } else {
-        downstream_impact(&state, &object_id, max_depth)
+        downstream_impact(&state, &object_id, max_depth, user.as_ref())
     }
 }
 
-fn upstream_lineage(state: &AppState, object_id: &str, max_depth: i64) -> Result<Json<Value>, ApiError> {
+fn upstream_lineage(state: &AppState, object_id: &str, max_depth: i64, user: Option<&crate::auth::User>) -> Result<Json<Value>, ApiError> {
     let mut visited: HashSet<String> = HashSet::new();
     visited.insert(object_id.to_string());
     let mut queue: VecDeque<(String, i64)> = VecDeque::new();
@@ -421,14 +442,16 @@ fn upstream_lineage(state: &AppState, object_id: &str, max_depth: i64) -> Result
         if depth >= max_depth {
             continue;
         }
-        let incoming = state
-            .db
-            .list_relationships(None, Some(&curr), None, 0.0, 5000, 0)
-            .map_err(internal)?;
-        let outgoing = state
-            .db
-            .list_relationships(Some(&curr), None, None, 0.0, 5000, 0)
-            .map_err(internal)?;
+        let incoming_raw = state.db.list_relationships(None, Some(&curr), None, 0.0, 5000, 0).map_err(internal)?;
+        let outgoing_raw = state.db.list_relationships(Some(&curr), None, None, 0.0, 5000, 0).map_err(internal)?;
+        let mut incoming = Vec::new();
+        let mut outgoing = Vec::new();
+        for relation in incoming_raw {
+            if relationship_visible_to(state.db.as_ref(), &relation, user)? { incoming.push(relation); }
+        }
+        for relation in outgoing_raw {
+            if relationship_visible_to(state.db.as_ref(), &relation, user)? { outgoing.push(relation); }
+        }
 
         let mut parents: Vec<String> = Vec::new();
         let mut seen: HashSet<String> = HashSet::new();
@@ -484,7 +507,7 @@ fn upstream_lineage(state: &AppState, object_id: &str, max_depth: i64) -> Result
     })))
 }
 
-fn downstream_impact(state: &AppState, object_id: &str, max_depth: i64) -> Result<Json<Value>, ApiError> {
+fn downstream_impact(state: &AppState, object_id: &str, max_depth: i64, user: Option<&crate::auth::User>) -> Result<Json<Value>, ApiError> {
     let mut visited: HashSet<String> = HashSet::new();
     visited.insert(object_id.to_string());
     let mut queue: VecDeque<(String, i64)> = VecDeque::new();
@@ -496,11 +519,9 @@ fn downstream_impact(state: &AppState, object_id: &str, max_depth: i64) -> Resul
         if depth >= max_depth {
             continue;
         }
-        let relations = state
-            .db
-            .list_relationships(Some(&curr), None, None, 0.0, 5000, 0)
-            .map_err(internal)?;
+        let relations = state.db.list_relationships(Some(&curr), None, None, 0.0, 5000, 0).map_err(internal)?;
         for relation in relations {
+            if !relationship_visible_to(state.db.as_ref(), &relation, user)? { continue; }
             let kind = relation.get("relation_type").and_then(Value::as_str).unwrap_or("");
             if !DOWNSTREAM_TYPES.contains(&kind) {
                 continue;
@@ -711,6 +732,7 @@ fn check(name: &str, passed: bool, severity: &str, message: String, details: Val
 
 pub(crate) async fn quality(
     State(state): State<AppState>,
+    Extension(CurrentUser(user)): Extension<CurrentUser>,
     Path(object_id): Path<String>,
     Json(request): Json<QualityRequest>,
 ) -> Result<Json<Value>, ApiError> {
@@ -734,25 +756,35 @@ pub(crate) async fn quality(
         .filter(|entry| entry.get("passed").and_then(Value::as_bool).unwrap_or(false))
         .count();
     let failed_checks = total_checks - passed_checks;
-    let report = state
-        .db
-        .create_object(
+    let report_properties = json!({
+        "target_object_id": object_id,
+        "overall_pass": failed_checks == 0,
+        "quality_score": round4(passed_checks as f64 / total_checks.max(1) as f64 * 100.0),
+        "total_checks": total_checks,
+        "passed_checks": passed_checks,
+        "failed_checks": failed_checks,
+        "evaluated_at": now_rfc3339()
+    });
+    let report = if let Some(user) = user {
+        state.db.create_object_for_owner(
             "quality_report",
             "quality_report.v1",
-            json!({
-                "target_object_id": object_id,
-                "overall_pass": failed_checks == 0,
-                "quality_score": round4(passed_checks as f64 / total_checks.max(1) as f64 * 100.0),
-                "total_checks": total_checks,
-                "passed_checks": passed_checks,
-                "failed_checks": failed_checks,
-                "evaluated_at": now_rfc3339()
-            }),
+            report_properties,
+            json!({"checks": checks}),
+            "dataos://engine/quality",
+            json!({}),
+            &user.id,
+        )
+    } else {
+        state.db.create_object(
+            "quality_report",
+            "quality_report.v1",
+            report_properties,
             json!({"checks": checks}),
             "dataos://engine/quality",
             json!({}),
         )
-        .map_err(internal)?;
+    }.map_err(internal)?;
     Ok(Json(report))
 }
 
@@ -1144,6 +1176,7 @@ pub struct KnowledgeQueryRequest {
 
 pub(crate) async fn knowledge_query(
     State(state): State<AppState>,
+    Extension(CurrentUser(user)): Extension<CurrentUser>,
     Json(request): Json<KnowledgeQueryRequest>,
 ) -> Result<Json<Value>, ApiError> {
     let unprocessable =
@@ -1171,6 +1204,12 @@ pub(crate) async fn knowledge_query(
     let mut selected: HashMap<String, Value> = HashMap::new();
     let mut missing: Vec<String> = Vec::new();
     for file_id in &selected_ids {
+        if let Some(user) = user.as_ref() {
+            if !state.db.can_access_object(file_id, &user.id, user.role == "admin").map_err(internal)? {
+                missing.push(file_id.clone());
+                continue;
+            }
+        }
         match state.db.get_object(file_id).map_err(internal)? {
             Some(object) => {
                 selected.insert(file_id.clone(), object);
@@ -1201,6 +1240,9 @@ pub(crate) async fn knowledge_query(
                 .list_relationships(None, Some(file_id), None, 0.0, 5000, 0)
                 .map_err(internal)?;
             for relation in outgoing.into_iter().chain(incoming) {
+                if !relationship_visible_to(state.db.as_ref(), &relation, user.as_ref())? {
+                    continue;
+                }
                 let key = format!(
                     "{}|{}|{}|{}",
                     relation.get("id").and_then(Value::as_str).unwrap_or(""),
@@ -1395,6 +1437,7 @@ fn py_str_short(value: &Value) -> String {
 
 pub(crate) async fn pipeline_research(
     State(state): State<AppState>,
+    Extension(CurrentUser(user)): Extension<CurrentUser>,
     Json(request): Json<ResearchPipelineRequest>,
 ) -> Result<Json<Value>, ApiError> {
     if request.goal_prompt.trim().is_empty() {
@@ -1410,6 +1453,17 @@ pub(crate) async fn pipeline_research(
         ));
     }
 
+    if let Some(user) = user.as_ref() {
+        let allowed = state.db.can_access_object(
+            &request.target_dataset_id,
+            &user.id,
+            user.role == "admin",
+        ).map_err(internal)?;
+        if !allowed {
+            return Err(ApiError::new(StatusCode::NOT_FOUND, "Dataset not found."));
+        }
+    }
+
     let started = Instant::now();
     let pipeline_id = format!(
         "pipeline_{}",
@@ -1419,11 +1473,18 @@ pub(crate) async fn pipeline_research(
 
     // Stage 1 — research agent: search for contextual objects.
     let stage_started = Instant::now();
-    let search_result = search_objects(&state.db, &request.goal_prompt, 5);
-    let found_objects = search_result
-        .get("total_matches")
-        .and_then(Value::as_u64)
-        .unwrap_or(0);
+    let found_objects = if let Some(user) = user.as_ref().filter(|user| user.role != "admin") {
+        let owned = state.db.list_objects_for_owner(&user.id, None, None, 1000, 0).map_err(internal)?;
+        let needle = request.goal_prompt.trim().to_lowercase();
+        owned.iter().filter(|object| {
+            serde_json::to_string(object).unwrap_or_default().to_lowercase().contains(&needle)
+        }).count() as u64
+    } else {
+        search_objects(&state.db, &request.goal_prompt, 5)
+            .get("total_matches")
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+    };
     stages.push(json!({
         "stage": 1,
         "agent": "agent_research",
@@ -1442,11 +1503,20 @@ pub(crate) async fn pipeline_research(
         ));
     }
     let stage_started = Instant::now();
-    let compute_result = sql_engine::execute_sql(&request.analysis_sql_or_python, &state.db);
+    let compute_result = if let Some(user) = user.as_ref().filter(|user| user.role != "admin") {
+        sql_engine::execute_sql_for_owner(&request.analysis_sql_or_python, &state.db, &user.id)
+    } else {
+        sql_engine::execute_sql(&request.analysis_sql_or_python, &state.db)
+    };
     let compute_success = compute_result
         .get("success")
         .and_then(Value::as_bool)
         .unwrap_or(false);
+    if !compute_success {
+        let detail = compute_result.get("error").and_then(Value::as_str)
+            .unwrap_or("The requested analysis could not be executed.");
+        return Err(ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, detail));
+    }
     stages.push(json!({
         "stage": 2,
         "agent": "agent_analysis",
@@ -1475,25 +1545,27 @@ pub(crate) async fn pipeline_research(
                 .count();
             let total = checks.len();
             quality_pass = failed == 0;
-            state
-                .db
-                .create_object(
-                    "quality_report",
-                    "quality_report.v1",
-                    json!({
-                        "target_object_id": request.target_dataset_id,
-                        "overall_pass": quality_pass,
-                        "quality_score": round4((total - failed) as f64 / total.max(1) as f64 * 100.0),
-                        "total_checks": total,
-                        "passed_checks": total - failed,
-                        "failed_checks": failed,
-                        "evaluated_at": now_rfc3339()
-                    }),
-                    json!({"checks": checks}),
-                    "dataos://engine/quality",
-                    json!({}),
-                )
-                .map_err(internal)?;
+            let properties = json!({
+                "target_object_id": request.target_dataset_id,
+                "overall_pass": quality_pass,
+                "quality_score": round4((total - failed) as f64 / total.max(1) as f64 * 100.0),
+                "total_checks": total,
+                "passed_checks": total - failed,
+                "failed_checks": failed,
+                "evaluated_at": now_rfc3339()
+            });
+            let content = json!({"checks": checks});
+            if let Some(user) = user.as_ref() {
+                state.db.create_object_for_owner(
+                    "quality_report", "quality_report.v1", properties, content,
+                    "dataos://engine/quality", json!({}), &user.id,
+                ).map_err(internal)?;
+            } else {
+                state.db.create_object(
+                    "quality_report", "quality_report.v1", properties, content,
+                    "dataos://engine/quality", json!({}),
+                ).map_err(internal)?;
+            }
         }
     }
     stages.push(json!({
@@ -1526,25 +1598,27 @@ pub(crate) async fn pipeline_research(
     let prompt_tokens = prompt.split_whitespace().count() + 10;
     let completion_tokens = summary.split_whitespace().count();
 
-    let report = state
-        .db
-        .create_object(
-            "report",
-            "report.v1",
-            json!({
-                "pipeline_id": pipeline_id,
-                "goal": request.goal_prompt,
-                "target_dataset_id": request.target_dataset_id,
-                "quality_pass": quality_pass,
-                "ai_model": "dataos_deterministic_v1",
-                "total_tokens": prompt_tokens + completion_tokens,
-                "cost_usd": 0.0
-            }),
-            json!(summary),
-            &format!("dataos://pipeline/{pipeline_id}/report"),
-            json!({}),
+    let report_properties = json!({
+        "pipeline_id": pipeline_id,
+        "goal": request.goal_prompt,
+        "target_dataset_id": request.target_dataset_id,
+        "quality_pass": quality_pass,
+        "ai_model": "dataos_deterministic_v1",
+        "total_tokens": prompt_tokens + completion_tokens,
+        "cost_usd": 0.0
+    });
+    let report_source = format!("dataos://pipeline/{pipeline_id}/report");
+    let report = if let Some(user) = user.as_ref() {
+        state.db.create_object_for_owner(
+            "report", "report.v1", report_properties, json!(summary),
+            &report_source, json!({}), &user.id,
         )
-        .map_err(internal)?;
+    } else {
+        state.db.create_object(
+            "report", "report.v1", report_properties, json!(summary),
+            &report_source, json!({}),
+        )
+    }.map_err(internal)?;
     let report_id = report
         .get("id")
         .and_then(Value::as_str)
@@ -2399,16 +2473,18 @@ pub(crate) async fn agents_execute(
 
 pub(crate) async fn notebooks_ingest(
     State(state): State<AppState>,
+    Extension(CurrentUser(user)): Extension<CurrentUser>,
     fields: crate::FormFields,
 ) -> Result<Json<Value>, ApiError> {
-    ingest_with_default_filename(state, fields, "analysis.ipynb", "notebook")
+    ingest_with_default_filename(state, fields, "analysis.ipynb", "notebook", user.as_ref().map(|principal| principal.id.as_str()))
 }
 
 pub(crate) async fn documents_extract_rich(
     State(state): State<AppState>,
+    Extension(CurrentUser(user)): Extension<CurrentUser>,
     fields: crate::FormFields,
 ) -> Result<Json<Value>, ApiError> {
-    ingest_with_default_filename(state, fields, "paper.md", "document")
+    ingest_with_default_filename(state, fields, "paper.md", "document", user.as_ref().map(|principal| principal.id.as_str()))
 }
 
 fn ingest_with_default_filename(
@@ -2416,6 +2492,7 @@ fn ingest_with_default_filename(
     fields: crate::FormFields,
     default_filename: &str,
     default_type: &str,
+    owner_id: Option<&str>,
 ) -> Result<Json<Value>, ApiError> {
     let fields = fields.0;
     let mut filename = fields
@@ -2455,9 +2532,18 @@ fn ingest_with_default_filename(
         properties["extracted_citations"] = json!(citations);
     }
 
-    let stored = state
-        .db
-        .create_object(
+    let stored = if let Some(owner_id) = owner_id {
+        state.db.create_object_for_owner(
+            object_type,
+            "generic.v1",
+            properties,
+            Value::String(content),
+            "api://rust-ingest",
+            json!({}),
+            owner_id,
+        )
+    } else {
+        state.db.create_object(
             object_type,
             "generic.v1",
             properties,
@@ -2465,7 +2551,7 @@ fn ingest_with_default_filename(
             "api://rust-ingest",
             json!({}),
         )
-        .map_err(internal)?;
+    }.map_err(internal)?;
 
     Ok(Json(json!({
         "status": "ok",

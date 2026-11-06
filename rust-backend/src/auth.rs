@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 pub const JWT_SECRET_ENV: &str = "DATAOS_JWT_SECRET";
 pub const MIN_SECRET_BYTES: usize = 32;
-const DEFAULT_TTL_SECONDS: i64 = 3600;
+pub const DEFAULT_TTL_SECONDS: i64 = 3600;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Claims {

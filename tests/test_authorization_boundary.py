@@ -8,15 +8,17 @@ import pytest
 from fastapi import HTTPException, Request
 
 import backend.authorization as authorization
-from backend.app import require_production_api_token
+from backend.app import get_current_user, require_production_api_token
 from core.permissions.auth import UserStore, issue_jwt
 from core.permissions.policy import Role
 
 
-def _request(path: str, method: str = "GET", authorization_header: str | None = None) -> Request:
+def _request(path: str, method: str = "GET", authorization_header: str | None = None, cookie: str | None = None) -> Request:
     headers = []
     if authorization_header is not None:
         headers.append((b"authorization", authorization_header.encode("utf-8")))
+    if cookie is not None:
+        headers.append((b"cookie", cookie.encode("latin-1")))
     return Request({
         "type": "http",
         "http_version": "1.1",
@@ -57,6 +59,37 @@ def test_production_accepts_valid_user_jwt(monkeypatch):
     assert require_production_api_token(_request("/api/objects/"), authorization=f"Bearer {token}") is None
 
 
+def test_production_accepts_login_and_registration_before_authentication(monkeypatch):
+    monkeypatch.setenv("DATAOS_ENV", "production")
+    monkeypatch.delenv("DATAOS_API_TOKEN", raising=False)
+    monkeypatch.delenv("DATAOS_JWT_SECRET", raising=False)
+    assert require_production_api_token(_request("/api/auth/login", "POST")) is None
+    assert require_production_api_token(_request("/api/auth/register", "POST")) is None
+
+
+def test_production_accepts_a_valid_jwt_session_cookie(monkeypatch):
+    monkeypatch.setenv("DATAOS_ENV", "production")
+    monkeypatch.delenv("DATAOS_API_TOKEN", raising=False)
+    monkeypatch.setenv("DATAOS_JWT_SECRET", "c" * 48)
+    token = issue_jwt("cookie-user", Role.VIEWER.value)
+    request = _request("/api/objects/", cookie=f"dataos_session={token}")
+    assert require_production_api_token(request) is None
+
+
+def test_get_current_user_defaults_missing_header_to_none(monkeypatch):
+    monkeypatch.setenv("DATAOS_JWT_SECRET", "u" * 48)
+    assert asyncio.run(get_current_user(_request("/api/objects/"))) is None
+
+
+def test_production_rejects_missing_user_session_when_jwt_is_configured(monkeypatch):
+    monkeypatch.setenv("DATAOS_ENV", "production")
+    monkeypatch.delenv("DATAOS_API_TOKEN", raising=False)
+    monkeypatch.setenv("DATAOS_JWT_SECRET", "j" * 48)
+    with pytest.raises(HTTPException) as exc:
+        require_production_api_token(_request("/api/objects/"))
+    assert exc.value.status_code == 401
+
+
 def _asgi_status(method: str, path: str, headers: dict | None = None):
     messages = []
     scope = {
@@ -81,6 +114,21 @@ def _asgi_status(method: str, path: str, headers: dict | None = None):
 
     asyncio.run(run_middleware())
     return next(m["status"] for m in messages if m["type"] == "http.response.start")
+
+
+def test_jwt_middleware_accepts_httponly_session_cookie(monkeypatch, tmp_path):
+    monkeypatch.setenv("DATAOS_JWT_SECRET", "s" * 48)
+    store = UserStore(db_path=str(tmp_path / "cookie-auth.db"))
+    try:
+        user = store.register("cookie-viewer", "cookie-viewer@example.com", "password123", role=Role.VIEWER.value)
+        token = issue_jwt(user.id, user.role)
+        monkeypatch.setattr(authorization, "_user_store", store)
+        cookie_headers = {"cookie": f"dataos_session={token}"}
+        assert _asgi_status("GET", "/api/objects/", cookie_headers) == 204
+        assert _asgi_status("POST", "/api/objects/", cookie_headers) == 403
+        assert _asgi_status("GET", "/api/objects/") == 401
+    finally:
+        store.close()
 
 
 def test_jwt_middleware_enforces_role_capabilities(monkeypatch, tmp_path):

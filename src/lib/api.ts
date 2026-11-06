@@ -2,19 +2,41 @@ import { mergeApiHeaders } from "./api-headers.mjs";
 
 const API_BASE = "";
 
+export class ApiError extends Error {
+  constructor(public readonly status: number, message: string) {
+    super(message);
+    this.name = "ApiError";
+  }
+}
+
 async function apiFetch(path: string, options?: RequestInit): Promise<any> {
   const res = await fetch(`${API_BASE}${path}`, {
     ...options,
+    credentials: "same-origin",
+    cache: "no-store",
     headers: mergeApiHeaders(options?.headers),
   });
   if (!res.ok) {
     const text = await res.text();
-    throw new Error(`API ${res.status}: ${text}`);
+    throw new ApiError(res.status, `API ${res.status}: ${text}`);
   }
+  if (res.status === 204) return undefined;
   return res.json();
 }
 
 export const api = {
+  authMe: () => apiFetch("/api/auth/me"),
+  login: (login: string, password: string) =>
+    apiFetch("/api/auth/login", {
+      method: "POST",
+      body: JSON.stringify({ login, password }),
+    }),
+  register: (data: { username: string; email: string; password: string }) =>
+    apiFetch("/api/auth/register", {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+  logout: () => apiFetch("/api/auth/logout", { method: "POST" }),
   health: () => apiFetch("/api/catalog/health"),
 
   listObjects: (params?: { object_type?: string; limit?: number; offset?: number }) => {

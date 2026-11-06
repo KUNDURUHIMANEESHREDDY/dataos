@@ -1,0 +1,39 @@
+name: Rust authorization verification
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rust-authorization-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust-authorization:
+    name: Rust tests and release build
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TERM_COLOR: always
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - name: Set up stable Rust
+        run: |
+          rustup update stable
+          rustup default stable
+          rustc --version
+          cargo --version
+      - name: Install pinned Rust dependency auditor
+        run: cargo install cargo-audit --version 0.22.0 --locked
+      - name: Audit locked Rust dependencies
+        working-directory: rust-backend
+        run: cargo audit
+      - name: Verify lockfile, run tests, and build release binary
+        working-directory: rust-backend
+        run: |
+          cargo test --locked
+          cargo build --release --locked

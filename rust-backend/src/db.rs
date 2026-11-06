@@ -224,7 +224,67 @@ impl Db {
         conn.query_row(&format!("{} WHERE id = ? AND deleted_at IS NULL", object_select_sql()), [id], object_from_row).optional().map_err(|e| e.to_string())
     }
 
+    pub fn can_access_object(&self, id: &str, principal_id: &str, is_admin: bool) -> Result<bool, String> {
+        if is_admin { return Ok(self.get_object(id)?.is_some()); }
+        let Some(object) = self.get_object(id)? else { return Ok(false); };
+        Ok(object.pointer("/permissions/owner").and_then(Value::as_str) == Some(principal_id))
+    }
+
+    pub fn list_objects_for_owner(
+        &self,
+        owner_id: &str,
+        object_type: Option<&str>,
+        source: Option<&str>,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<Value>, String> {
+        let conn = self.conn.lock().map_err(|_| "database lock poisoned".to_string())?;
+        let mut sql = format!("{} WHERE deleted_at IS NULL AND json_extract(permissions, '$.owner') = ?", object_select_sql());
+        let mut values: Vec<Value> = vec![Value::String(owner_id.to_string())];
+        if let Some(kind) = object_type {
+            sql.push_str(" AND type = ?");
+            values.push(Value::String(kind.to_string()));
+        }
+        if let Some(src) = source {
+            sql.push_str(" AND source LIKE ?");
+            values.push(Value::String(format!("%{}%", src)));
+        }
+        sql.push_str(" ORDER BY updated_at DESC LIMIT ? OFFSET ?");
+        values.push(Value::from(limit));
+        values.push(Value::from(offset));
+        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+        let mut rows = stmt.query(rusqlite::params_from_iter(values.iter().map(param_value).map(|v| v.unwrap_or(rusqlite::types::Value::Null)))).map_err(|e| e.to_string())?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+            out.push(object_from_row(row).map_err(|e| e.to_string())?);
+        }
+        Ok(out)
+    }
+
+    pub fn count_objects_for_owner(&self, owner_id: &str, object_type: Option<&str>, source: Option<&str>) -> Result<i64, String> {
+        let conn = self.conn.lock().map_err(|_| "database lock poisoned".to_string())?;
+        let mut sql = "SELECT COUNT(*) FROM objects WHERE deleted_at IS NULL AND json_extract(permissions, '$.owner') = ?".to_string();
+        let mut values: Vec<Value> = vec![Value::String(owner_id.to_string())];
+        if let Some(kind) = object_type {
+            sql.push_str(" AND type = ?");
+            values.push(Value::String(kind.to_string()));
+        }
+        if let Some(src) = source {
+            sql.push_str(" AND source LIKE ?");
+            values.push(Value::String(format!("%{}%", src)));
+        }
+        conn.query_row(&sql, rusqlite::params_from_iter(values.iter().map(param_value).map(|v| v.unwrap_or(rusqlite::types::Value::Null))), |row| row.get(0)).map_err(|e| e.to_string())
+    }
+
     pub fn create_object(&self, object_type: &str, schema: &str, properties: Value, content: Value, source: &str, metadata: Value) -> Result<Value, String> {
+        self.create_object_with_owner(object_type, schema, properties, content, source, metadata, None)
+    }
+
+    pub fn create_object_for_owner(&self, object_type: &str, schema: &str, properties: Value, content: Value, source: &str, metadata: Value, owner_id: &str) -> Result<Value, String> {
+        self.create_object_with_owner(object_type, schema, properties, content, source, metadata, Some(owner_id))
+    }
+
+    fn create_object_with_owner(&self, object_type: &str, schema: &str, properties: Value, content: Value, source: &str, metadata: Value, owner_id: Option<&str>) -> Result<Value, String> {
         let created = now();
         let mut object = json!({
             "id": Uuid::new_v4().to_string(),
@@ -234,12 +294,12 @@ impl Db {
             "content": content,
             "relations": {},
             "provenance": {
-                "created_by": "dataos-rust",
+                "created_by": owner_id.unwrap_or("dataos-rust"),
                 "creation_timestamp": created,
                 "input_sources": [source],
                 "transformations": []
             },
-            "permissions": {"owner": "system", "read": ["*"], "write": ["owner"]},
+            "permissions": owner_id.map(|owner| json!({"owner": owner, "read": [owner], "write": [owner]})).unwrap_or_else(|| json!({"owner": "system", "read": ["*"], "write": ["owner"]})),
             "timestamps": {
                 "created_at": created,
                 "updated_at": created,
@@ -253,9 +313,12 @@ impl Db {
             "indexes": {}
         });
         let hash = compute_content_hash(&object);
-        if let Value::Object(map) = &mut object["metadata"] {
-            map.entry("content_hash".to_string()).or_insert(Value::String(hash.clone()));
-        }
+        let metadata = object["metadata"]
+            .as_object_mut()
+            .ok_or_else(|| "Object metadata must be a JSON object".to_string())?;
+        // content_hash is server-managed evidence. Never trust an imported or
+        // caller-supplied cached value, even when it is non-empty.
+        metadata.insert("content_hash".to_string(), Value::String(hash));
         self.save_object(&object)?;
         Ok(object)
     }

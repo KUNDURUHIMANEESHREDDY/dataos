@@ -61,19 +61,11 @@ fn production_enabled() -> bool {
     })
 }
 
-fn valid_secret(secret: &str) -> bool {
-    !secret.is_empty() && secret.len() >= 32 && secret.trim() == secret
-}
-
-fn shared_token() -> Option<String> {
-    env::var("DATAOS_API_TOKEN").ok().filter(|s| valid_secret(s))
-}
-
 fn capability_for(method: &Method, path: &str) -> Option<&'static str> {
     if method == Method::OPTIONS {
         return None;
     }
-    if (method == Method::POST && path == "/api/auth/register") || (method == Method::POST && path == "/api/auth/login") {
+    if method == Method::POST && matches!(path, "/api/auth/register" | "/api/auth/login" | "/api/auth/logout") {
         return None;
     }
     if (method == Method::POST && path == "/api/query/") || (method == Method::POST && path == "/api/agents/execute") {
@@ -120,6 +112,65 @@ fn json_error_response(status: StatusCode, detail: &str) -> Response {
     (status, Json(json!({"detail": detail}))).into_response()
 }
 
+fn resource_id_for_path(path: &str) -> Option<&str> {
+    let segments: Vec<&str> = path.trim_matches('/').split('/').collect();
+    match segments.as_slice() {
+        ["api", "objects", id] if !id.is_empty() => Some(id),
+        ["api", "objects", id, "why" | "impact"] if !id.is_empty() => Some(id),
+        ["api", "graph", "neighbors" | "traverse", id] if !id.is_empty() => Some(id),
+        ["api", "time_travel", "object", id] if !id.is_empty() => Some(id),
+        ["api", "provenance", "lineage", id] if !id.is_empty() => Some(id),
+        ["api", "profiling" | "quality", id] if !id.is_empty() => Some(id),
+        ["api", "recommendations", "datasets" | "connections", id] if !id.is_empty() => Some(id),
+        _ => None,
+    }
+}
+
+fn principal_id_for_path(path: &str) -> Option<&str> {
+    let segments: Vec<&str> = path.trim_matches('/').split('/').collect();
+    match segments.as_slice() {
+        ["api", "governance", "quota", principal_id] if !principal_id.is_empty() => Some(principal_id),
+        _ => None,
+    }
+}
+
+fn is_global_data_route(path: &str) -> bool {
+    matches!(path,
+        "/api/catalog/health" |
+        "/api/graph/analytics" |
+        "/api/time_travel/graph" |
+        "/api/time_travel/changes" |
+        "/api/io/export" |
+        "/api/governance/duplicates" |
+        "/api/federation/search" |
+        "/api/search" |
+        "/api/search/" |
+        "/api/vectors/search" |
+        "/api/ask" |
+        "/api/compute/sql" |
+        "/api/query" |
+        "/api/query/" |
+        "/api/agents/execute" |
+        "/api/workflows/execute" |
+        "/api/vectors/recompute" |
+        "/api/sync/resolve_conflict" |
+        "/api/sharing/issue_token" |
+        "/api/sharing/verify_token"
+    )
+}
+
+fn session_cookie(headers: &axum::http::HeaderMap) -> Option<String> {
+    headers
+        .get_all(header::COOKIE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(';'))
+        .find_map(|part| {
+            let (name, value) = part.trim().split_once('=')?;
+            (name == "dataos_session" && !value.is_empty()).then(|| value.to_string())
+        })
+}
+
 async fn security_middleware(
     State(state): State<AppState>,
     request: axum::extract::Request,
@@ -137,29 +188,35 @@ async fn security_middleware(
         .and_then(|value| value.to_str().ok())
         .map(str::to_string)
         .unwrap_or_default();
-    let token = authorization.strip_prefix("Bearer ").or_else(|| authorization.strip_prefix("bearer ")).unwrap_or("").to_string();
+    let bearer_token = authorization
+        .strip_prefix("Bearer ")
+        .or_else(|| authorization.strip_prefix("bearer "))
+        .unwrap_or("")
+        .to_string();
+    let token = if bearer_token.is_empty() {
+        session_cookie(request.headers()).unwrap_or_default()
+    } else {
+        bearer_token
+    };
     let production = production_enabled();
     let has_bearer = !token.is_empty();
 
-    if production {
-        let shared_ok = shared_token().map(|expected| token == expected).unwrap_or(false);
-        if !shared_ok {
-            if !jwt_configured() {
-                return json_error_response(StatusCode::SERVICE_UNAVAILABLE, "Production API authentication is unavailable; configure either DATAOS_API_TOKEN or DATAOS_JWT_SECRET (each with at least 32 UTF-8 bytes).");
-            }
-            if !has_bearer {
-                return json_error_response(StatusCode::UNAUTHORIZED, "A bearer token is required.");
-            }
-            match decode_token(&token) {
-                Ok(claims) => {
-                    match state.db.user_by_id(&claims.sub) {
-                        Ok(Some(found)) => user = Some(found),
-                        Ok(None) => return json_error_response(StatusCode::UNAUTHORIZED, "Unknown user."),
-                        Err(_) => return json_error_response(StatusCode::UNAUTHORIZED, "Unable to resolve the authenticated user."),
-                    }
-                }
-                Err(error) => return json_error_response(StatusCode::UNAUTHORIZED, &error),
-            }
+    if production && !matches!(path.as_str(), "/api/auth/register" | "/api/auth/login") {
+        // A shared API token authenticates an application, not an individual
+        // principal. Production data routes require a resolvable user identity.
+        if !jwt_configured() {
+            return json_error_response(StatusCode::SERVICE_UNAVAILABLE, "Production user authentication is unavailable; configure DATAOS_JWT_SECRET with at least 32 UTF-8 bytes.");
+        }
+        if !has_bearer {
+            return json_error_response(StatusCode::UNAUTHORIZED, "A user bearer token is required.");
+        }
+        match decode_token(&token) {
+            Ok(claims) => match state.db.user_by_id(&claims.sub) {
+                Ok(Some(found)) => user = Some(found),
+                Ok(None) => return json_error_response(StatusCode::UNAUTHORIZED, "Unknown user."),
+                Err(_) => return json_error_response(StatusCode::UNAUTHORIZED, "Unable to resolve the authenticated user."),
+            },
+            Err(error) => return json_error_response(StatusCode::UNAUTHORIZED, &error),
         }
     } else if jwt_configured() && has_bearer {
         match decode_token(&token) {
@@ -178,6 +235,20 @@ async fn security_middleware(
         if let Some(required) = capability_for(request.method(), &path) {
             if !role_capabilities(&current_user.role).contains(&required) {
                 return json_error_response(StatusCode::FORBIDDEN, &format!("Capability '{}' is not permitted for role '{}'.", required, current_user.role));
+            }
+        }
+        if production && current_user.role != "admin" && is_global_data_route(&path) {
+            return json_error_response(StatusCode::FORBIDDEN, "This aggregate or export endpoint is restricted until principal-scoped query support is enabled.");
+        }
+        if let Some(principal_id) = principal_id_for_path(&path) {
+            if current_user.role != "admin" && principal_id != current_user.id {
+                return json_error_response(StatusCode::NOT_FOUND, "Principal not found.");
+            }
+        }
+        if let Some(object_id) = resource_id_for_path(&path) {
+            let allowed = state.db.can_access_object(object_id, &current_user.id, current_user.role == "admin").unwrap_or(false);
+            if !allowed {
+                return json_error_response(StatusCode::NOT_FOUND, "Object not found.");
             }
         }
     }
@@ -294,7 +365,7 @@ async fn auth_register(State(state): State<AppState>, Json(req): Json<RegisterRe
     ok_json(user_payload(&user))
 }
 
-async fn auth_login(State(state): State<AppState>, Json(req): Json<LoginRequest>) -> Result<Json<Value>, ApiError> {
+async fn auth_login(State(state): State<AppState>, Json(req): Json<LoginRequest>) -> Result<Response, ApiError> {
     if !jwt_configured() {
         return Err(ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "User auth is disabled until DATAOS_JWT_SECRET is configured."));
     }
@@ -302,14 +373,36 @@ async fn auth_login(State(state): State<AppState>, Json(req): Json<LoginRequest>
         .map_err(|error| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, error))?
         .ok_or_else(|| ApiError::new(StatusCode::UNAUTHORIZED, "Invalid credentials."))?;
     let token = issue_token(&user.id, &user.role).map_err(|error| ApiError::new(StatusCode::SERVICE_UNAVAILABLE, error))?;
-    ok_json(json!({"access_token": token, "token_type": "bearer", "user": user_payload(&user)}))
+    let secure = if production_enabled() { "; Secure" } else { "" };
+    let cookie = format!(
+        "dataos_session={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age={}{}",
+        auth::DEFAULT_TTL_SECONDS,
+        secure
+    );
+    let cookie = axum::http::HeaderValue::from_str(&cookie)
+        .map_err(|_| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "Unable to create session cookie."))?;
+    let mut response = Json(json!({"access_token": token, "token_type": "bearer", "user": user_payload(&user)})).into_response();
+    response.headers_mut().append(header::SET_COOKIE, cookie);
+    response.headers_mut().insert(header::CACHE_CONTROL, axum::http::HeaderValue::from_static("no-store"));
+    Ok(response)
+}
+
+async fn auth_logout() -> Response {
+    let secure = if production_enabled() { "; Secure" } else { "" };
+    let cookie = format!("dataos_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0{secure}");
+    let mut response = StatusCode::NO_CONTENT.into_response();
+    if let Ok(cookie) = axum::http::HeaderValue::from_str(&cookie) {
+        response.headers_mut().append(header::SET_COOKIE, cookie);
+    }
+    response.headers_mut().insert(header::CACHE_CONTROL, axum::http::HeaderValue::from_static("no-store"));
+    response
 }
 
 async fn auth_me(Extension(CurrentUser(user)): Extension<CurrentUser>) -> Json<Value> {
     if let Some(user) = user {
         Json(json!({"authenticated": true, "user": user_payload(&user)}))
     } else if jwt_configured() {
-        Json(json!({"authenticated": false, "detail": "A bearer token is required for /api/auth/me when JWT auth is configured."}))
+        Json(json!({"authenticated": false, "detail": "A session cookie or bearer token is required for /api/auth/me when JWT auth is configured."}))
     } else {
         Json(json!({"authenticated": false, "detail": "JWT auth is not configured; running in shared-token/dev mode."}))
     }
@@ -523,16 +616,21 @@ where
 
 async fn universal_ingest(
     State(state): State<AppState>,
+    Extension(CurrentUser(user)): Extension<CurrentUser>,
     fields: FormFields,
 ) -> Result<Json<Value>, ApiError> {
-    ingest_into_storage(state, fields, "")
+    ingest_into_storage(state, fields, "", user.as_ref().map(|principal| principal.id.as_str()))
 }
 
-async fn ingest_text(State(state): State<AppState>, fields: FormFields) -> Result<Json<Value>, ApiError> {
-    ingest_into_storage(state, fields, "")
+async fn ingest_text(
+    State(state): State<AppState>,
+    Extension(CurrentUser(user)): Extension<CurrentUser>,
+    fields: FormFields,
+) -> Result<Json<Value>, ApiError> {
+    ingest_into_storage(state, fields, "", user.as_ref().map(|principal| principal.id.as_str()))
 }
 
-fn ingest_into_storage(state: AppState, fields: FormFields, _name: &str) -> Result<Json<Value>, ApiError> {
+fn ingest_into_storage(state: AppState, fields: FormFields, _name: &str, owner_id: Option<&str>) -> Result<Json<Value>, ApiError> {
     let fields = fields.0;
     let filename = fields
         .get("filename")
@@ -545,8 +643,11 @@ fn ingest_into_storage(state: AppState, fields: FormFields, _name: &str) -> Resu
     let object_type = if lowered.ends_with(".csv") { "dataset" } else if lowered.ends_with(".json") { "dataset" } else if lowered.ends_with(".ipynb") { "notebook" } else { "document" };
     let mut properties = json!({"filename": filename});
     if lowered.ends_with(".csv") { properties["raw_csv"] = Value::String(content.clone()); }
-    let stored = state.db.create_object(object_type, "generic.v1", properties, Value::String(content), "api://rust-ingest", json!({}))
-        .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let stored = if let Some(owner_id) = owner_id {
+        state.db.create_object_for_owner(object_type, "generic.v1", properties, Value::String(content), "api://rust-ingest", json!({}), owner_id)
+    } else {
+        state.db.create_object(object_type, "generic.v1", properties, Value::String(content), "api://rust-ingest", json!({}))
+    }.map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     ok_json(json!({
         "status": "ok",
         "primary_object_id": stored.get("id").cloned().unwrap_or(Value::Null),
@@ -635,14 +736,33 @@ async fn federation_search(State(state): State<AppState>, Query(params): Query<F
     ok_json(local)
 }
 
-async fn recommendations_datasets(State(state): State<AppState>, Path(object_id): Path<String>) -> Result<Json<Value>, ApiError> {
-    let datasets = state.db.list_objects(Some("dataset"), None, 5, 0).map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+async fn recommendations_datasets(
+    State(state): State<AppState>,
+    Extension(CurrentUser(user)): Extension<CurrentUser>,
+    Path(object_id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let datasets = if let Some(user) = user.as_ref().filter(|user| user.role != "admin") {
+        state.db.list_objects_for_owner(&user.id, Some("dataset"), None, 5, 0)
+    } else {
+        state.db.list_objects(Some("dataset"), None, 5, 0)
+    }.map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     ok_json(json!({"target_object_id": object_id, "recommended_datasets": datasets.into_iter().filter(|o| o.get("id").and_then(Value::as_str) != Some(object_id.as_str())).collect::<Vec<_>>()}))
 }
 
-async fn recommendations_connections(State(state): State<AppState>, Path(object_id): Path<String>) -> Result<Json<Value>, ApiError> {
-    let relationships = state.db.list_relationships(Some(&object_id), None, None, 0.0, 10, 0).map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    ok_json(json!({"target_object_id": object_id, "recommendations": relationships}))
+async fn recommendations_connections(
+    State(state): State<AppState>,
+    Extension(CurrentUser(user)): Extension<CurrentUser>,
+    Path(object_id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let relationships = state.db.list_relationships(Some(&object_id), None, None, 0.0, 10, 0)
+        .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let mut visible = Vec::new();
+    for relation in relationships {
+        if relationship_visible_to_user(state.db.as_ref(), &relation, user.as_ref())? {
+            visible.push(relation);
+        }
+    }
+    ok_json(json!({"target_object_id": object_id, "recommendations": visible}))
 }
 
 async fn fallback_route() -> (StatusCode, Json<Value>) {
@@ -671,6 +791,7 @@ fn build_router(state: AppState) -> Router {
         .route("/api/catalog/health", get(catalog_health))
         .route("/api/auth/register", post(auth_register))
         .route("/api/auth/login", post(auth_login))
+        .route("/api/auth/logout", post(auth_logout))
         .route("/api/auth/me", get(auth_me))
         .route("/api/auth/users", get(auth_users))
         .route("/api/objects", get(list_objects).post(create_object))
@@ -721,50 +842,153 @@ fn build_router(state: AppState) -> Router {
         .fallback(fallback_route)
 }
 
-async fn list_objects(State(state): State<AppState>, Query(params): Query<ListParams>) -> Result<Json<Value>, ApiError> {
+async fn list_objects(
+    State(state): State<AppState>,
+    Extension(CurrentUser(user)): Extension<CurrentUser>,
+    Query(params): Query<ListParams>,
+) -> Result<Json<Value>, ApiError> {
     let limit = clamp_i64(params.limit, 100, 1, 500);
     let offset = clamp_i64(params.offset, 0, 0, 1_000_000);
-    let objects = state.db.list_objects(params.object_type.as_deref(), params.source.as_deref(), limit, offset).map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    let total = state.db.count_objects(params.object_type.as_deref(), params.source.as_deref()).map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let (objects, total) = if let Some(user) = user {
+        if user.role == "admin" {
+            (
+                state.db.list_objects(params.object_type.as_deref(), params.source.as_deref(), limit, offset),
+                state.db.count_objects(params.object_type.as_deref(), params.source.as_deref()),
+            )
+        } else {
+            (
+                state.db.list_objects_for_owner(&user.id, params.object_type.as_deref(), params.source.as_deref(), limit, offset),
+                state.db.count_objects_for_owner(&user.id, params.object_type.as_deref(), params.source.as_deref()),
+            )
+        }
+    } else {
+        (
+            state.db.list_objects(params.object_type.as_deref(), params.source.as_deref(), limit, offset),
+            state.db.count_objects(params.object_type.as_deref(), params.source.as_deref()),
+        )
+    };
+    let objects = objects.map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let total = total.map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     ok_json(json!({"total": total, "objects": objects}))
 }
 
-async fn create_object(State(state): State<AppState>, Json(req): Json<ObjectCreateRequest>) -> Result<Json<Value>, ApiError> {
-    let object = state.db.create_object(
-        req.object_type.as_deref().unwrap_or("document"),
-        req.schema_ref.as_deref().unwrap_or("generic.v1"),
-        req.properties.unwrap_or(json!({})),
-        req.content.unwrap_or(json!({})),
-        req.source.as_deref().unwrap_or("api://rust"),
-        req.metadata.unwrap_or(json!({})),
-    ).map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+async fn create_object(
+    State(state): State<AppState>,
+    Extension(CurrentUser(user)): Extension<CurrentUser>,
+    Json(req): Json<ObjectCreateRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let metadata = req.metadata.unwrap_or(json!({}));
+    if !metadata.is_object() {
+        return Err(ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, "metadata must be a JSON object."));
+    }
+    let object = if let Some(user) = user {
+        state.db.create_object_for_owner(
+            req.object_type.as_deref().unwrap_or("document"),
+            req.schema_ref.as_deref().unwrap_or("generic.v1"),
+            req.properties.unwrap_or(json!({})),
+            req.content.unwrap_or(json!({})),
+            req.source.as_deref().unwrap_or("api://rust"),
+            metadata,
+            &user.id,
+        )
+    } else {
+        state.db.create_object(
+            req.object_type.as_deref().unwrap_or("document"),
+            req.schema_ref.as_deref().unwrap_or("generic.v1"),
+            req.properties.unwrap_or(json!({})),
+            req.content.unwrap_or(json!({})),
+            req.source.as_deref().unwrap_or("api://rust"),
+            metadata,
+        )
+    }.map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     ok_json(object)
 }
 
-async fn get_object(State(state): State<AppState>, Path(object_id): Path<String>) -> Result<Json<Value>, ApiError> {
-    state.db.get_object(&object_id)
+async fn get_object(
+    State(state): State<AppState>,
+    Extension(CurrentUser(user)): Extension<CurrentUser>,
+    Path(object_id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let object = state.db.get_object(&object_id)
         .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?
-        .map(Json)
-        .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "Object not found"))
+        .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "Object not found"))?;
+    if let Some(user) = user {
+        let allowed = state.db.can_access_object(&object_id, &user.id, user.role == "admin")
+            .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        if !allowed { return Err(ApiError::new(StatusCode::NOT_FOUND, "Object not found")); }
+    }
+    Ok(Json(object))
 }
 
-async fn delete_object(State(state): State<AppState>, Path(object_id): Path<String>, Query(params): Query<DeleteParams>) -> Result<Json<Value>, ApiError> {
+async fn delete_object(
+    State(state): State<AppState>,
+    Extension(CurrentUser(user)): Extension<CurrentUser>,
+    Path(object_id): Path<String>,
+    Query(params): Query<DeleteParams>,
+) -> Result<Json<Value>, ApiError> {
+    if let Some(user) = user {
+        let allowed = state.db.can_access_object(&object_id, &user.id, user.role == "admin")
+            .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        if !allowed { return Err(ApiError::new(StatusCode::NOT_FOUND, "Object not found")); }
+    }
     let soft = params.soft.unwrap_or(true);
     let deleted = state.db.delete_object(&object_id, soft).map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     if !deleted { return Err(ApiError::new(StatusCode::NOT_FOUND, "Object not found or already deleted")); }
     ok_json(json!({"status": "deleted", "object_id": object_id, "soft": soft}))
 }
 
-async fn list_relationships(State(state): State<AppState>, Query(params): Query<RelationshipParams>) -> Result<Json<Value>, ApiError> {
+async fn list_relationships(
+    State(state): State<AppState>,
+    Extension(CurrentUser(user)): Extension<CurrentUser>,
+    Query(params): Query<RelationshipParams>,
+) -> Result<Json<Value>, ApiError> {
     let limit = clamp_i64(params.limit, 1000, 1, 1000);
     let offset = clamp_i64(params.offset, 0, 0, 1_000_000);
     let confidence = params.min_confidence.unwrap_or(0.0).clamp(0.0, 1.0);
-    let relationships = state.db.list_relationships(params.source_id.as_deref(), params.target_id.as_deref(), params.relation_type.as_deref(), confidence, limit, offset).map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    let total = state.db.count_relationships(params.source_id.as_deref(), params.target_id.as_deref(), params.relation_type.as_deref(), confidence).map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let mut relationships = if user.as_ref().map(|u| u.role == "admin").unwrap_or(true) {
+        state.db.list_relationships(params.source_id.as_deref(), params.target_id.as_deref(), params.relation_type.as_deref(), confidence, limit, offset)
+            .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?
+    } else {
+        state.db.list_relationships(params.source_id.as_deref(), params.target_id.as_deref(), params.relation_type.as_deref(), confidence, 50000, 0)
+            .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?
+    };
+    let total = if let Some(user) = user {
+        if user.role == "admin" {
+            state.db.count_relationships(params.source_id.as_deref(), params.target_id.as_deref(), params.relation_type.as_deref(), confidence)
+                .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?
+        } else {
+            relationships.retain(|rel| {
+                let source = rel.get("source").and_then(Value::as_str).unwrap_or_default();
+                let target = rel.get("target").and_then(Value::as_str).unwrap_or_default();
+                state.db.can_access_object(source, &user.id, false).unwrap_or(false)
+                    && state.db.can_access_object(target, &user.id, false).unwrap_or(false)
+            });
+            let total = relationships.len() as i64;
+            relationships = relationships.into_iter().skip(offset as usize).take(limit as usize).collect();
+            total
+        }
+    } else {
+        state.db.count_relationships(params.source_id.as_deref(), params.target_id.as_deref(), params.relation_type.as_deref(), confidence)
+            .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?
+    };
     ok_json(json!({"total": total, "relationships": relationships}))
 }
 
-async fn create_relationship(State(state): State<AppState>, Json(req): Json<RelationshipCreateRequest>) -> Result<Json<Value>, ApiError> {
+async fn create_relationship(
+    State(state): State<AppState>,
+    Extension(CurrentUser(user)): Extension<CurrentUser>,
+    Json(req): Json<RelationshipCreateRequest>,
+) -> Result<Json<Value>, ApiError> {
+    if let Some(user) = user {
+        let admin = user.role == "admin";
+        for object_id in [&req.source_id, &req.target_id] {
+            let allowed = state.db.can_access_object(object_id, &user.id, admin)
+                .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+            if !allowed {
+                return Err(ApiError::new(StatusCode::NOT_FOUND, "One or more relationship objects were not found."));
+            }
+        }
+    }
     let rel = state.db.create_relationship(
         &req.source_id,
         &req.target_id,
@@ -775,7 +999,19 @@ async fn create_relationship(State(state): State<AppState>, Json(req): Json<Rela
     ok_json(rel)
 }
 
-fn lineage_response(state: &Db, object_id: &str, upstream: bool) -> Result<Value, ApiError> {
+fn relationship_visible_to_user(state: &Db, relation: &Value, user: Option<&User>) -> Result<bool, ApiError> {
+    let Some(user) = user else { return Ok(true) };
+    if user.role == "admin" { return Ok(true); }
+    let Some(source) = relation.get("source").and_then(Value::as_str) else { return Ok(false) };
+    let Some(target) = relation.get("target").and_then(Value::as_str) else { return Ok(false) };
+    if !state.can_access_object(source, &user.id, false).map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e))? {
+        return Ok(false);
+    }
+    state.can_access_object(target, &user.id, false)
+        .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e))
+}
+
+fn lineage_response(state: &Db, object_id: &str, upstream: bool, user: Option<&User>) -> Result<Value, ApiError> {
     let relationships = state.list_relationships(
         if upstream { None } else { Some(object_id) },
         if upstream { Some(object_id) } else { None },
@@ -785,7 +1021,13 @@ fn lineage_response(state: &Db, object_id: &str, upstream: bool) -> Result<Value
         0,
     ).map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     let lineage_types = ["derived_from", "transforms_to", "reads_from", "produces", "depends_on"];
-    let edges: Vec<Value> = relationships.into_iter().filter(|rel| rel.get("relation_type").and_then(Value::as_str).map(|kind| lineage_types.contains(&kind)).unwrap_or(false)).collect();
+    let mut edges = Vec::new();
+    for rel in relationships {
+        if !relationship_visible_to_user(state, &rel, user)? { continue; }
+        if rel.get("relation_type").and_then(Value::as_str).map(|kind| lineage_types.contains(&kind)).unwrap_or(false) {
+            edges.push(rel);
+        }
+    }
     Ok(json!({
         "object_id": object_id,
         "direction": if upstream { "upstream" } else { "downstream" },
@@ -794,19 +1036,32 @@ fn lineage_response(state: &Db, object_id: &str, upstream: bool) -> Result<Value
     }))
 }
 
-async fn why_object(State(state): State<AppState>, Path(object_id): Path<String>) -> Result<Json<Value>, ApiError> {
+async fn why_object(
+    State(state): State<AppState>,
+    Extension(CurrentUser(user)): Extension<CurrentUser>,
+    Path(object_id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
     state.db.get_object(&object_id).map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?
         .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "Object not found"))?;
-    ok_json(lineage_response(state.db.as_ref(), &object_id, true)?)
+    ok_json(lineage_response(state.db.as_ref(), &object_id, true, user.as_ref())?)
 }
 
-async fn impact_object(State(state): State<AppState>, Path(object_id): Path<String>) -> Result<Json<Value>, ApiError> {
+async fn impact_object(
+    State(state): State<AppState>,
+    Extension(CurrentUser(user)): Extension<CurrentUser>,
+    Path(object_id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
     state.db.get_object(&object_id).map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?
         .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "Object not found"))?;
-    ok_json(lineage_response(state.db.as_ref(), &object_id, false)?)
+    ok_json(lineage_response(state.db.as_ref(), &object_id, false, user.as_ref())?)
 }
 
-async fn neighbors(State(state): State<AppState>, Path(object_id): Path<String>, Query(direction): Query<HashMap<String, String>>) -> Result<Json<Value>, ApiError> {
+async fn neighbors(
+    State(state): State<AppState>,
+    Extension(CurrentUser(user)): Extension<CurrentUser>,
+    Path(object_id): Path<String>,
+    Query(direction): Query<HashMap<String, String>>,
+) -> Result<Json<Value>, ApiError> {
     let direction = direction.get("direction").map(String::as_str).unwrap_or("both");
     let mut rels = Vec::new();
     if matches!(direction, "both" | "outgoing") {
@@ -824,6 +1079,12 @@ async fn neighbors(State(state): State<AppState>, Path(object_id): Path<String>,
             rel.get("source").and_then(Value::as_str).unwrap_or_default().to_string()
         };
         if neighbor_id.is_empty() || !seen.insert(neighbor_id.clone()) { continue; }
+        if let Some(user) = user.as_ref() {
+            if !state.db.can_access_object(&neighbor_id, &user.id, user.role == "admin")
+                .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e))? {
+                continue;
+            }
+        }
         match state.db.get_object(&neighbor_id) {
             Ok(Some(object)) => neighbors.push(json!({
                 "id": neighbor_id,

@@ -10,19 +10,30 @@ use axum::body::Body;
 use axum::http::{Method, Request, StatusCode, header};
 use axum::Router;
 use http_body_util::BodyExt;
+use rand::RngCore;
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
 use crate::db::Db;
 use crate::AppState;
 
+fn random_test_secret() -> String {
+    let mut bytes = [0_u8; 32];
+    let mut rng = rand::rngs::OsRng;
+    rng.fill_bytes(&mut bytes);
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
 fn setup_env() {
     static INIT: OnceLock<()> = OnceLock::new();
     INIT.get_or_init(|| {
+        // Use OS-backed random test keys; never commit reusable signing material.
+        let jwt_secret = random_test_secret();
+        let sharing_secret = random_test_secret();
         // SAFETY: called once, before any test issues requests.
         unsafe {
-            std::env::set_var("DATAOS_JWT_SECRET", "unit-test-secret-".repeat(3));
-            std::env::set_var("DATAOS_SHARING_TOKEN_SECRET", "sharing-secret-".repeat(3));
+            std::env::set_var("DATAOS_JWT_SECRET", jwt_secret);
+            std::env::set_var("DATAOS_SHARING_TOKEN_SECRET", sharing_secret);
             std::env::remove_var("DATAOS_ENV");
             std::env::remove_var("DATAOS_API_TOKEN");
         }
@@ -73,13 +84,47 @@ async fn call(
     (status, parsed)
 }
 
+async fn call_with_cookie(
+    app: &Router,
+    method: Method,
+    uri: &str,
+    body: Option<Value>,
+    cookie: Option<&str>,
+) -> (StatusCode, Value, Option<String>) {
+    let mut builder = Request::builder().method(method).uri(uri);
+    if let Some(cookie) = cookie {
+        builder = builder.header(header::COOKIE, cookie);
+    }
+    let request = match body {
+        Some(value) => builder
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(serde_json::to_vec(&value).expect("serialisable body")))
+            .expect("request"),
+        None => builder.body(Body::empty()).expect("request"),
+    };
+    let response = app.clone().oneshot(request).await.expect("router response");
+    let status = response.status();
+    let set_cookie = response.headers().get(header::SET_COOKIE)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
+    let bytes = response.into_body().collect().await.expect("body").to_bytes();
+    let parsed = if bytes.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_slice(&bytes)
+            .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&bytes).to_string()))
+    };
+    (status, parsed, set_cookie)
+}
+
 async fn register(_app: &Router, db: &Db, role: &str) -> String {
     let username = format!("user_{}", &uuid::Uuid::new_v4().simple().to_string()[..8]);
+    let password = random_test_secret();
     let user = db
         .user_register(
             &username,
             &format!("{username}@example.com"),
-            "password123",
+            &password,
             role,
         )
         .expect("create test user directly in isolated test database");
@@ -153,9 +198,149 @@ async fn auth_roundtrip_issue_me_and_capability_gate() {
 
 
 #[tokio::test]
+async fn http_only_cookie_session_supports_me_and_logout() {
+    let (app, db) = test_app();
+    let username = format!("cookie_user_{}", &uuid::Uuid::new_v4().simple().to_string()[..8]);
+    let password = random_test_secret();
+    let user = db.user_register(
+        &username,
+        &format!("{username}@example.com"),
+        &password,
+        "viewer",
+    ).expect("create cookie-session user");
+
+    let (status, body, set_cookie) = call_with_cookie(
+        &app,
+        Method::POST,
+        "/api/auth/login",
+        Some(json!({"login": user.email, "password": password})),
+        None,
+    ).await;
+    assert_eq!(status, StatusCode::OK, "login failed: {body}");
+    let set_cookie = set_cookie.expect("login must issue a session cookie");
+    assert!(set_cookie.contains("HttpOnly"));
+    assert!(set_cookie.contains("SameSite=Strict"));
+    assert!(set_cookie.contains("Path=/"));
+    assert!(set_cookie.contains("Max-Age=3600"));
+    let cookie_pair = set_cookie.split(';').next().expect("cookie pair").to_string();
+
+    let (status, body, _) = call_with_cookie(
+        &app,
+        Method::GET,
+        "/api/auth/me",
+        None,
+        Some(&cookie_pair),
+    ).await;
+    assert_eq!(status, StatusCode::OK, "cookie authentication failed: {body}");
+    assert_eq!(body["authenticated"], true);
+    assert_eq!(body["user"]["id"], user.id);
+
+    let (status, _, cleared_cookie) = call_with_cookie(
+        &app,
+        Method::POST,
+        "/api/auth/logout",
+        None,
+        Some(&cookie_pair),
+    ).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let cleared_cookie = cleared_cookie.expect("logout must clear the session cookie");
+    assert!(cleared_cookie.contains("HttpOnly"));
+    assert!(cleared_cookie.contains("SameSite=Strict"));
+    assert!(cleared_cookie.contains("Path=/"));
+    assert!(cleared_cookie.contains("Max-Age=0"));
+}
+
+#[tokio::test]
+async fn object_ownership_isolation_blocks_cross_user_reads_writes_and_relationships() {
+    let (app, db) = test_app();
+    let alice = register(&app, &db, "operator").await;
+    let bob = register(&app, &db, "operator").await;
+
+    let alice_object = create_dataset(&app, &alice, SAMPLE_CSV).await;
+    let bob_object = create_dataset(&app, &bob, SAMPLE_CSV).await;
+
+    let alice_id = crate::auth::decode_token(&alice).expect("valid Alice JWT").sub;
+    let (status, _) = call(&app, Method::GET, &format!("/api/governance/quota/{alice_id}"), None, Some(&bob)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "users must not inspect another principal's quota");
+
+    // Each principal sees only their own objects in collection responses.
+    let (status, alice_list) = call(&app, Method::GET, "/api/objects/", None, Some(&alice)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(alice_list["total"], 1);
+    assert_eq!(alice_list["objects"][0]["id"], alice_object);
+
+    let (status, bob_list) = call(&app, Method::GET, "/api/objects/", None, Some(&bob)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(bob_list["total"], 1);
+    assert_eq!(bob_list["objects"][0]["id"], bob_object);
+
+    // Direct reads and deletes conceal foreign objects as not found.
+    let (status, _) = call(&app, Method::GET, &format!("/api/objects/{alice_object}"), None, Some(&bob)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // Alternate object-addressed routes use the same ownership check.
+    let (status, _) = call(&app, Method::GET, &format!("/api/graph/neighbors/{alice_object}"), None, Some(&bob)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // Development/test mode keeps existing aggregate behavior; production
+    // middleware denies these unscoped views to non-admin principals.
+    let (status, _) = call(&app, Method::GET, "/api/catalog/health", None, Some(&bob)).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, _) = call(&app, Method::DELETE, &format!("/api/objects/{alice_object}"), None, Some(&bob)).await;
+    // Operators cannot delete objects at all; the capability gate rejects this
+    // before the resource-level ownership check.
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    // A user cannot connect their own object to another user's object.
+    let (status, body) = call(
+        &app,
+        Method::POST,
+        "/api/relationships",
+        Some(json!({
+            "source_id": bob_object,
+            "target_id": alice_object,
+            "relation_type": "references"
+        })),
+        Some(&bob),
+    ).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "cross-user relationship unexpectedly succeeded: {body}");
+
+    // Simulate legacy/admin-created cross-tenant edges. Object-scoped graph
+    // routes must not disclose the other endpoint even when an edge exists.
+    db.create_relationship(&alice_object, &bob_object, "derived_from", 1.0, json!({}))
+        .expect("create legacy outgoing edge");
+    db.create_relationship(&bob_object, &alice_object, "derived_from", 1.0, json!({}))
+        .expect("create legacy incoming edge");
+
+    for uri in [
+        format!("/api/graph/neighbors/{alice_object}"),
+        format!("/api/graph/traverse/{alice_object}?direction=both"),
+        format!("/api/provenance/lineage/{alice_object}"),
+        format!("/api/objects/{alice_object}/why"),
+        format!("/api/objects/{alice_object}/impact"),
+        format!("/api/recommendations/datasets/{alice_object}"),
+        format!("/api/recommendations/connections/{alice_object}"),
+    ] {
+        let (status, body) = call(&app, Method::GET, &uri, None, Some(&alice)).await;
+        assert_eq!(status, StatusCode::OK, "owner graph route failed at {uri}: {body}");
+        assert!(
+            !body.to_string().contains(&bob_object),
+            "cross-tenant object leaked through {uri}: {body}"
+        );
+    }
+
+    // The owner retains normal access to their object.
+    let (status, own_object) = call(&app, Method::GET, &format!("/api/objects/{alice_object}"), None, Some(&alice)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(own_object["id"], alice_object);
+}
+
+#[tokio::test]
 async fn public_registration_cannot_assign_privileged_role() {
     let (app, _db) = test_app();
     let username = format!("self_register_{}", &uuid::Uuid::new_v4().simple().to_string()[..8]);
+    let password = random_test_secret();
 
     let (status, registered) = call(
         &app,
@@ -164,7 +349,7 @@ async fn public_registration_cannot_assign_privileged_role() {
         Some(json!({
             "username": username,
             "email": format!("{username}@example.com"),
-            "password": "password123",
+            "password": password.clone(),
             "role": "admin"
         })),
         None,
@@ -177,7 +362,7 @@ async fn public_registration_cannot_assign_privileged_role() {
         &app,
         Method::POST,
         "/api/auth/login",
-        Some(json!({"login": username, "password": "password123"})),
+        Some(json!({"login": username, "password": password})),
         None,
     )
     .await;
@@ -678,8 +863,8 @@ async fn unmigrated_routes_answer_501_not_fake_data() {
 
 #[tokio::test]
 async fn knowledge_query_returns_scoped_evidence() {
-    let (app, _db) = test_app();
-    let token = register(&app, &_db, "operator").await;
+    let (app, db) = test_app();
+    let token = register(&app, &db, "operator").await;
 
     let (status, dataset) = call(
         &app,
@@ -726,6 +911,13 @@ async fn knowledge_query_returns_scoped_evidence() {
     .await;
     assert_eq!(status, StatusCode::OK);
 
+    // Simulate a legacy/admin-created edge to another tenant. Retrieval must
+    // not include the foreign object merely because the edge exists.
+    let bob = register(&app, &db, "operator").await;
+    let foreign_dataset = create_dataset(&app, &bob, "id,name\\n9,private\\n").await;
+    db.create_relationship(&document_id, &foreign_dataset, "references", 0.99, json!({}))
+        .expect("create legacy cross-tenant edge");
+
     let (status, body) = call(
         &app,
         Method::POST,
@@ -745,6 +937,7 @@ async fn knowledge_query_returns_scoped_evidence() {
     assert_eq!(body["related_files"].as_array().unwrap().len(), 1);
     assert_eq!(body["related_files"][0]["file_id"], dataset_id);
     assert_eq!(body["related_files"][0]["relationship_type"], "references");
+    assert!(!body.to_string().contains(&foreign_dataset), "foreign related object leaked: {body}");
 
     let evidence = body["evidence"].as_array().expect("evidence list");
     assert!(!evidence.is_empty(), "expected evidence: {body}");
@@ -764,6 +957,15 @@ async fn knowledge_query_returns_scoped_evidence() {
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(body["detail"]["missing_file_ids"][0], "no-such-file");
+
+    let (status, body) = call(
+        &app,
+        Method::POST,
+        "/api/knowledge/query",
+        Some(json!({"query": "private", "selected_file_ids": [foreign_dataset]})),
+        Some(&token),
+    ).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "foreign selected object was accepted: {body}");
 }
 
 #[tokio::test]
@@ -837,6 +1039,51 @@ async fn research_pipeline_runs_four_deterministic_stages() {
 }
 
 #[tokio::test]
+async fn research_pipeline_cannot_read_or_report_another_users_dataset() {
+    let (app, db) = test_app();
+    let alice = register(&app, &db, "operator").await;
+    let bob = register(&app, &db, "operator").await;
+    let alice_dataset = create_dataset(&app, &alice, SAMPLE_CSV).await;
+    let bob_dataset = create_dataset(&app, &bob, "id,name,score\\n9,private,99\\n").await;
+    let alice_id = crate::auth::decode_token(&alice).expect("valid Alice JWT").sub;
+    let bob_table = format!("tbl_{}",&bob_dataset[..8]);
+    let alice_table = format!("tbl_{}",&alice_dataset[..8]);
+
+    let before = db.list_objects_for_owner(&alice_id, Some("report"), None, 100, 0)
+        .expect("list Alice reports").len();
+
+    let (status, body) = call(
+        &app,
+        Method::POST,
+        "/api/agents/pipeline/research",
+        Some(json!({
+            "goal_prompt": "summarise private scores",
+            "target_dataset_id": alice_dataset,
+            "analysis_sql_or_python": format!("SELECT name, score FROM {bob_table}")
+        })),
+        Some(&alice),
+    ).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "foreign table query unexpectedly succeeded: {body}");
+
+    let after = db.list_objects_for_owner(&alice_id, Some("report"), None, 100, 0)
+        .expect("list Alice reports").len();
+    assert_eq!(after, before, "failed analysis must not persist a report");
+
+    let (status, body) = call(
+        &app,
+        Method::POST,
+        "/api/agents/pipeline/research",
+        Some(json!({
+            "goal_prompt": "read foreign dataset",
+            "target_dataset_id": bob_dataset,
+            "analysis_sql_or_python": format!("SELECT name, score FROM {alice_table}")
+        })),
+        Some(&alice),
+    ).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "foreign target dataset was accepted: {body}");
+}
+
+#[tokio::test]
 async fn universal_ingest_accepts_form_encoded_body_from_frontend() {
     // The Next.js DropZone/EmptyState components post
     // `application/x-www-form-urlencoded`, which is what the FastAPI route
@@ -882,4 +1129,79 @@ fn urlencode(value: &str) -> String {
             c => format!("%{:02X}", c as u32),
         })
         .collect()
+}
+
+
+#[tokio::test]
+async fn object_creation_recomputes_server_managed_hash_and_validates_metadata() {
+    let (app, db) = test_app();
+    let token = register(&app, &db, "operator").await;
+    let forged_hash = "0".repeat(64);
+
+    let (status, body) = call(
+        &app,
+        Method::POST,
+        "/api/objects/",
+        Some(json!({
+            "type": "document",
+            "properties": {"name": "canonical"},
+            "content": {"text": "private evidence"},
+            "metadata": {
+                "content_hash": forged_hash,
+                "source_note": "preserve this caller metadata"
+            }
+        })),
+        Some(&token),
+    ).await;
+    assert_eq!(status, StatusCode::OK, "object creation failed: {body}");
+
+    let object_id = body["id"].as_str().expect("created object id");
+    let stored = db.get_object(object_id).expect("read stored object").expect("object exists");
+    let stored_hash = stored.pointer("/metadata/content_hash")
+        .and_then(Value::as_str)
+        .expect("server-managed content hash");
+    assert_ne!(stored_hash, forged_hash, "caller-supplied content hash must never be trusted");
+    assert_eq!(stored_hash, body.pointer("/metadata/content_hash").and_then(Value::as_str).unwrap());
+    assert_eq!(
+        stored.pointer("/metadata/source_note").and_then(Value::as_str),
+        Some("preserve this caller metadata"),
+        "ordinary caller metadata should be preserved"
+    );
+    assert_eq!(stored_hash.len(), 64);
+    assert!(stored_hash.chars().all(|c| c.is_ascii_hexdigit()));
+
+    let (status, body) = call(
+        &app,
+        Method::POST,
+        "/api/objects/",
+        Some(json!({
+            "type": "document",
+            "properties": {},
+            "content": {},
+            "metadata": "not-an-object"
+        })),
+        Some(&token),
+    ).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "invalid metadata shape was accepted: {body}");
+}
+
+
+#[test]
+fn principal_scoped_research_routes_are_not_admin_only_aggregates() {
+    assert!(
+        !crate::is_global_data_route("/api/knowledge/query"),
+        "knowledge retrieval enforces object ownership and should remain available to authorized analysts"
+    );
+    assert!(
+        !crate::is_global_data_route("/api/agents/pipeline/research"),
+        "the research pipeline registers and queries only the caller's datasets"
+    );
+    assert!(
+        crate::is_global_data_route("/api/compute/sql"),
+        "unscoped SQL must remain admin-only until its query contract is principal-scoped"
+    );
+    assert!(
+        crate::is_global_data_route("/api/io/export"),
+        "global export must remain admin-only"
+    );
 }
