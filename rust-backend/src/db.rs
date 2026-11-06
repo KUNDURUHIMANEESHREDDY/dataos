@@ -234,6 +234,7 @@ impl Db {
         &self,
         owner_id: &str,
         object_type: Option<&str>,
+        source: Option<&str>,
         limit: i64,
         offset: i64,
     ) -> Result<Vec<Value>, String> {
@@ -243,6 +244,10 @@ impl Db {
         if let Some(kind) = object_type {
             sql.push_str(" AND type = ?");
             values.push(Value::String(kind.to_string()));
+        }
+        if let Some(src) = source {
+            sql.push_str(" AND source LIKE ?");
+            values.push(Value::String(format!("%{}%", src)));
         }
         sql.push_str(" ORDER BY updated_at DESC LIMIT ? OFFSET ?");
         values.push(Value::from(limit));
@@ -256,13 +261,17 @@ impl Db {
         Ok(out)
     }
 
-    pub fn count_objects_for_owner(&self, owner_id: &str, object_type: Option<&str>) -> Result<i64, String> {
+    pub fn count_objects_for_owner(&self, owner_id: &str, object_type: Option<&str>, source: Option<&str>) -> Result<i64, String> {
         let conn = self.conn.lock().map_err(|_| "database lock poisoned".to_string())?;
         let mut sql = "SELECT COUNT(*) FROM objects WHERE deleted_at IS NULL AND json_extract(permissions, '$.owner') = ?".to_string();
         let mut values: Vec<Value> = vec![Value::String(owner_id.to_string())];
         if let Some(kind) = object_type {
             sql.push_str(" AND type = ?");
             values.push(Value::String(kind.to_string()));
+        }
+        if let Some(src) = source {
+            sql.push_str(" AND source LIKE ?");
+            values.push(Value::String(format!("%{}%", src)));
         }
         conn.query_row(&sql, rusqlite::params_from_iter(values.iter().map(param_value).map(|v| v.unwrap_or(rusqlite::types::Value::Null))), |row| row.get(0)).map_err(|e| e.to_string())
     }
