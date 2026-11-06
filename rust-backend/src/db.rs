@@ -313,9 +313,12 @@ impl Db {
             "indexes": {}
         });
         let hash = compute_content_hash(&object);
-        if let Value::Object(map) = &mut object["metadata"] {
-            map.entry("content_hash".to_string()).or_insert(Value::String(hash.clone()));
-        }
+        let metadata = object["metadata"]
+            .as_object_mut()
+            .ok_or_else(|| "Object metadata must be a JSON object".to_string())?;
+        // content_hash is server-managed evidence. Never trust an imported or
+        // caller-supplied cached value, even when it is non-empty.
+        metadata.insert("content_hash".to_string(), Value::String(hash));
         self.save_object(&object)?;
         Ok(object)
     }
