@@ -176,6 +176,15 @@ async fn object_ownership_isolation_blocks_cross_user_reads_writes_and_relations
     let (status, _) = call(&app, Method::GET, &format!("/api/objects/{alice_object}"), None, Some(&bob)).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 
+    // Alternate object-addressed routes use the same ownership check.
+    let (status, _) = call(&app, Method::GET, &format!("/api/graph/neighbors/{alice_object}"), None, Some(&bob)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // Global graph/catalog views are denied to non-admin principals until
+    // their query paths are fully owner-scoped.
+    let (status, _) = call(&app, Method::GET, "/api/catalog/health", None, Some(&bob)).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
     let (status, _) = call(&app, Method::DELETE, &format!("/api/objects/{alice_object}"), None, Some(&bob)).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 
