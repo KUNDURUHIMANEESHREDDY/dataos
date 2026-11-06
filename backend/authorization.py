@@ -172,12 +172,10 @@ class CapabilityMiddleware:
 
         headers = {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope.get("headers", [])}
         authorization = headers.get("authorization", "")
-        if authorization.lower().startswith("bearer "):
-            token = authorization[7:].strip()
-        else:
+        token = authorization[7:].strip() if authorization.lower().startswith("bearer ") else ""
+        if not token:
             # Browser clients use the HttpOnly session cookie; non-browser clients
             # may continue to send an explicit Bearer token.
-            token = ""
             for part in headers.get("cookie", "").split(";"):
                 name, separator, value = part.strip().partition("=")
                 if separator and name == "dataos_session":
