@@ -148,11 +148,16 @@ class DuplicateDetectionEngine:
             # current canonical fields instead. This runs once per object, outside
             # the pairwise loop, so catalog scans remain O(n) in hash computations.
             content_hash = obj.compute_hash()
+            raw_title = properties.get("title") or properties.get("filename", "")
+            # API clients and importers may store arbitrary JSON values in
+            # properties. Only textual titles are valid edit-distance evidence;
+            # malformed metadata must not abort the entire catalog scan.
+            title = raw_title.strip() if isinstance(raw_title, str) else ""
             comparison_data[object_id] = {
                 "content": content,
                 "normalized_content": content.strip(),
                 "content_hash": content_hash,
-                "title": properties.get("title") or properties.get("filename", ""),
+                "title": title,
                 "properties": properties,
             }
 
