@@ -14,6 +14,7 @@ RESULT_ENV = {
     "sbom": "SBOM_RESULT",
     "codeql": "CODEQL_RESULT",
     "backend": "BACKEND_RESULT",
+    "rust-backend": "RUST_BACKEND_RESULT",
     "postgres-storage": "POSTGRES_RESULT",
     "security-required": "SECURITY_RESULT",
     "workflow-lint": "WORKFLOW_LINT_RESULT",
@@ -47,7 +48,7 @@ fi
 
 def _valid_workflow():
     security_needs = ["secret-scan", "dependency-audit", "sbom", "codeql"]
-    backend_needs = ["backend", "postgres-storage", "security-required", "workflow-lint"]
+    backend_needs = ["backend", "rust-backend", "postgres-storage", "security-required", "workflow-lint"]
     security = _aggregate(security_needs)
     security["permissions"] = {"contents": "read", "security-events": "read"}
     security["steps"].append(
@@ -116,6 +117,11 @@ class WorkflowYamlGateTests(unittest.TestCase):
     def test_missing_dependency_fails(self):
         workflow = _valid_workflow()
         workflow["jobs"]["backend-required"]["needs"].remove("postgres-storage")
+        self.assertFalse(validate_gate_contract(Path("workflow.yml"), workflow))
+
+    def test_missing_rust_backend_dependency_fails(self):
+        workflow = _valid_workflow()
+        workflow["jobs"]["backend-required"]["needs"].remove("rust-backend")
         self.assertFalse(validate_gate_contract(Path("workflow.yml"), workflow))
 
     def test_security_alert_gate_requires_code_scanning_read_permission(self):
