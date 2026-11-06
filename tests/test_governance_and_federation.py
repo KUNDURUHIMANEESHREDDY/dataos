@@ -194,6 +194,29 @@ class TestGovernanceAndFederation(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     self.deduplication.find_duplicates(min_similarity=threshold)
 
+    def test_duplicate_detection_ignores_non_string_title_metadata(self):
+        """Malformed JSON title metadata must not crash a catalog-wide scan."""
+        first = self.storage.save_object(DataObject(
+            type="document",
+            properties={"title": {"unexpected": "object"}},
+            content="independent payload alpha",
+        ))
+        second = self.storage.save_object(DataObject(
+            type="document",
+            properties={"title": ["unexpected", "list"]},
+            content="independent payload bravo",
+        ))
+
+        duplicates = self.deduplication.find_duplicates(
+            min_similarity=0.99,
+            auto_link_graph=False,
+        )
+        pair_ids = {first.id, second.id}
+        self.assertFalse(
+            any({item["object_a_id"], item["object_b_id"]} == pair_ids for item in duplicates),
+            "non-string title metadata must not be treated as title similarity evidence",
+        )
+
     def test_duplicate_detection_bounds_results_and_reports_total_matches(self):
         """The API can retain top matches without allocating an unbounded result list."""
         for content in ("alpha", "bravo", "charlie"):
