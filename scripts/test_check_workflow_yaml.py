@@ -189,7 +189,7 @@ const refs = context.eventName === "pull_request"
   : [context.ref];
 let blockingCount = 0;
 for (const ref of refs) {
-  const alerts = await github.paginate(github.rest.codeScanning.listAlertsForRepo, { state: "open", ref });
+  const alerts = await github.paginate(github.rest.codeScanning.listAlertsForRepo, { state: "open", ref, per_page: 100 });
   const blocking = alerts.filter(({ rule }) => ["critical", "high"].includes(rule?.security_severity_level));
   blockingCount += blocking.length;
   for (const alert of blocking) {
@@ -219,7 +219,7 @@ let blockingCount = 0;
 for (const ref of refs) {
   const alerts = await github.paginate(
     github.rest.codeScanning.listAlertsForRepo,
-    { state: "open", ref }
+    { state: "open", ref, per_page: 100 }
   );
   const blocking = alerts.filter(({ rule }) => ["critical", "high"].includes(rule?.security_severity_level));
   blockingCount += blocking.length;
@@ -245,7 +245,7 @@ if (blockingCount > 0) core.setFailed("Open critical/high alerts must be fixed."
 github.rest.codeScanning.listAlertsForRepo;
 github.paginate(
   github.rest.codeScanning.listAlertsForRepo,
-  { state: "open", ref }
+  { state: "open", ref, per_page: 100 }
 );
 const blocking = alerts.filter(({ rule }) => ["critical", "high"].includes(rule?.security_severity_level));
 core.info("alerts found");
