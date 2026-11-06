@@ -3,11 +3,13 @@
 import { useCallback, useState, useRef } from "react";
 import { useSpatialStore } from "@/hooks/useSpatialStore";
 import { api } from "@/lib/api";
+import { ingestFiles } from "@/lib/ingestion";
 
 export default function DropZone() {
   const [dragging, setDragging] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [lastResult, setLastResult] = useState<string | null>(null);
+  const [lastResultIsError, setLastResultIsError] = useState(false);
   const counter = useRef(0);
 
   const handleDragEnter = useCallback((e: React.DragEvent) => {
@@ -40,47 +42,61 @@ export default function DropZone() {
 
     setUploading(true);
     setLastResult(null);
+    setLastResultIsError(false);
+
+    let successfulFiles = 0;
+    let objectsCreated = 0;
+    let relationsCreated = 0;
+    const failures: string[] = [];
 
     try {
-      for (const file of files) {
-        const text = await file.text();
-        const res = await fetch("/api/ingest/universal", {
-          method: "POST",
-          headers: { "Content-Type": "application/x-www-form-urlencoded" },
-          body: new URLSearchParams({
-            filename: file.name,
-            content: text,
-            discover_relations: "true",
-          }),
-        });
-        const data = await res.json();
-        setLastResult(`Ingested ${file.name}: ${data.objects_created || 0} objects, ${data.relations_created || 0} relations`);
+      const outcomes = await ingestFiles(
+        files.map((file) => ({ filename: file.name, read: () => file.text() })),
+      );
+      for (const outcome of outcomes) {
+        if (outcome.ok === true) {
+          successfulFiles += 1;
+          objectsCreated += outcome.objectsCreated;
+          relationsCreated += outcome.relationsCreated;
+        } else {
+          failures.push(`${outcome.filename}: ${outcome.error}`);
+        }
       }
-      // Refresh the store
-      const objsRes = await api.listObjects({ limit: 200 });
-      const relsRes = await api.listRelationships({ limit: 500 });
-      const typeMap: Record<string, string> = {
-        document: "dataset", dataset: "dataset", csv: "dataset",
-        entity: "entity", relation: "relation", analysis: "analysis",
-        notebook: "analysis", agent: "agent",
-      };
-      const objects = (objsRes.objects || []).map((o: any) => ({
-        id: o.id,
-        type: typeMap[o.type] || "dataset",
-        name: o.properties?.filename || o.properties?.name || o.id.slice(0, 8),
-        properties: o.properties || {},
-      }));
-      const edges = (relsRes.relationships || []).map((r: any) => ({
-        id: r.id || `${r.source_id}-${r.target_id}`,
-        source: r.source_id,
-        target: r.target_id,
-        type: r.relation_type || "related_to",
-        confidence: r.confidence || 1.0,
-      }));
-      useSpatialStore.getState().setObjects(objects);
-      useSpatialStore.getState().setEdges(edges);
-    } catch (err: any) {
-      setLastResult(`Error: ${err.message}`);
+
+      // Refresh after all files have settled so successful uploads remain visible
+      // even when another file in the same drop was rejected.
+      try {
+        const [objsRes, relsRes] = await Promise.all([
+          api.listObjects({ limit: 200 }),
+          api.listRelationships({ limit: 500 }),
+        ]);
+        const typeMap: Record<string, string> = {
+          document: "dataset", dataset: "dataset", csv: "dataset",
+          entity: "entity", relation: "relation", analysis: "analysis",
+          notebook: "analysis", agent: "agent",
+        };
+        const objects = (objsRes.objects || []).map((o: any) => ({
+          id: o.id,
+          type: typeMap[o.type] || "dataset",
+          name: o.properties?.filename || o.properties?.name || o.id.slice(0, 8),
+          properties: o.properties || {},
+        }));
+        const edges = (relsRes.relationships || []).map((r: any) => ({
+          id: r.id || `${r.source_id}-${r.target_id}`,
+          source: r.source_id,
+          target: r.target_id,
+          type: r.relation_type || "related_to",
+          confidence: r.confidence || 1.0,
+        }));
+        useSpatialStore.getState().setObjects(objects);
+        useSpatialStore.getState().setEdges(edges);
+      } catch (err) {
+        failures.push(`Catalog refresh: ${err instanceof Error ? err.message : "request failed"}`);
+      }
+
+      const summary = `Ingested ${successfulFiles} of ${files.length} files (${objectsCreated} objects, ${relationsCreated} relations).`;
+      setLastResult(failures.length > 0 ? `${summary} Failed: ${failures.join("; ")}` : summary);
+      setLastResultIsError(failures.length > 0 || successfulFiles === 0);
     } finally {
       setUploading(false);
     }
@@ -125,13 +141,20 @@ export default function DropZone() {
       )}
 
       {lastResult && !uploading && (
-        <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-50">
-          <div
-            className="glass rounded-xl px-4 py-2 text-sm animate-slide-up cursor-pointer"
+        <div
+          role={lastResultIsError ? "alert" : "status"}
+          aria-live={lastResultIsError ? "assertive" : "polite"}
+          className="absolute bottom-4 left-1/2 -translate-x-1/2 z-50 max-w-[min(90vw,40rem)] glass rounded-xl px-4 py-2 text-sm animate-slide-up flex items-center gap-3"
+        >
+          <span>{lastResult}</span>
+          <button
+            type="button"
+            aria-label="Dismiss upload result"
             onClick={() => setLastResult(null)}
+            className="shrink-0 rounded px-1 hover:bg-black/10 focus-visible:outline focus-visible:outline-2"
           >
-            {lastResult}
-          </div>
+            ×
+          </button>
         </div>
       )}
     </div>
