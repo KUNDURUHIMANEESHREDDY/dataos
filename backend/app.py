@@ -32,7 +32,7 @@ from core.permissions.auth import (
 )
 from backend.knowledge_rag import create_knowledge_router
 from backend.cors_config import cors_middleware_options
-from backend.authorization import CapabilityMiddleware
+from backend.authorization import CapabilityMiddleware, get_current_user, get_user_store, require_capability
 from backend.workflow_api import WorkflowRequestError, execute_safe_workflow
 from runtime.workflows.workflow_engine import WorkflowEngine
 
@@ -183,6 +183,23 @@ app.include_router(create_knowledge_router(dataos))
 # REQUEST / RESPONSE MODELS
 # =============================================================================
 
+class RegisterRequest(BaseModel):
+    """Self-service registration always creates a least-privilege viewer."""
+
+    model_config = {"extra": "forbid"}
+
+    username: str = Field(min_length=1, max_length=80)
+    email: str = Field(min_length=3, max_length=254)
+    password: str = Field(min_length=8, max_length=1024)
+
+
+class LoginRequest(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    login: str = Field(min_length=1, max_length=254)
+    password: str = Field(min_length=1, max_length=1024)
+
+
 class ObjectCreateRequest(BaseModel):
     type: str = "document"
     schema_ref: str = "generic.v1"
@@ -245,7 +262,7 @@ async def register_user(req: RegisterRequest):
             detail="User auth is disabled until DATAOS_JWT_SECRET is configured.",
         )
     try:
-        user = user_store.register(req.username, req.email, req.password, role=req.role)
+        user = get_user_store().register(req.username, req.email, req.password, role="viewer")
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return user.to_dict()
@@ -258,7 +275,7 @@ async def login_user(req: LoginRequest):
             status_code=503,
             detail="User auth is disabled until DATAOS_JWT_SECRET is configured.",
         )
-    user = user_store.authenticate(req.login, req.password)
+    user = get_user_store().authenticate(req.login, req.password)
     if user is None:
         raise HTTPException(
             status_code=401,
@@ -282,7 +299,8 @@ async def list_users(current_user: Optional[User] = Depends(get_current_user)):
         raise HTTPException(status_code=503, detail="User auth is not configured.")
     if current_user.role != "admin":
         raise HTTPException(status_code=403, detail="Admin role required.")
-    return {"total": len(user_store.list_users()), "users": user_store.list_users()}
+    users = get_user_store().list_users()
+    return {"total": len(users), "users": users}
 
 
 # =============================================================================
