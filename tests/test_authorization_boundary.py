@@ -8,7 +8,7 @@ import pytest
 from fastapi import HTTPException, Request
 
 import backend.authorization as authorization
-from backend.app import require_production_api_token
+from backend.app import get_current_user, require_production_api_token
 from core.permissions.auth import UserStore, issue_jwt
 from core.permissions.policy import Role
 
@@ -74,6 +74,11 @@ def test_production_accepts_a_valid_jwt_session_cookie(monkeypatch):
     token = issue_jwt("cookie-user", Role.VIEWER.value)
     request = _request("/api/objects/", cookie=f"dataos_session={token}")
     assert require_production_api_token(request) is None
+
+
+def test_get_current_user_defaults_missing_header_to_none(monkeypatch):
+    monkeypatch.setenv("DATAOS_JWT_SECRET", "u" * 48)
+    assert asyncio.run(get_current_user(_request("/api/objects/"))) is None
 
 
 def test_production_rejects_missing_user_session_when_jwt_is_configured(monkeypatch):
