@@ -446,8 +446,9 @@ class PostgresStorage(StorageBackend):
             self._fallback_db.commit()
             return rel
 
-    def get_relationship(self, rel_id: str) -> Optional[Relationship]:
+    def get_relationship(self, relation_id: str) -> Optional[Relationship]:
         """Retrieve a Relationship by ID."""
+        rel_id = relation_id
         if self._pg_conn and not self.mock_mode:
             with self._pg_conn.cursor() as cur:
                 cur.execute("SELECT * FROM dataos_relationships WHERE id = %s AND deleted_at IS NULL", (rel_id,))
@@ -477,8 +478,9 @@ class PostgresStorage(StorageBackend):
                 created_at=r["created_at"], updated_at=r["updated_at"], deleted_at=r["deleted_at"]
             )
 
-    def delete_relationship(self, rel_id: str, soft: bool = True) -> bool:
+    def delete_relationship(self, relation_id: str, soft: bool = True) -> bool:
         """Delete or soft-delete a relationship, matching the StorageBackend contract."""
+        rel_id = relation_id
         if self._pg_conn and not self.mock_mode:
             with self._pg_conn.cursor() as cur:
                 if soft:
