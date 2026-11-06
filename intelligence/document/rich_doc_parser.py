@@ -56,7 +56,7 @@ class RichDocumentExtractor:
                 tables.append(parsed_tbl)
 
         # 2. Extract Figures: ![Caption](url_or_path)
-        fig_pattern = re.compile(r"!\[([^\]]*)\]\(([^)]+)\)")
+        fig_pattern = re.compile(r"!\[([^\]]*+)\]\(([^)]++)\)")
         for line_num, line in enumerate(lines, 1):
             for match in fig_pattern.finditer(line):
                 figures.append({
@@ -66,7 +66,7 @@ class RichDocumentExtractor:
                 })
 
         # 3. Extract Footnotes / Citations: [^1]: Citation text or [1] Citation
-        footnote_pattern = re.compile(r"^\[\^?([0-9A-Za-z_-]+)\]:\s*(.+)$")
+        footnote_pattern = re.compile(r"^\[\^?([0-9A-Za-z_-]++)\]:\s*+(.++)$")
         for line_num, line in enumerate(lines, 1):
             fn_match = footnote_pattern.match(line.strip())
             if fn_match:
