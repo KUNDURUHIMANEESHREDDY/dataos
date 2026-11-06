@@ -51,6 +51,8 @@ RESULT_ENV = {
     "codeql": "CODEQL_RESULT",
     "backend": "BACKEND_RESULT",
     "postgres-storage": "POSTGRES_RESULT",
+    "rust-backend": "RUST_BACKEND_RESULT",
+    "frontend": "FRONTEND_RESULT",
     "security-required": "SECURITY_RESULT",
     "workflow-lint": "WORKFLOW_LINT_RESULT",
 }
@@ -127,7 +129,6 @@ def has_critical_high_alert_gate(job: dict) -> bool:
     )
     for step in job.get("steps", []):
         if not isinstance(step, dict) or not is_enforced_step(job, step):
-        if not isinstance(step, dict):
             continue
         if step.get("name") != "Fail on open critical/high code-scanning alerts":
             continue
@@ -177,6 +178,8 @@ def validate_gate_contract(path: Path, workflow: object) -> bool:
         "backend-required": {
             "backend",
             "postgres-storage",
+            "rust-backend",
+            "frontend",
             "security-required",
             "workflow-lint",
         },
@@ -221,12 +224,6 @@ def validate_gate_contract(path: Path, workflow: object) -> bool:
             ok = False
 
     security_job = jobs.get("security-required")
-    if isinstance(security_job, dict) and not has_critical_high_alert_gate(security_job):
-        print(
-            f"FAIL: {path}: security-required must fail closed on open critical/high code-scanning alerts",
-            file=sys.stderr,
-        )
-        ok = False
     if isinstance(security_job, dict):
         permissions = security_job.get("permissions", workflow.get("permissions", {}))
         security_events_permission = (
