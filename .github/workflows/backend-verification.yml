@@ -233,60 +233,35 @@ jobs:
           test "$CODEQL_RESULT" = "success"
 
       - name: Fail on open critical/high code-scanning alerts
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          endpoint="repos/${GITHUB_REPOSITORY}/code-scanning/alerts?state=open&per_page=100"
-          fetch_alerts() {
-            local filter="$1"
-            gh api --paginate --jq '
-              .[]
-              | select(.state == "open" and
-                  ((.rule.security_severity_level // "") == "critical" or
-                   (.rule.security_severity_level // "") == "high"))
-              | [
-                  ((.number // 0) | tostring),
-                  (.rule.security_severity_level // "unknown"),
-                  (.rule.id // "unknown"),
-                  (.most_recent_instance.location.path // "unknown"),
-                  ((.most_recent_instance.location.start_line // 0) | tostring)
-                ]
-              | @tsv
-            ' "${endpoint}&${filter}"
-          }
-          count_lines() {
-            if [[ -n "$1" ]]; then
-              printf '%s\n' "$1" | sed '/^$/d' | wc -l | tr -d ' '
-            else
-              printf '0'
-            fi
-          }
-          if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
-            alerts="$(fetch_alerts "ref=refs/pull/${PR_NUMBER}/merge")"
-            count="$(count_lines "$alerts")"
-            echo "Open critical/high alerts associated with PR #${PR_NUMBER} merge ref: $count"
-            if [[ "$count" != "0" ]]; then
-              echo "PR alerts (number, severity, rule, path, line):"
-              printf '%s\n' "$alerts"
-              echo "::error::This PR has open critical/high code-scanning alerts."
-              exit 1
-            fi
-            echo "No open critical/high alerts associated with this PR merge ref. Main-branch gate remains fail-closed until its total reaches zero."
-          else
-            alerts="$(fetch_alerts "ref=refs/heads/${GITHUB_REF_NAME}")"
-            count="$(count_lines "$alerts")"
-            echo "Open critical/high code-scanning alerts on ${GITHUB_REF_NAME}: $count"
-            if [[ "$count" != "0" ]]; then
-              echo "Open alerts (number, severity, rule, path, line):"
-              printf '%s\n' "$alerts"
-              echo "::error::Found $count open critical/high code-scanning alert(s); triage and remediate before release."
-              exit 1
-            fi
-          fi
-          echo "No open critical/high code-scanning alerts were found."
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        with:
+          script: |
+            const ref = context.eventName === "pull_request"
+              ? `refs/pull/${context.payload.pull_request.number}/merge`
+              : context.ref;
+            const alerts = await github.paginate(
+              github.rest.codeScanning.listAlertsForRepo,
+              {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                state: "open",
+                ref,
+                per_page: 100
+              }
+            );
+            const blocking = alerts.filter(({ rule }) =>
+              ["critical", "high"].includes(rule?.security_severity_level)
+            );
+            core.info(`Open critical/high code-scanning alerts on ${ref}: ${blocking.length}`);
+            for (const alert of blocking) {
+              core.error(`#${alert.number} ${alert.rule?.security_severity_level}: ${alert.rule?.id}`);
+            }
+            if (blocking.length > 0) {
+              core.setFailed("Open critical/high code-scanning alerts must be triaged and remediated before release.");
+            } else {
+              core.info("No open critical/high code-scanning alerts were found.");
+            }
+
   backend-required:
     name: Backend required
     if: always()
