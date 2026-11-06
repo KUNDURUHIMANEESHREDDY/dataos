@@ -151,13 +151,11 @@ fn is_global_data_route(path: &str) -> bool {
         "/api/query" |
         "/api/query/" |
         "/api/agents/execute" |
-        "/api/agents/pipeline/research" |
         "/api/workflows/execute" |
         "/api/vectors/recompute" |
         "/api/sync/resolve_conflict" |
         "/api/sharing/issue_token" |
-        "/api/sharing/verify_token" |
-        "/api/knowledge/query"
+        "/api/sharing/verify_token"
     )
 }
 
