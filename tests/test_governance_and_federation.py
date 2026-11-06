@@ -152,6 +152,32 @@ class TestGovernanceAndFederation(unittest.TestCase):
 
         self.assertEqual([obj.hash_calls for obj in objects], [1, 1, 1])
 
+    def test_empty_cached_hash_metadata_falls_back_to_computed_hash(self):
+        """Empty caller-supplied hashes must not make unrelated objects exact matches."""
+        for cached_hash in (None, ""):
+            first = self.storage.save_object(DataObject(
+                type="document",
+                properties={"title": "Alpha source document"},
+                metadata={"content_hash": cached_hash},
+                content="alpha source payload",
+            ))
+            second = self.storage.save_object(DataObject(
+                type="document",
+                properties={"title": "Omega unrelated document"},
+                metadata={"content_hash": cached_hash},
+                content="omega unrelated payload",
+            ))
+
+            matches = self.deduplication.find_duplicates(
+                min_similarity=1.0,
+                auto_link_graph=False,
+            )
+            pair_ids = {first.id, second.id}
+            self.assertFalse(
+                any({item["object_a_id"], item["object_b_id"]} == pair_ids for item in matches),
+                f"cached hash {cached_hash!r} must fall back to each object's computed hash",
+            )
+
     def test_duplicate_detection_skips_title_distance_when_length_bound_fails(self):
         """Avoid quadratic edit-distance work when title lengths cannot meet the threshold."""
         self.storage.save_object(DataObject(

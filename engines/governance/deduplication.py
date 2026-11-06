@@ -131,9 +131,12 @@ class DuplicateDetectionEngine:
             metadata = obj.metadata or {}
             properties = obj.properties or {}
             content = str(obj.content)
+            cached_hash = metadata.get("content_hash")
+            # Metadata can originate from API callers. Empty or malformed cached
+            # values must never compare equal across unrelated objects.
             content_hash = (
-                metadata["content_hash"]
-                if "content_hash" in metadata
+                cached_hash.strip()
+                if isinstance(cached_hash, str) and cached_hash.strip()
                 else obj.compute_hash()
             )
             comparison_data[object_id] = {
@@ -158,7 +161,10 @@ class DuplicateDetectionEngine:
                 hash_a = data_a["content_hash"]
                 hash_b = data_b["content_hash"]
 
-                is_exact = (hash_a == hash_b) or (bool(content_a) and content_a == content_b)
+                is_exact = (
+                    (bool(hash_a) and bool(hash_b) and hash_a == hash_b)
+                    or (bool(content_a) and content_a == content_b)
+                )
                 method = "exact_hash" if is_exact else None
                 sim_score = 1.0 if is_exact else 0.0
 
