@@ -1,7 +1,7 @@
 use std::{collections::HashSet, time::{Duration, Instant}};
 
 use csv::StringRecord;
-use rusqlite::{Connection, hooks::{AuthAction, Authorization}, types::ValueRef};
+use rusqlite::{Connection, hooks::{AuthAction, AuthContext, Authorization}, types::ValueRef};
 use serde_json::{Value, json};
 
 use crate::db::Db;
@@ -269,7 +269,7 @@ fn execute_sql_inner(query: &str, db: &Db, owner_id: Option<&str>) -> Result<Val
     // Dataset registration above is trusted setup. From this point onward, caller SQL
     // is constrained by SQLite itself rather than relying on keyword matching alone.
     conn.execute_batch("PRAGMA query_only = ON").map_err(|e| e.to_string())?;
-    conn.authorizer(Some(|context| match context.action {
+    conn.authorizer(Some(|context: AuthContext<'_>| match context.action {
         AuthAction::Select | AuthAction::Read { .. } | AuthAction::Recursive => Authorization::Allow,
         AuthAction::Function { function_name } => {
             if function_name.eq_ignore_ascii_case("load_extension")
