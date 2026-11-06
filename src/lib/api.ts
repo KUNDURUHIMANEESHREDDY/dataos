@@ -1,9 +1,11 @@
+import { mergeApiHeaders } from "./api-headers.mjs";
+
 const API_BASE = "";
 
 async function apiFetch(path: string, options?: RequestInit): Promise<any> {
   const res = await fetch(`${API_BASE}${path}`, {
-    headers: { "Content-Type": "application/json" },
     ...options,
+    headers: mergeApiHeaders(options?.headers),
   });
   if (!res.ok) {
     const text = await res.text();
