@@ -118,7 +118,26 @@ def test_summary_ignores_non_finite_and_boolean_quality_scores():
     assert summary["health_grade"] == "unrated"
 
 
-@pytest.mark.parametrize("value", [0, -1, True, 1.5, "10"])
+@pytest.mark.parametrize("value", [0, -1, True, 1.5, "10", 10_001])
 def test_summary_rejects_invalid_sample_limits(value):
     with pytest.raises(ValueError):
         DataCatalogEngine(FakeStorage(), max_objects=value)
+
+
+
+def test_summary_ignores_quality_scores_that_overflow_float_conversion():
+    storage = FakeStorage(
+        objects=[
+            SimpleNamespace(
+                type=ObjectType.QUALITY_REPORT.value,
+                properties={"quality_score": 10 ** 1000},
+            ),
+        ],
+    )
+
+    summary = DataCatalogEngine(storage).get_catalog_summary()
+
+    assert summary["quality_scores_used"] == 0
+    assert summary["quality_scores_ignored"] == 1
+    assert summary["data_health_score"] is None
+    assert summary["health_grade"] == "unrated"
