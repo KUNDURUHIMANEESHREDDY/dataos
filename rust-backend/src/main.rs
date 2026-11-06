@@ -851,8 +851,13 @@ async fn list_relationships(
     let limit = clamp_i64(params.limit, 1000, 1, 1000);
     let offset = clamp_i64(params.offset, 0, 0, 1_000_000);
     let confidence = params.min_confidence.unwrap_or(0.0).clamp(0.0, 1.0);
-    let mut relationships = state.db.list_relationships(params.source_id.as_deref(), params.target_id.as_deref(), params.relation_type.as_deref(), confidence, limit, offset)
-        .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let mut relationships = if user.as_ref().map(|u| u.role == "admin").unwrap_or(true) {
+        state.db.list_relationships(params.source_id.as_deref(), params.target_id.as_deref(), params.relation_type.as_deref(), confidence, limit, offset)
+            .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?
+    } else {
+        state.db.list_relationships(params.source_id.as_deref(), params.target_id.as_deref(), params.relation_type.as_deref(), confidence, 50000, 0)
+            .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?
+    };
     let total = if let Some(user) = user {
         if user.role == "admin" {
             state.db.count_relationships(params.source_id.as_deref(), params.target_id.as_deref(), params.relation_type.as_deref(), confidence)
@@ -864,7 +869,9 @@ async fn list_relationships(
                 state.db.can_access_object(source, &user.id, false).unwrap_or(false)
                     && state.db.can_access_object(target, &user.id, false).unwrap_or(false)
             });
-            relationships.len() as i64
+            let total = relationships.len() as i64;
+            relationships = relationships.into_iter().skip(offset as usize).take(limit as usize).collect();
+            total
         }
     } else {
         state.db.count_relationships(params.source_id.as_deref(), params.target_id.as_deref(), params.relation_type.as_deref(), confidence)
