@@ -2,7 +2,6 @@ name: DataOS verification
 
 on:
   push:
-    branches: [main, production-hardening]
   pull_request:
   workflow_dispatch:
 
@@ -206,15 +205,35 @@ jobs:
           languages: python
           build-mode: none
       - uses: github/codeql-action/analyze@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4
-
-  backend-required:
-    name: Backend required
+  security-required:
+    name: Security required
     if: always()
-    needs: [backend, postgres-storage]
+    needs: [secret-scan, dependency-audit, sbom, codeql]
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      security-events: read
     steps:
-      - name: Fail closed unless backend and PostgreSQL verification passed
+      - name: Fail closed unless every security scan passed
+        env:
+          SECRET_SCAN_RESULT: ${{ needs.secret-scan.result }}
+          DEPENDENCY_AUDIT_RESULT: ${{ needs.dependency-audit.result }}
+          SBOM_RESULT: ${{ needs.sbom.result }}
+          CODEQL_RESULT: ${{ needs.codeql.result }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "secret-scan: $SECRET_SCAN_RESULT"
+          echo "dependency-audit: $DEPENDENCY_AUDIT_RESULT"
+          echo "sbom: $SBOM_RESULT"
+          echo "codeql: $CODEQL_RESULT"
+          test "$SECRET_SCAN_RESULT" = "success"
+          test "$DEPENDENCY_AUDIT_RESULT" = "success"
+          test "$SBOM_RESULT" = "success"
+          test "$CODEQL_RESULT" = "success"
+          echo "All security verification jobs passed."
+      - name: Fail on open critical/high code-scanning alerts
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
@@ -251,20 +270,18 @@ jobs:
             count="$(count_lines "$alerts")"
             echo "Open critical/high alerts associated with PR #${PR_NUMBER} merge ref: $count"
             if [[ "$count" != "0" ]]; then
-              echo "PR alerts (number, severity, rule, path, line):"
               printf '%s\n' "$alerts"
               echo "::error::This PR has open critical/high code-scanning alerts."
               exit 1
             fi
-            echo "No open critical/high alerts associated with this PR merge ref. Main-branch gate remains fail-closed until its total reaches zero."
+            echo "No open critical/high alerts associated with this PR merge ref."
           else
             alerts="$(fetch_alerts "ref=refs/heads/${GITHUB_REF_NAME}")"
             count="$(count_lines "$alerts")"
             echo "Open critical/high code-scanning alerts on ${GITHUB_REF_NAME}: $count"
             if [[ "$count" != "0" ]]; then
-              echo "Open alerts (number, severity, rule, path, line):"
               printf '%s\n' "$alerts"
-              echo "::error::Found $count open critical/high code-scanning alert(s); triage and remediate before release."
+              echo "::error::Found $count open critical/high code-scanning alert(s); remediate before release."
               exit 1
             fi
           fi
@@ -272,24 +289,31 @@ jobs:
   backend-required:
     name: Backend required
     if: always()
-    needs: [backend, postgres-storage, security-required, workflow-lint]
+    needs: [backend, postgres-storage, rust-backend, frontend, security-required, workflow-lint]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Fail closed unless backend, PostgreSQL, and security verification passed
+      - name: Fail closed unless all product and security verification passed
         env:
           BACKEND_RESULT: ${{ needs.backend.result }}
           POSTGRES_RESULT: ${{ needs.postgres-storage.result }}
+          RUST_BACKEND_RESULT: ${{ needs.rust-backend.result }}
+          FRONTEND_RESULT: ${{ needs.frontend.result }}
           SECURITY_RESULT: ${{ needs.security-required.result }}
           WORKFLOW_LINT_RESULT: ${{ needs.workflow-lint.result }}
+        shell: bash
         run: |
           set -euo pipefail
           echo "backend: $BACKEND_RESULT"
           echo "postgres-storage: $POSTGRES_RESULT"
+          echo "rust-backend: $RUST_BACKEND_RESULT"
+          echo "frontend: $FRONTEND_RESULT"
           echo "security-required: $SECURITY_RESULT"
           echo "workflow-lint: $WORKFLOW_LINT_RESULT"
           test "$BACKEND_RESULT" = "success"
           test "$POSTGRES_RESULT" = "success"
+          test "$RUST_BACKEND_RESULT" = "success"
+          test "$FRONTEND_RESULT" = "success"
           test "$SECURITY_RESULT" = "success"
           test "$WORKFLOW_LINT_RESULT" = "success"
-          echo "Backend, live PostgreSQL, security, and workflow integrity verification passed."
+          echo "Backend, PostgreSQL, Rust, frontend, security, and workflow integrity verification passed."
