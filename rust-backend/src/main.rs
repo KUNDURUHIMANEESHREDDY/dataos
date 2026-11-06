@@ -223,7 +223,6 @@ struct RegisterRequest {
     username: String,
     email: String,
     password: String,
-    role: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -290,7 +289,7 @@ async fn auth_register(State(state): State<AppState>, Json(req): Json<RegisterRe
     if !jwt_configured() {
         return Err(ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "User auth is disabled until DATAOS_JWT_SECRET is configured."));
     }
-    let user = state.db.user_register(&req.username, &req.email, &req.password, req.role.as_deref().unwrap_or("viewer"))
+    let user = state.db.user_register(&req.username, &req.email, &req.password, "viewer")
         .map_err(|error| ApiError::new(StatusCode::BAD_REQUEST, error))?;
     ok_json(user_payload(&user))
 }
