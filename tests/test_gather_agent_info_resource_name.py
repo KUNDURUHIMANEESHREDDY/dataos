@@ -46,7 +46,7 @@ def load_gather_agent_info():
 class TestVertexResourceNameParsing(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.parser = load_gather_agent_info()._resource_name_from_asset_name
+        cls.parser = staticmethod(load_gather_agent_info()._resource_name_from_asset_name)
 
     def test_accepts_google_authority_relative_and_https_names(self):
         path = "projects/demo/locations/us-central1/reasoningEngines/123"
