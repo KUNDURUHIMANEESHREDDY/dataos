@@ -264,34 +264,41 @@ jobs:
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
         with:
           script: |
-            const ref = context.eventName === "pull_request"
-              ? `refs/pull/${context.payload.pull_request.number}/merge`
-              : context.ref;
-            const alerts = await github.paginate(
-              github.rest.codeScanning.listAlertsForRepo,
-              {
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                state: "open",
-                ref,
-                per_page: 100
+            const refs = context.eventName === "pull_request"
+              ? [
+                  `refs/heads/${context.payload.pull_request.base.ref}`,
+                  `refs/pull/${context.payload.pull_request.number}/merge`
+                ]
+              : [context.ref];
+            let blockingCount = 0;
+            for (const ref of refs) {
+              const alerts = await github.paginate(
+                github.rest.codeScanning.listAlertsForRepo,
+                {
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  state: "open",
+                  ref,
+                  per_page: 100
+                }
+              );
+              const blocking = alerts.filter(({ rule }) =>
+                ["critical", "high"].includes(rule?.security_severity_level)
+              );
+              core.info(`Open critical/high code-scanning alerts on ${ref}: ${blocking.length}`);
+              blockingCount += blocking.length;
+              for (const alert of blocking) {
+                const location = alert.most_recent_instance?.location;
+                const where = location?.path
+                  ? `${location.path}:${location.start_line ?? "?"}`
+                  : "location unavailable";
+                core.error(`#${alert.number} ${alert.rule?.security_severity_level}: ${alert.rule?.id} on ${ref} at ${where}`);
               }
-            );
-            const blocking = alerts.filter(({ rule }) =>
-              ["critical", "high"].includes(rule?.security_severity_level)
-            );
-            core.info(`Open critical/high code-scanning alerts on ${ref}: ${blocking.length}`);
-            for (const alert of blocking) {
-              const location = alert.most_recent_instance?.location;
-              const where = location?.path
-                ? `${location.path}:${location.start_line ?? "?"}`
-                : "location unavailable";
-              core.error(`#${alert.number} ${alert.rule?.security_severity_level}: ${alert.rule?.id} at ${where}`);
             }
-            if (blocking.length > 0) {
-              core.setFailed("Open critical/high code-scanning alerts must be triaged and remediated before release.");
+            if (blockingCount > 0) {
+              core.setFailed("Open critical/high code-scanning alerts on the base or pull-request ref must be triaged and remediated before release.");
             } else {
-              core.info("No open critical/high code-scanning alerts were found.");
+              core.info("No open critical/high code-scanning alerts were found on the base or pull-request ref.");
             }
 
   backend-required:
