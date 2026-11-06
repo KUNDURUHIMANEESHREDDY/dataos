@@ -98,9 +98,9 @@ jobs:
         image: postgres:16
         env:
           POSTGRES_USER: dataos
-          # This PostgreSQL service is isolated to one ephemeral CI job; trust avoids
-          # embedding a predictable pseudo-secret in the workflow or connection URL.
-          POSTGRES_HOST_AUTH_METHOD: trust
+          # Use the run-scoped, least-privilege GitHub token as an ephemeral database password.
+          # The token is masked and is never printed by this job.
+          POSTGRES_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
           POSTGRES_DB: dataos_test
         ports:
           - 5432:5432
@@ -110,7 +110,7 @@ jobs:
           --health-timeout 5s
           --health-retries 5
     env:
-      DATAOS_TEST_POSTGRES_URL: postgresql://dataos@localhost:5432/dataos_test
+      DATAOS_TEST_POSTGRES_URL: postgresql://dataos:${{ secrets.GITHUB_TOKEN }}@localhost:5432/dataos_test
     steps:
       - name: Check out source
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -242,19 +242,19 @@ jobs:
     steps:
       - name: Fail closed on any security failure
         env:
-          SECRET_SCAN_RESULT: ${{ needs.secret-scan.result }}
+          GITLEAKS_RESULT: ${{ needs.secret-scan.result }}
           DEPENDENCY_AUDIT_RESULT: ${{ needs.dependency-audit.result }}
           SBOM_RESULT: ${{ needs.sbom.result }}
           CODEQL_RESULT: ${{ needs.codeql.result }}
           RUST_CODEQL_RESULT: ${{ needs.rust-codeql.result }}
         run: |
           set -euo pipefail
-          echo "secret-scan: $SECRET_SCAN_RESULT"
+          echo "secret-scan: $GITLEAKS_RESULT"
           echo "dependency-audit: $DEPENDENCY_AUDIT_RESULT"
           echo "sbom: $SBOM_RESULT"
           echo "codeql: $CODEQL_RESULT"
           echo "rust-codeql: $RUST_CODEQL_RESULT"
-          test "$SECRET_SCAN_RESULT" = "success"
+          test "$GITLEAKS_RESULT" = "success"
           test "$DEPENDENCY_AUDIT_RESULT" = "success"
           test "$SBOM_RESULT" = "success"
           test "$CODEQL_RESULT" = "success"
