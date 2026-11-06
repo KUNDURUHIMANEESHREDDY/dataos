@@ -115,28 +115,26 @@ def has_fail_closed_result_checks(job: dict, required_needs: set[str]) -> bool:
 
 
 def has_critical_high_alert_gate(job: dict) -> bool:
-    """Require the security aggregate to fail on open critical/high alerts."""
+    """Require a fail-closed alert gate on the code that would be released.
+
+    Base-branch alerts are diagnostic on pull requests so a remediation PR can
+    pass when its merge ref fixes them. Pushes to a release branch remain gated.
+    """
     required_fragments = (
-        'code-scanning/alerts?state=open&per_page=100',
-        'gh api --paginate --jq',
-        'fetch_alerts "ref=refs/pull/${PR_NUMBER}/merge"',
-        'fetch_alerts "ref=refs/heads/${GITHUB_REF_NAME}"',
-        '== "critical"',
-        '== "high"',
-        '.number // 0',
-        'if [[ "$count" != "0" ]]',
-        "exit 1",
-    )
-    github_script_fragments = (
         "github.rest.codeScanning.listAlertsForRepo",
         "github.paginate(",
         'state: "open"',
         "refs/heads/",
         "refs/pull/",
-        "ref,",
-        '["critical", "high"]',
+        "const blockingRefs = new Set(",
+        "blockingRefs.has(ref)",
+        "if (blocksRelease) blockingCount += blocking.length;",
+        "core.warning(",
+        "Base-branch diagnostic only:",
+        "core.error(",
         "location?.path",
         "location.start_line",
+        "alert.number",
         "blockingCount > 0",
         "core.setFailed(",
     )
@@ -145,9 +143,6 @@ def has_critical_high_alert_gate(job: dict) -> bool:
             continue
         if step.get("name") != "Fail on open critical/high code-scanning alerts":
             continue
-
-        # Prefer the GitHub Script integration: it uses the action's scoped
-        # token rather than exporting a bearer token into the shell environment.
         uses = step.get("uses")
         with_config = step.get("with")
         script = with_config.get("script") if isinstance(with_config, dict) else None
@@ -155,20 +150,8 @@ def has_critical_high_alert_gate(job: dict) -> bool:
             isinstance(uses, str)
             and uses.startswith("actions/github-script@")
             and isinstance(script, str)
-            and all(fragment in script for fragment in github_script_fragments)
+            and all(fragment in script for fragment in required_fragments)
         ):
-            return True
-
-        env = step.get("env")
-        run = step.get("run")
-        if not isinstance(env, dict) or not isinstance(run, str):
-            continue
-        if (
-            env.get("GH_TOKEN") != "${{ github.token }}"
-            or env.get("PR_NUMBER") != "${{ github.event.pull_request.number }}"
-        ):
-            continue
-        if all(fragment in run for fragment in required_fragments) and "sort -u" not in run:
             return True
     return False
 
