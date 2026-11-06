@@ -721,13 +721,13 @@ async def evaluate_quality(object_id: str, req: QualityEvaluateRequest):
 async def get_lineage(
     object_id: str,
     direction: Literal["upstream", "downstream"] = FastQuery(default="upstream"),
-    max_depth: int = FastQuery(default=10, ge=1, le=10),
+    max_depth: int = FastQuery(default=10, ge=1, le=32),
 ):
     # Direct Python callers bypass FastAPI's request validation, so keep the
     # same contract at the engine boundary as well.
     if direction not in {"upstream", "downstream"}:
         raise HTTPException(status_code=400, detail="direction must be upstream or downstream")
-    if isinstance(max_depth, bool) or not isinstance(max_depth, int) or not 1 <= max_depth <= 10:
+    if isinstance(max_depth, bool) or not isinstance(max_depth, int) or not 1 <= max_depth <= 32:
         raise HTTPException(status_code=422, detail="max_depth must be between 1 and 32")
     if direction == "upstream":
         return dataos.lineage.trace_upstream_lineage(object_id, max_depth=max_depth)
