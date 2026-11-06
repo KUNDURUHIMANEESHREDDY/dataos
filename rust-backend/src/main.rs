@@ -65,7 +65,7 @@ fn capability_for(method: &Method, path: &str) -> Option<&'static str> {
     if method == Method::OPTIONS {
         return None;
     }
-    if (method == Method::POST && path == "/api/auth/register") || (method == Method::POST && path == "/api/auth/login") {
+    if method == Method::POST && matches!(path, "/api/auth/register" | "/api/auth/login" | "/api/auth/logout") {
         return None;
     }
     if (method == Method::POST && path == "/api/query/") || (method == Method::POST && path == "/api/agents/execute") {
@@ -159,6 +159,18 @@ fn is_global_data_route(path: &str) -> bool {
     )
 }
 
+fn session_cookie(headers: &axum::http::HeaderMap) -> Option<String> {
+    headers
+        .get_all(header::COOKIE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(';'))
+        .find_map(|part| {
+            let (name, value) = part.trim().split_once('=')?;
+            (name == "dataos_session" && !value.is_empty()).then(|| value.to_string())
+        })
+}
+
 async fn security_middleware(
     State(state): State<AppState>,
     request: axum::extract::Request,
@@ -176,7 +188,16 @@ async fn security_middleware(
         .and_then(|value| value.to_str().ok())
         .map(str::to_string)
         .unwrap_or_default();
-    let token = authorization.strip_prefix("Bearer ").or_else(|| authorization.strip_prefix("bearer ")).unwrap_or("").to_string();
+    let bearer_token = authorization
+        .strip_prefix("Bearer ")
+        .or_else(|| authorization.strip_prefix("bearer "))
+        .unwrap_or("")
+        .to_string();
+    let token = if bearer_token.is_empty() {
+        session_cookie(request.headers()).unwrap_or_default()
+    } else {
+        bearer_token
+    };
     let production = production_enabled();
     let has_bearer = !token.is_empty();
 
@@ -344,7 +365,7 @@ async fn auth_register(State(state): State<AppState>, Json(req): Json<RegisterRe
     ok_json(user_payload(&user))
 }
 
-async fn auth_login(State(state): State<AppState>, Json(req): Json<LoginRequest>) -> Result<Json<Value>, ApiError> {
+async fn auth_login(State(state): State<AppState>, Json(req): Json<LoginRequest>) -> Result<Response, ApiError> {
     if !jwt_configured() {
         return Err(ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "User auth is disabled until DATAOS_JWT_SECRET is configured."));
     }
@@ -352,14 +373,36 @@ async fn auth_login(State(state): State<AppState>, Json(req): Json<LoginRequest>
         .map_err(|error| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, error))?
         .ok_or_else(|| ApiError::new(StatusCode::UNAUTHORIZED, "Invalid credentials."))?;
     let token = issue_token(&user.id, &user.role).map_err(|error| ApiError::new(StatusCode::SERVICE_UNAVAILABLE, error))?;
-    ok_json(json!({"access_token": token, "token_type": "bearer", "user": user_payload(&user)}))
+    let secure = if production_enabled() { "; Secure" } else { "" };
+    let cookie = format!(
+        "dataos_session={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age={}{}",
+        auth::DEFAULT_TTL_SECONDS,
+        secure
+    );
+    let cookie = axum::http::HeaderValue::from_str(&cookie)
+        .map_err(|_| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "Unable to create session cookie."))?;
+    let mut response = Json(json!({"access_token": token, "token_type": "bearer", "user": user_payload(&user)})).into_response();
+    response.headers_mut().append(header::SET_COOKIE, cookie);
+    response.headers_mut().insert(header::CACHE_CONTROL, axum::http::HeaderValue::from_static("no-store"));
+    Ok(response)
+}
+
+async fn auth_logout() -> Response {
+    let secure = if production_enabled() { "; Secure" } else { "" };
+    let cookie = format!("dataos_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0{secure}");
+    let mut response = StatusCode::NO_CONTENT.into_response();
+    if let Ok(cookie) = axum::http::HeaderValue::from_str(&cookie) {
+        response.headers_mut().append(header::SET_COOKIE, cookie);
+    }
+    response.headers_mut().insert(header::CACHE_CONTROL, axum::http::HeaderValue::from_static("no-store"));
+    response
 }
 
 async fn auth_me(Extension(CurrentUser(user)): Extension<CurrentUser>) -> Json<Value> {
     if let Some(user) = user {
         Json(json!({"authenticated": true, "user": user_payload(&user)}))
     } else if jwt_configured() {
-        Json(json!({"authenticated": false, "detail": "A bearer token is required for /api/auth/me when JWT auth is configured."}))
+        Json(json!({"authenticated": false, "detail": "A session cookie or bearer token is required for /api/auth/me when JWT auth is configured."}))
     } else {
         Json(json!({"authenticated": false, "detail": "JWT auth is not configured; running in shared-token/dev mode."}))
     }
@@ -748,6 +791,7 @@ fn build_router(state: AppState) -> Router {
         .route("/api/catalog/health", get(catalog_health))
         .route("/api/auth/register", post(auth_register))
         .route("/api/auth/login", post(auth_login))
+        .route("/api/auth/logout", post(auth_logout))
         .route("/api/auth/me", get(auth_me))
         .route("/api/auth/users", get(auth_users))
         .route("/api/objects", get(list_objects).post(create_object))
