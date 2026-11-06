@@ -1,16 +1,8 @@
-name: Rust authorization tests
+name: Rust authorization verification
 
 on:
-  pull_request:
-    paths:
-      - "rust-backend/**"
-      - ".github/workflows/rust-authorization.yml"
-  push:
-    branches:
-      - "fix/resource-level-authorization"
-    paths:
-      - "rust-backend/**"
-      - ".github/workflows/rust-authorization.yml"
+  workflow_call:
+  workflow_dispatch:
 
 permissions:
   contents: read
