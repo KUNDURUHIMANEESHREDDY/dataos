@@ -159,7 +159,7 @@ jobs:
           go-version: "1.24.2"
           cache: false
       - name: Install pinned Gitleaks
-        run: go install github.com/gitleaks/gitleaks/v8@v8.24.3
+        run: go install github.com/zricethezav/gitleaks/v8@v8.24.3
       - name: Scan Git history with Gitleaks
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
