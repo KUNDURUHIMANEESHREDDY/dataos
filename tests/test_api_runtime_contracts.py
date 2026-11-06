@@ -43,6 +43,49 @@ def test_graph_traversal_uses_engine_contract(monkeypatch):
     assert result == {"visited": ["root"], "hops": 2}
 
 
+@pytest.mark.parametrize("direction", ["sideways", "", "UPSTREAM"])
+def test_lineage_rejects_unknown_direction_before_traversal(monkeypatch, direction):
+    def unexpected(*args, **kwargs):
+        pytest.fail("lineage traversal must not run for an invalid direction")
+
+    monkeypatch.setattr(api.dataos.lineage, "trace_upstream_lineage", unexpected)
+    monkeypatch.setattr(api.dataos.lineage, "trace_downstream_impact", unexpected)
+    with pytest.raises(HTTPException) as exc:
+        run(api.get_lineage("root", direction=direction, max_depth=1))
+    assert exc.value.status_code == 400
+
+
+@pytest.mark.parametrize("max_depth", [0, -1, 33, 10_000])
+def test_lineage_rejects_unbounded_depth_before_traversal(monkeypatch, max_depth):
+    def unexpected(*args, **kwargs):
+        pytest.fail("lineage traversal must not run for an out-of-range depth")
+
+    monkeypatch.setattr(api.dataos.lineage, "trace_upstream_lineage", unexpected)
+    monkeypatch.setattr(api.dataos.lineage, "trace_downstream_impact", unexpected)
+    with pytest.raises(HTTPException) as exc:
+        run(api.get_lineage("root", direction="upstream", max_depth=max_depth))
+    assert exc.value.status_code == 422
+
+
+def test_lineage_accepts_only_supported_directions_with_bounded_depth(monkeypatch):
+    monkeypatch.setattr(
+        api.dataos.lineage,
+        "trace_upstream_lineage",
+        lambda object_id, max_depth: {"direction": "upstream", "depth": max_depth},
+    )
+    monkeypatch.setattr(
+        api.dataos.lineage,
+        "trace_downstream_impact",
+        lambda object_id, max_depth: {"direction": "downstream", "depth": max_depth},
+    )
+    assert run(api.get_lineage("root", direction="upstream", max_depth=32)) == {
+        "direction": "upstream", "depth": 32
+    }
+    assert run(api.get_lineage("root", direction="downstream", max_depth=1)) == {
+        "direction": "downstream", "depth": 1
+    }
+
+
 def test_graph_analytics_uses_supported_namespace(monkeypatch):
     metrics = {
         "pagerank": {"a": 1.0},
@@ -83,7 +126,7 @@ def test_python_compute_is_disabled_by_default_in_production(monkeypatch):
     assert direct_exc.value.status_code == 403
 
     with pytest.raises(HTTPException) as unified_exc:
-        run(api.query_unified(api.UnifiedQueryRequest(query="print('blocked')", query_type="python")))
+        run(api.query_unified(api.UnifiedQueryRequest(query="print('blocked')", query_type="python"), current_user=None))
     assert unified_exc.value.status_code == 403
 
 
@@ -100,17 +143,17 @@ def test_python_compute_requires_explicit_production_opt_in(monkeypatch):
 def test_unified_query_auto_dispatches_sql_and_natural_language(monkeypatch):
     monkeypatch.setattr(api.dataos, "sql", lambda query: {"kind": "sql", "query": query})
     monkeypatch.setattr(api.dataos, "ask", lambda query: {"kind": "ask", "query": query})
-    assert run(api.query_unified(api.UnifiedQueryRequest(query="SELECT 1"))) == {
+    assert run(api.query_unified(api.UnifiedQueryRequest(query="SELECT 1"), current_user=None)) == {
         "kind": "sql", "query": "SELECT 1"
     }
-    assert run(api.query_unified(api.UnifiedQueryRequest(query="Why is this dataset empty?"))) == {
+    assert run(api.query_unified(api.UnifiedQueryRequest(query="Why is this dataset empty?"), current_user=None)) == {
         "kind": "ask", "query": "Why is this dataset empty?"
     }
 
 
 def test_unified_query_rejects_unknown_type(monkeypatch):
     with pytest.raises(HTTPException) as exc:
-        run(api.query_unified(api.UnifiedQueryRequest(query="x", query_type="not-a-mode")))
+        run(api.query_unified(api.UnifiedQueryRequest(query="x", query_type="not-a-mode"), current_user=None))
     assert exc.value.status_code == 400
 
 
@@ -245,7 +288,7 @@ def test_health_probe_returns_service_unavailable_when_storage_fails(monkeypatch
     assert exc.value.detail == "DataOS storage is unavailable"
 
 
-def test_workflow_route_rejects_malformed_definition_and_duplicate_route_remains_unimplemented():
+def test_workflow_route_rejects_malformed_definition_and_duplicate_route_uses_engine():
     # The workflow endpoint is implemented: an empty definition is invalid input,
     # so it must fail validation rather than claim the feature is unimplemented.
     with pytest.raises(HTTPException) as workflow_exc:
@@ -253,10 +296,11 @@ def test_workflow_route_rejects_malformed_definition_and_duplicate_route_remains
     assert workflow_exc.value.status_code == 422
     assert "nodes" in workflow_exc.value.detail
 
-    # Duplicate detection is a separate, still-unimplemented feature.
-    with pytest.raises(HTTPException) as duplicate_exc:
-        run(api.detect_duplicates_api())
-    assert duplicate_exc.value.status_code == 501
+    # Duplicate detection is implemented via DuplicateDetectionEngine and must
+    # return a result payload (empty store -> no duplicates), not a 501 stub.
+    result = run(api.detect_duplicates_api())
+    assert result["total"] == 0
+    assert result["duplicates"] == []
 
 
 def test_workflow_route_rejects_overload_with_retry_after(monkeypatch):
