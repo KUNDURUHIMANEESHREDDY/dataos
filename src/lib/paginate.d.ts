@@ -1,3 +1,9 @@
+export type BoundedPageResult<T> = {
+  items: T[];
+  total: number | null;
+  truncated: boolean;
+};
+
 export type PaginatedResponse<T> = {
   total?: number;
   [key: string]: unknown;
@@ -5,11 +11,19 @@ export type PaginatedResponse<T> = {
 
 declare const paginate: {
   loadAllPages<T>(
-    fetchPage: (params: { limit: number; offset: number }) => Promise<PaginatedResponse<T>>,
+    fetchPage: (params: { limit: number; offset: number; signal?: AbortSignal }) => Promise<PaginatedResponse<T>>,
     collectionKey: string,
     pageSize: number,
     maxOffset?: number,
+    signal?: AbortSignal,
   ): Promise<T[]>;
+  loadBoundedPages<T>(
+    fetchPage: (params: { limit: number; offset: number; signal?: AbortSignal }) => Promise<PaginatedResponse<T>>,
+    collectionKey: string,
+    pageSize: number,
+    maxItems: number,
+    signal?: AbortSignal,
+  ): Promise<BoundedPageResult<T>>;
 };
 
 export default paginate;

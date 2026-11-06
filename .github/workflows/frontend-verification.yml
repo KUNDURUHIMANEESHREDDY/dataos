@@ -17,7 +17,7 @@ concurrency:
 
 jobs:
   frontend:
-    name: Frontend dependency audit, SBOM, pagination tests, typecheck, and production build
+    name: Frontend dependency audit, SBOM, API contract tests, typecheck, and production build
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -34,6 +34,8 @@ jobs:
         run: npm audit --audit-level=high
       - name: Test bounded API pagination
         run: node --test tests/dataspace-pagination.test.mjs
+      - name: Test API path and query encoding
+        run: node --experimental-strip-types --test tests/api-client-url.test.mjs
       - name: Typecheck frontend
         run: npx tsc --noEmit
       - name: Build production frontend

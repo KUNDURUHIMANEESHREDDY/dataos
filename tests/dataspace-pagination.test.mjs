@@ -2,8 +2,9 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import paginate from "../src/lib/paginate.js";
 import { toGraphEdge } from "../src/lib/relationship-edge.js";
+import { loadGraphCollections } from "../src/lib/load-graph-collections.js";
 
-const { loadAllPages } = paginate;
+const { loadAllPages, loadBoundedPages } = paginate;
 
 test("loads every page using bounded offsets and the reported total", async () => {
   const calls = [];
@@ -24,9 +25,9 @@ test("loads every page using bounded offsets and the reported total", async () =
 
   assert.deepEqual(result, ["a", "b", "c", "d", "e"]);
   assert.deepEqual(calls, [
-    { limit: 2, offset: 0 },
-    { limit: 2, offset: 2 },
-    { limit: 2, offset: 4 },
+    { limit: 2, offset: 0, signal: undefined },
+    { limit: 2, offset: 2, signal: undefined },
+    { limit: 2, offset: 4, signal: undefined },
   ]);
 });
 
@@ -94,6 +95,108 @@ test("propagates page-fetch failures without returning partial results", async (
   );
 });
 
+test("forwards the abort signal and stops before requesting another page", async () => {
+  const controller = new AbortController();
+  const calls = [];
+
+  await assert.rejects(
+    () => loadAllPages(async ({ offset, signal }) => {
+      calls.push({ offset, signal });
+      controller.abort();
+      return { total: 2, items: ["first"] };
+    }, "items", 1, undefined, controller.signal),
+    { name: "AbortError" },
+  );
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].offset, 0);
+  assert.equal(calls[0].signal, controller.signal);
+});
+
+test("does not start a page request when the signal is already aborted", async () => {
+  const controller = new AbortController();
+  const calls = [];
+  controller.abort();
+
+  await assert.rejects(
+    () => loadAllPages(async (params) => {
+      calls.push(params);
+      return { total: 0, items: [] };
+    }, "items", 1, undefined, controller.signal),
+    { name: "AbortError" },
+  );
+
+  assert.deepEqual(calls, []);
+});
+
+test("caps collections using the server total and reports truncation", async () => {
+  const calls = [];
+  const pages = new Map([
+    [0, { total: 5, items: ["a", "b"] }],
+    [2, { total: 5, items: ["c", "d"] }],
+  ]);
+
+  const result = await loadBoundedPages(async (params) => {
+    calls.push(params);
+    return pages.get(params.offset);
+  }, "items", 2, 3);
+
+  assert.deepEqual(result, { items: ["a", "b", "c"], total: 5, truncated: true });
+  assert.deepEqual(calls.map(({ limit, offset }) => ({ limit, offset })), [
+    { limit: 2, offset: 0 },
+    { limit: 2, offset: 2 },
+  ]);
+});
+
+test("uses a one-record probe to distinguish an exact cap when total is omitted", async () => {
+  const calls = [];
+  const result = await loadBoundedPages(async (params) => {
+    calls.push(params);
+    return { items: params.offset === 0 ? ["a", "b"] : [] };
+  }, "items", 2, 2);
+
+  assert.deepEqual(result, { items: ["a", "b"], total: null, truncated: false });
+  assert.deepEqual(calls.map(({ limit, offset }) => ({ limit, offset })), [
+    { limit: 2, offset: 0 },
+    { limit: 1, offset: 2 },
+  ]);
+});
+
+test("reports truncation when the one-record probe finds more data", async () => {
+  const calls = [];
+  const result = await loadBoundedPages(async (params) => {
+    calls.push(params);
+    return { items: params.offset === 0 ? ["a", "b"] : ["c"] };
+  }, "items", 2, 2);
+
+  assert.deepEqual(result, { items: ["a", "b"], total: null, truncated: true });
+  assert.deepEqual(calls.map(({ limit, offset }) => ({ limit, offset })), [
+    { limit: 2, offset: 0 },
+    { limit: 1, offset: 2 },
+  ]);
+});
+
+test("forwards abort signals through bounded pagination", async () => {
+  const controller = new AbortController();
+  const calls = [];
+  await assert.rejects(
+    () => loadBoundedPages(async ({ offset, signal }) => {
+      calls.push({ offset, signal });
+      controller.abort();
+      return { items: ["first"] };
+    }, "items", 1, 2, controller.signal),
+    { name: "AbortError" },
+  );
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].signal, controller.signal);
+});
+
+test("rejects invalid bounded pagination limits", async () => {
+  await assert.rejects(
+    () => loadBoundedPages(async () => ({ items: [] }), "items", 2, 0),
+    /maxItems/,
+  );
+});
 
 test("maps canonical backend Relationship.to_dict source and target fields", () => {
   assert.deepEqual(
@@ -118,7 +221,7 @@ test("accepts legacy source_id and target_id aliases during migration", () => {
   assert.deepEqual(
     toGraphEdge({ source_id: "legacy-a", target_id: "legacy-b" }),
     {
-      id: "legacy-a-legacy-b",
+      id: JSON.stringify(["legacy-a", "legacy-b", "related_to"]),
       source: "legacy-a",
       target: "legacy-b",
       type: "related_to",
@@ -147,4 +250,95 @@ test("uses conservative zero confidence for malformed explicit values", () => {
 test("preserves relationship confidence at both valid contract boundaries", () => {
   assert.equal(toGraphEdge({ source: "a", target: "b", confidence: 0 }).confidence, 0);
   assert.equal(toGraphEdge({ source: "a", target: "b", confidence: 1 }).confidence, 1);
+});
+
+
+test("uses an unambiguous fallback identity for endpoint IDs containing delimiters", () => {
+  const first = toGraphEdge({ source: "a-b", target: "c", relation_type: "depends_on" });
+  const second = toGraphEdge({ source: "a", target: "b-c", relation_type: "depends_on" });
+  const third = toGraphEdge({ source: "a-b", target: "c", relation_type: "related_to" });
+
+  assert.notEqual(first.id, second.id);
+  assert.notEqual(first.id, third.id);
+  assert.equal(first.id, JSON.stringify(["a-b", "c", "depends_on"]));
+});
+
+test("keeps fallback relationship identities unique across paginated pages", async () => {
+  const pages = new Map([
+    [0, {
+      total: 4,
+      relationships: [
+        { source: "a-b", target: "c", relation_type: "depends_on" },
+        { source: "a", target: "b-c", relation_type: "depends_on" },
+      ],
+    }],
+    [2, {
+      total: 4,
+      relationships: [
+        { source: "a-b", target: "c", relation_type: "related_to" },
+        { id: "explicit-1", source: "a-b", target: "c", relation_type: "related_to" },
+      ],
+    }],
+  ]);
+
+  const relationships = await loadAllPages(
+    async ({ offset }) => pages.get(offset),
+    "relationships",
+    2,
+  );
+  const edges = relationships.map(toGraphEdge);
+
+  assert.ok(edges.every(Boolean));
+  const ids = edges.map((edge) => edge.id);
+  assert.equal(new Set(ids).size, relationships.length);
+  assert.equal(ids[3], "explicit-1");
+});
+
+
+test("aborts the sibling graph collection when one loader fails", async () => {
+  const controller = new AbortController();
+  const originalError = new Error("relationships unavailable");
+  let siblingAborted = false;
+
+  const siblingLoader = (signal) => new Promise((resolve, reject) => {
+    signal.addEventListener("abort", () => {
+      siblingAborted = true;
+      const error = new Error("sibling request aborted");
+      error.name = "AbortError";
+      reject(error);
+    }, { once: true });
+  });
+
+  await assert.rejects(
+    () => loadGraphCollections(
+      controller,
+      siblingLoader,
+      () => { throw originalError; },
+    ),
+    (error) => error === originalError,
+  );
+
+  assert.equal(controller.signal.aborted, true);
+  assert.equal(siblingAborted, true);
+});
+
+test("does not abort graph collection requests after successful completion", async () => {
+  const controller = new AbortController();
+  const result = await loadGraphCollections(
+    controller,
+    async (signal) => {
+      assert.equal(signal, controller.signal);
+      return { objects: ["object-1"] };
+    },
+    async (signal) => {
+      assert.equal(signal, controller.signal);
+      return { relationships: ["relationship-1"] };
+    },
+  );
+
+  assert.deepEqual(result, [
+    { objects: ["object-1"] },
+    { relationships: ["relationship-1"] },
+  ]);
+  assert.equal(controller.signal.aborted, false);
 });
