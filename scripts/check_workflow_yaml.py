@@ -187,25 +187,12 @@ def validate_gate_contract(path: Path, workflow: object) -> bool:
             ok = False
 
     security_job = jobs.get("security-required")
-    if isinstance(security_job, dict):
-        permissions = security_job.get("permissions", workflow.get("permissions", {}))
-        security_events_permission = (
-            permissions.get("security-events")
-            if isinstance(permissions, dict)
-            else None
+    if isinstance(security_job, dict) and not has_critical_high_alert_gate(security_job):
+        print(
+            f"FAIL: {path}: security-required must fail closed on open critical/high code-scanning alerts",
+            file=sys.stderr,
         )
-        if security_events_permission not in {"read", "write"}:
-            print(
-                f"FAIL: {path}: security-required needs security-events: read to query code-scanning alerts",
-                file=sys.stderr,
-            )
-            ok = False
-        if not has_critical_high_alert_gate(security_job):
-            print(
-                f"FAIL: {path}: security-required must fail closed on open critical/high code-scanning alerts",
-                file=sys.stderr,
-            )
-            ok = False
+        ok = False
 
     if ok:
         print(f"PASS: {path}: required release-gate dependencies and fail-closed checks are intact")

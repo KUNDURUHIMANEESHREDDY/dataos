@@ -17,7 +17,8 @@ from runtime.agents.agent import AgentHarness
 class TestSecurityHardening(unittest.TestCase):
 
     def setUp(self):
-        self.temp_db = tempfile.mktemp(suffix=".db")
+        fd, self.temp_db = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
         self.storage = SQLiteStorage(db_path=self.temp_db)
         self.sandbox = PythonSandbox(self.storage, default_timeout_seconds=1.0)
         self.governor = ResourceGovernor()

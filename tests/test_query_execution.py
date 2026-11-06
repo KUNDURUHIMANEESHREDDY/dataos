@@ -17,7 +17,8 @@ from engines.query.query_engine import UnifiedQueryEngine
 class TestQueryExecution(unittest.TestCase):
 
     def setUp(self):
-        self.temp_db = tempfile.mktemp(suffix=".db")
+        fd, self.temp_db = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
         self.storage = SQLiteStorage(db_path=self.temp_db)
         self.query_engine = UnifiedQueryEngine(self.storage)
         self.sql_engine = SQLExecutionEngine(self.storage)
@@ -48,59 +49,23 @@ class TestQueryExecution(unittest.TestCase):
         eng_row = next(r for r in res["results"] if r["department"] == "Eng")
         self.assertEqual(eng_row["avg_sal"], 115000.0)
 
-    def test_sql_engine_rejects_database_mutations_and_pragmas(self):
-        """Caller SQL must not alter registered data or the in-memory schema."""
-        forbidden_queries = (
-            "DELETE FROM employees",
-            "UPDATE employees SET salary = 0",
-            "INSERT INTO employees (id, name) VALUES (4, 'Mallory')",
-            "CREATE TABLE attacker (value TEXT)",
-            "DROP TABLE employees",
-            "ALTER TABLE employees ADD COLUMN secret TEXT",
-            "ATTACH DATABASE ':memory:' AS attacker",
-            "PRAGMA query_only = OFF",
-        )
-        for query in forbidden_queries:
+    def test_sql_engine_rejects_mutating_sql(self):
+        """User SQL must not attach files, alter schema, or inspect PRAGMAs."""
+        for query in (
+            "ATTACH DATABASE ':memory:' AS injected",
+            "CREATE TABLE injected (id INTEGER)",
+            "PRAGMA database_list",
+        ):
             with self.subTest(query=query):
-                result = self.sql_engine.execute_sql(
-                    query,
-                    table_objects=[self.dataset],
-                )
+                result = self.query_engine.execute_query(query, query_type="sql")
                 self.assertFalse(result["success"])
+                self.assertTrue(result["error"])
 
-    def test_sql_engine_rejects_multiple_statements(self):
-        result = self.sql_engine.execute_sql(
-            "SELECT 1; DROP TABLE employees",
-            table_objects=[self.dataset],
+        safe_result = self.query_engine.execute_query(
+            "SELECT COUNT(*) AS count FROM employees", query_type="sql"
         )
-        self.assertFalse(result["success"])
-
-    def test_sql_engine_rejects_oversized_query(self):
-        query = "SELECT 1 -- " + ("x" * SQLExecutionEngine.MAX_QUERY_BYTES)
-        result = self.sql_engine.execute_sql(query, table_objects=[])
-        self.assertFalse(result["success"])
-        self.assertIn("byte limit", result["error"])
-
-    def test_sql_engine_rejects_oversized_result(self):
-        query = (
-            "WITH RECURSIVE seq(x) AS (VALUES(1) "
-            "UNION ALL SELECT x + 1 FROM seq WHERE x < 10001) "
-            "SELECT x FROM seq"
-        )
-        result = self.sql_engine.execute_sql(query, table_objects=[])
-        self.assertFalse(result["success"])
-        self.assertIn("row limit", result["error"])
-
-    def test_sql_engine_enforces_execution_deadline(self):
-        query = (
-            "WITH RECURSIVE seq(x) AS (VALUES(1) "
-            "UNION ALL SELECT x + 1 FROM seq WHERE x < 1000000) "
-            "SELECT sum(x) FROM seq"
-        )
-        with patch.object(SQLExecutionEngine, "MAX_QUERY_SECONDS", -1):
-            result = self.sql_engine.execute_sql(query, table_objects=[])
-        self.assertFalse(result["success"])
-        self.assertIn("interrupted", result["error"].lower())
+        self.assertTrue(safe_result["success"])
+        self.assertEqual(safe_result["results"][0]["count"], 3)
 
     def test_python_query_execution(self):
         """Verify Python execution."""

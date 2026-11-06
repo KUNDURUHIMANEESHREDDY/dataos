@@ -25,7 +25,7 @@ import subprocess
 import sys
 from collections.abc import Sequence
 from typing import Any
-from urllib.parse import urlsplit
+from resource_name_utils import normalize_aiplatform_resource_name
 
 try:
   from google.cloud import aiplatform_v1beta1
@@ -123,11 +123,8 @@ def find_agent_via_cais(
         if asset_type == "aiplatform.googleapis.com/ReasoningEngine":
           print(f"FOUND via CAIS: Reasoning Engine in {location}")
           full_name = asset.get("name", "")
-          resource_name = _resource_name_from_asset_name(full_name)
-          if resource_name is None:
-            print("Warning: CAI returned an invalid Vertex AI resource name", file=sys.stderr)
-            continue
-          engine_id = resource_name.rsplit("/", 1)[-1] or agent_name
+          resource_name = normalize_aiplatform_resource_name(full_name)
+          engine_id = resource_name.rsplit("/", 1)[-1] if resource_name else agent_name
 
           return {
               "runtime": "Vertex AI Reasoning Engine",

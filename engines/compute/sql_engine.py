@@ -68,23 +68,19 @@ class SQLExecutionEngine:
         self.storage = storage
 
     @staticmethod
-    def _read_only_authorizer(
-        action: int,
-        arg1: Optional[str],
-        arg2: Optional[str],
-        database_name: Optional[str],
-        trigger_name: Optional[str],
-    ) -> int:
-        """Deny database mutation, attachment, transaction control and PRAGMA."""
-        if action in _DENIED_SQLITE_ACTIONS or action == sqlite3.SQLITE_PRAGMA:
-            return sqlite3.SQLITE_DENY
-
+    def _read_only_authorizer(action, arg1, arg2, database_name, trigger_name):
+        """Allow query-only SQLite operations; deny writes, DDL, ATTACH, and PRAGMA."""
+        allowed_actions = {
+            sqlite3.SQLITE_SELECT,
+            sqlite3.SQLITE_READ,
+            sqlite3.SQLITE_FUNCTION,
+            sqlite3.SQLITE_RECURSIVE,
+        }
         if action == sqlite3.SQLITE_FUNCTION:
             function_name = (arg2 or arg1 or "").lower()
-            if function_name in {"load_extension", "readfile", "writefile"}:
+            if function_name in {"load_extension", "writefile", "readfile"}:
                 return sqlite3.SQLITE_DENY
-
-        return sqlite3.SQLITE_OK
+        return sqlite3.SQLITE_OK if action in allowed_actions else sqlite3.SQLITE_DENY
 
     def execute_sql(
         self,
@@ -105,9 +101,45 @@ class SQLExecutionEngine:
         now = datetime.datetime.now(datetime.timezone.utc).isoformat()
 
         conn = sqlite3.connect(":memory:")
-        registered_tables: List[str] = []
-        source_object_ids: List[str] = []
+        registered_tables = []
+        source_object_ids = []
 
+        if table_objects is None:
+            # Fetch all tabular objects from storage
+            table_objects = self.storage.list_objects(object_type=ObjectType.DATASET.value, limit=100)
+
+        for obj in table_objects:
+            filename_raw = obj.properties.get("filename", "")
+            base_name, _ = os.path.splitext(filename_raw) if "." in filename_raw else (filename_raw, "")
+            
+            table_names = set()
+            if obj.properties.get("table_name"):
+                table_names.add(obj.properties["table_name"])
+            if filename_raw:
+                table_names.add("".join(c if c.isalnum() or c == "_" else "_" for c in filename_raw))
+            if base_name:
+                table_names.add("".join(c if c.isalnum() or c == "_" else "_" for c in base_name))
+            table_names.add(f"tbl_{obj.id[:8]}")
+
+            # Load content into DataFrame
+            df = None
+            if isinstance(obj.content, list) and all(isinstance(r, dict) for r in obj.content):
+                df = pd.DataFrame(obj.content)
+            elif isinstance(obj.properties.get("raw_csv"), str):
+                df = pd.read_csv(io.StringIO(obj.properties["raw_csv"]))
+            elif isinstance(obj.properties.get("sample_rows"), list):
+                df = pd.DataFrame(obj.properties["sample_rows"])
+
+            if df is not None and not df.empty:
+                for tname in table_names:
+                    df.to_sql(tname, conn, if_exists="replace", index=False)
+                    registered_tables.append(tname)
+                source_object_ids.append(obj.id)
+
+        # Execute user-supplied SQL only after restricting SQLite to read-only
+        # operations. An in-memory database can still ATTACH files or mutate its
+        # schema unless the connection authorizer explicitly denies those actions.
+        conn.set_authorizer(self._read_only_authorizer)
         try:
             if not isinstance(sql_query, str) or not sql_query.strip():
                 raise ValueError("SQL query must be a non-empty string")

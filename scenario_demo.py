@@ -80,7 +80,17 @@ def run_scenario():
     print("\n[*] Step 3: Ingesting artifacts and automatically constructing Universal Objects...")
     ingested_objects = {}
     for filename, filepath in artifacts.items():
-        res = dataos.ingest(filepath, discover_relations=True)
+        with open(filepath, "rb") as artifact_file:
+            raw_content = artifact_file.read()
+        try:
+            artifact_content = raw_content.decode("utf-8")
+        except UnicodeDecodeError:
+            artifact_content = raw_content.decode("latin-1")
+        res = dataos.ingest(
+            artifact_content,
+            filename=filename,
+            discover_relations=True,
+        )
         obj_id = res["primary_object_id"]
         ingested_objects[filename] = obj_id
         ingested = dataos.objects.get(obj_id)

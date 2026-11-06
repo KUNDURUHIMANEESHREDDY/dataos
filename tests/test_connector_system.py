@@ -34,7 +34,8 @@ class TestBaseConnector(unittest.TestCase):
 class TestDatabaseConnector(unittest.TestCase):
 
     def setUp(self):
-        self.temp_db = tempfile.mktemp(suffix=".db")
+        fd, self.temp_db = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
         self.connector = None
         conn = sqlite3.connect(self.temp_db)
         cursor = conn.cursor()
