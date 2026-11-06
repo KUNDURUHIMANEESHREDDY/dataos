@@ -81,7 +81,7 @@ class SQLExecutionEngine:
 
         if action == sqlite3.SQLITE_FUNCTION:
             function_name = (arg2 or arg1 or "").lower()
-            if function_name in {"load_extension", "readfile", "writefile"}:
+            if function_name in {"load_extension", "readfile", "writefile", "fts3_tokenizer"}:
                 return sqlite3.SQLITE_DENY
 
         return sqlite3.SQLITE_OK
