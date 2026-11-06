@@ -28,7 +28,7 @@ jobs:
           rustc --version
           cargo --version
       - name: Install pinned Rust dependency auditor
-        run: cargo install cargo-audit --version 0.21.2 --locked
+        run: cargo install cargo-audit --version 0.22.0 --locked
       - name: Audit locked Rust dependencies
         working-directory: rust-backend
         run: cargo audit
