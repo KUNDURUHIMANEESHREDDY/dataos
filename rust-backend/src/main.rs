@@ -794,19 +794,26 @@ async fn create_object(
     Extension(CurrentUser(user)): Extension<CurrentUser>,
     Json(req): Json<ObjectCreateRequest>,
 ) -> Result<Json<Value>, ApiError> {
-    let object = state.db.create_object(
-        req.object_type.as_deref().unwrap_or("document"),
-        req.schema_ref.as_deref().unwrap_or("generic.v1"),
-        req.properties.unwrap_or(json!({})),
-        req.content.unwrap_or(json!({})),
-        req.source.as_deref().unwrap_or("api://rust"),
-        req.metadata.unwrap_or(json!({})),
-    ).map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     let object = if let Some(user) = user {
-        state.db.set_object_owner(object["id"].as_str().unwrap_or_default(), &user.id)
-            .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?
-            .ok_or_else(|| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "Created object disappeared before ownership was assigned."))?
-    } else { object };
+        state.db.create_object_for_owner(
+            req.object_type.as_deref().unwrap_or("document"),
+            req.schema_ref.as_deref().unwrap_or("generic.v1"),
+            req.properties.unwrap_or(json!({})),
+            req.content.unwrap_or(json!({})),
+            req.source.as_deref().unwrap_or("api://rust"),
+            req.metadata.unwrap_or(json!({})),
+            &user.id,
+        )
+    } else {
+        state.db.create_object(
+            req.object_type.as_deref().unwrap_or("document"),
+            req.schema_ref.as_deref().unwrap_or("generic.v1"),
+            req.properties.unwrap_or(json!({})),
+            req.content.unwrap_or(json!({})),
+            req.source.as_deref().unwrap_or("api://rust"),
+            req.metadata.unwrap_or(json!({})),
+        )
+    }.map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     ok_json(object)
 }
 
