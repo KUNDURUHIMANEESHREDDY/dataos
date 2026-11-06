@@ -19,10 +19,13 @@ use crate::AppState;
 fn setup_env() {
     static INIT: OnceLock<()> = OnceLock::new();
     INIT.get_or_init(|| {
+        // Use per-process random test keys; never commit reusable signing material.
+        let jwt_secret = format!("{}{}", uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
+        let sharing_secret = format!("{}{}", uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
         // SAFETY: called once, before any test issues requests.
         unsafe {
-            std::env::set_var("DATAOS_JWT_SECRET", "unit-test-secret-".repeat(3));
-            std::env::set_var("DATAOS_SHARING_TOKEN_SECRET", "sharing-secret-".repeat(3));
+            std::env::set_var("DATAOS_JWT_SECRET", jwt_secret);
+            std::env::set_var("DATAOS_SHARING_TOKEN_SECRET", sharing_secret);
             std::env::remove_var("DATAOS_ENV");
             std::env::remove_var("DATAOS_API_TOKEN");
         }
