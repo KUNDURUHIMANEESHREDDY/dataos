@@ -38,6 +38,8 @@ jobs:
         run: node --experimental-strip-types --test tests/api-client-response.test.mjs
       - name: Test API path and query encoding
         run: node --experimental-strip-types --test tests/api-client-url.test.mjs
+      - name: Test ingestion response contracts
+        run: node --experimental-strip-types --test tests/ingestion.test.mjs
       - name: Typecheck frontend
         run: npx tsc --noEmit
       - name: Build production frontend

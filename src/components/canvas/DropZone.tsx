@@ -3,6 +3,7 @@
 import { useCallback, useState, useRef } from "react";
 import { useSpatialStore } from "@/hooks/useSpatialStore";
 import { api } from "@/lib/api";
+import { ingestFiles } from "@/lib/ingestion";
 
 export default function DropZone() {
   const [dragging, setDragging] = useState(false);
@@ -49,33 +50,16 @@ export default function DropZone() {
     const failures: string[] = [];
 
     try {
-      for (const file of files) {
-        try {
-          const text = await file.text();
-          const response = await fetch("/api/ingest/universal", {
-            method: "POST",
-            headers: { "Content-Type": "application/x-www-form-urlencoded" },
-            body: new URLSearchParams({
-              filename: file.name,
-              content: text,
-              discover_relations: "true",
-            }),
-          });
-
-          // fetch resolves for HTTP 4xx/5xx; do not report those as successful uploads.
-          if (!response.ok) {
-            throw new Error(`HTTP ${response.status}`);
-          }
-          const data = await response.json();
-          if (!data || typeof data !== "object" || Array.isArray(data)) {
-            throw new Error("invalid ingestion response");
-          }
-
+      const outcomes = await ingestFiles(
+        files.map((file) => ({ filename: file.name, read: () => file.text() })),
+      );
+      for (const outcome of outcomes) {
+        if (outcome.ok === true) {
           successfulFiles += 1;
-          objectsCreated += Number(data.objects_created) || 0;
-          relationsCreated += Number(data.relations_created) || 0;
-        } catch (err) {
-          failures.push(`${file.name}: ${err instanceof Error ? err.message : "request failed"}`);
+          objectsCreated += outcome.objectsCreated;
+          relationsCreated += outcome.relationsCreated;
+        } else {
+          failures.push(`${outcome.filename}: ${outcome.error}`);
         }
       }
 
