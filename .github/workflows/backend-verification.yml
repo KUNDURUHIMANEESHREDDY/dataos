@@ -229,8 +229,14 @@ jobs:
             .runs[] as $run
             | $run.results[]
             | . as $result
-            | ($run.tool.driver.rules[$result.ruleIndex] // {}) as $rule
-            | ($rule.properties["security-severity"] // "0" | tonumber) as $severity
+            | (
+                if ($result.ruleIndex | type) == "number" then
+                  ($run.tool.driver.rules[$result.ruleIndex] // {})
+                else
+                  ($run.tool.driver.rules | map(select(.id == $result.ruleId)) | .[0] // {})
+                end
+              ) as $rule
+            | (($result.properties["security-severity"] // $rule.properties["security-severity"] // "0") | tonumber) as $severity
             | select($severity >= 7.0)
             | [
                 $result.ruleId,
