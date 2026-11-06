@@ -183,6 +183,13 @@ def test_workflow_route_rejects_malformed_definition():
     assert "nodes" in workflow_exc.value.detail
 
 
+@pytest.mark.parametrize("threshold", [0.0, -0.1, 1.01, float("nan"), float("inf")])
+def test_duplicate_detection_route_rejects_invalid_similarity_thresholds(threshold):
+    with pytest.raises(HTTPException) as exc:
+        run(api.detect_duplicates_api(min_similarity=threshold))
+    assert exc.value.status_code == 422
+
+
 def test_duplicate_detection_route_returns_candidates_without_graph_mutation(monkeypatch):
     matches = [{
         "object_a_id": "a",
