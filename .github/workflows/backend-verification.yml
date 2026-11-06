@@ -204,7 +204,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          alerts="$(gh api --paginate --jq '
+          scan_ref="$GITHUB_REF"
+          alerts="$(gh api --method GET --paginate --jq '
             .[]
             | select(.rule.security_severity_level == "critical" or .rule.security_severity_level == "high")
             | [
@@ -215,7 +216,8 @@ jobs:
                 (.most_recent_instance.location.start_line | tostring)
               ]
             | @tsv
-          ' "repos/${GITHUB_REPOSITORY}/code-scanning/alerts?state=open&per_page=100")"
+          ' -f state=open -f ref="$scan_ref" -F per_page=100 \
+            "repos/${GITHUB_REPOSITORY}/code-scanning/alerts")"
           if [[ -n "$alerts" ]]; then
             count="$(printf '%s\n' "$alerts" | wc -l | tr -d ' ')"
             echo "Open critical/high code-scanning alerts: $count"
