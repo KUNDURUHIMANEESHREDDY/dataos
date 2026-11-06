@@ -9,22 +9,155 @@ from __future__ import annotations
 import os
 import uuid
 import datetime
-from typing import Dict, Any, List, Optional
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Depends, Query as FastQuery
+import hmac
+import threading
+from typing import Dict, Any, List, Literal, Optional
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Depends, Header, Request, Query as FastQuery
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
+from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 
 from dataos_system import DataOS
 from core.object.model import DataObject, ObjectType
 from core.relation.model import Relationship, RelationType
 from core.permissions.policy import Capability
+from core.permissions.auth import (
+    UserStore,
+    User,
+    issue_jwt,
+    decode_jwt,
+    jwt_configured,
+)
 from backend.knowledge_rag import create_knowledge_router
 from backend.cors_config import cors_middleware_options
+from backend.authorization import CapabilityMiddleware
+from backend.workflow_api import WorkflowRequestError, execute_safe_workflow
+from runtime.workflows.workflow_engine import WorkflowEngine
 
-# Initialize single DataOS kernel
-dataos = DataOS(db_path="dataos.db", blob_dir=".dataos_blobs")
+def _parse_time_travel_timestamp(value: str, field_name: str) -> datetime.datetime:
+    """Parse an offset-aware ISO 8601 timestamp and normalize it to UTC.
+
+    The time-travel engine compares persisted ISO timestamps lexicographically,
+    so callers must not pass mixed offsets or timezone-naive values.
+    """
+    if not isinstance(value, str) or not value or value != value.strip() or len(value) > 64:
+        raise HTTPException(
+            status_code=422,
+            detail=f"{field_name} must be an ISO 8601 timestamp with an explicit UTC offset",
+        )
+
+    candidate = value[:-1] + "+00:00" if value.endswith("Z") else value
+    try:
+        parsed = datetime.datetime.fromisoformat(candidate)
+    except (ValueError, OverflowError):
+        raise HTTPException(
+            status_code=422,
+            detail=f"{field_name} must be an ISO 8601 timestamp with an explicit UTC offset",
+        ) from None
+
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise HTTPException(
+            status_code=422,
+            detail=f"{field_name} must include a UTC offset",
+        )
+    try:
+        return parsed.astimezone(datetime.timezone.utc)
+    except (OverflowError, ValueError):
+        raise HTTPException(
+            status_code=422,
+            detail=f"{field_name} must be representable as a UTC timestamp",
+        ) from None
+
+
+def require_production_api_token(request: Request, authorization: Optional[str] = Header(default=None)) -> None:
+    """Require a high-entropy bearer token for API routes in production.
+
+    All supported environment markers are checked so a conflicting development
+    marker cannot accidentally disable production authentication. The health
+    route outside /api remains available for liveness monitoring.
+    """
+    if not request.url.path.startswith("/api/"):
+        return
+
+    production_markers = (
+        os.getenv("DATAOS_ENV", ""),
+        os.getenv("APP_ENV", ""),
+        os.getenv("ENVIRONMENT", ""),
+    )
+    if not any(marker.strip().lower() in {"production", "prod"} for marker in production_markers):
+        return
+
+    expected = os.getenv("DATAOS_API_TOKEN", "")
+    shared_ready = not (not expected or expected.strip() != expected or len(expected.encode("utf-8")) < 32)
+    jwt_ready = jwt_configured()
+    if not shared_ready and not jwt_ready:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Production API authentication is unavailable; configure either "
+                "DATAOS_API_TOKEN or DATAOS_JWT_SECRET (each with at least 32 UTF-8 bytes)."
+            ),
+        )
+
+    scheme, separator, supplied = (authorization or "").partition(" ")
+    if not separator or scheme.lower() != "bearer":
+        raise HTTPException(
+            status_code=401,
+            detail="A valid bearer token is required.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    if shared_ready and hmac.compare_digest(supplied.encode("utf-8"), expected.encode("utf-8")):
+        return
+    if jwt_ready:
+        try:
+            decode_jwt(supplied)
+            return
+        except (ValueError, RuntimeError):
+            pass
+    raise HTTPException(
+        status_code=401,
+        detail="A valid bearer token is required.",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+
+def require_python_compute_enabled() -> None:
+    """Require explicit opt-in before exposing Python execution in production.
+
+    The shared API bearer token is not a per-user authorization boundary, so
+    production deployments must deliberately enable this high-risk capability
+    after reviewing their sandbox and access controls. Development behavior is
+    unchanged.
+    """
+    production_markers = (
+        os.getenv("DATAOS_ENV", ""),
+        os.getenv("APP_ENV", ""),
+        os.getenv("ENVIRONMENT", ""),
+    )
+    if not any(marker.strip().lower() in {"production", "prod"} for marker in production_markers):
+        return
+    enabled = os.getenv("DATAOS_ALLOW_PYTHON_COMPUTE", "").strip().lower()
+    if enabled not in {"1", "true", "yes"}:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Python compute is disabled in production. Set "
+                "DATAOS_ALLOW_PYTHON_COMPUTE=true only after reviewing sandbox "
+                "isolation and access controls."
+            ),
+        )
+
+
+# Initialize single DataOS kernel using deployment-configured paths.
+dataos = DataOS(
+    db_path=os.getenv("DATAOS_DB_PATH", "dataos.db"),
+    blob_dir=os.getenv("DATAOS_BLOB_DIR", ".dataos_blobs"),
+)
+workflow_engine = WorkflowEngine(storage=dataos.storage)
+# Bound concurrent synchronous DAG runs so API clients cannot exhaust the worker pool.
+workflow_slots = threading.BoundedSemaphore(value=4)
 
 app = FastAPI(
     title="DataOS Universal Data Operating System API",
@@ -32,13 +165,15 @@ app = FastAPI(
     API-first interface for DataOS — a universal, graph-based, computable data operating system.
     All operations are deterministic, verifiable against real data, and fully traceable.
     """,
-    version="1.0.0"
+    version="1.0.0",
+    dependencies=[Depends(require_production_api_token)],
 )
 
 app.add_middleware(
     CORSMiddleware,
     **cors_middleware_options(os.getenv("DATAOS_CORS_ORIGINS")),
 )
+app.add_middleware(CapabilityMiddleware)
 
 
 app.include_router(create_knowledge_router(dataos))
@@ -61,23 +196,23 @@ class RelationCreateRequest(BaseModel):
     source_id: str
     target_id: str
     relation_type: str = "references"
-    confidence: float = 1.0
+    confidence: float = Field(default=1.0, ge=0.0, le=1.0)
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
 
 class SQLQueryRequest(BaseModel):
-    query: str
+    query: str = Field(min_length=1, max_length=20000)
     agent_or_user: str = "api_user"
 
 
 class PythonComputeRequest(BaseModel):
-    code: str
+    code: str = Field(min_length=1, max_length=100000)
     input_object_ids: List[str] = Field(default_factory=list)
     agent_or_user: str = "api_user"
 
 
 class UnifiedQueryRequest(BaseModel):
-    query: str
+    query: str = Field(min_length=1, max_length=20000)
     query_type: str = "auto"
     context_object_id: Optional[str] = None
     agent_or_user: str = "api_user"
@@ -99,6 +234,58 @@ class WorkflowExecutionRequest(BaseModel):
 
 
 # =============================================================================
+# AUTH ROUTES
+# =============================================================================
+
+@app.post("/api/auth/register", summary="Register a new DataOS user", status_code=201)
+async def register_user(req: RegisterRequest):
+    if not jwt_configured():
+        raise HTTPException(
+            status_code=503,
+            detail="User auth is disabled until DATAOS_JWT_SECRET is configured.",
+        )
+    try:
+        user = user_store.register(req.username, req.email, req.password, role=req.role)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return user.to_dict()
+
+
+@app.post("/api/auth/login", summary="Authenticate and receive a JWT")
+async def login_user(req: LoginRequest):
+    if not jwt_configured():
+        raise HTTPException(
+            status_code=503,
+            detail="User auth is disabled until DATAOS_JWT_SECRET is configured.",
+        )
+    user = user_store.authenticate(req.login, req.password)
+    if user is None:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid credentials.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    token = issue_jwt(user.id, user.role)
+    return {"access_token": token, "token_type": "bearer", "user": user.to_dict()}
+
+
+@app.get("/api/auth/me", summary="Current authenticated user")
+async def get_me(current_user: Optional[User] = Depends(get_current_user)):
+    if current_user is None:
+        return {"authenticated": False, "detail": "JWT auth is not configured; running in shared-token/dev mode."}
+    return {"authenticated": True, "user": current_user.to_dict()}
+
+
+@app.get("/api/auth/users", summary="List registered users (admin)", dependencies=[Depends(require_capability(Capability.EXPORT_DATA.value))])
+async def list_users(current_user: Optional[User] = Depends(get_current_user)):
+    if current_user is None:
+        raise HTTPException(status_code=503, detail="User auth is not configured.")
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin role required.")
+    return {"total": len(user_store.list_users()), "users": user_store.list_users()}
+
+
+# =============================================================================
 # OBJECT ROUTES
 # =============================================================================
 
@@ -106,22 +293,37 @@ class WorkflowExecutionRequest(BaseModel):
 async def list_objects(
     object_type: Optional[str] = None,
     source: Optional[str] = None,
-    limit: int = 100,
-    offset: int = 0
+    limit: int = FastQuery(default=100, ge=1, le=500),
+    offset: int = FastQuery(default=0, ge=0, le=1_000_000)
 ):
     objs = dataos.storage.list_objects(object_type=object_type, source=source, limit=limit, offset=offset)
-    return {"total": len(objs), "objects": [o.to_dict() for o in objs]}
+    total = dataos.storage.count_objects(object_type=object_type, source=source)
+    return {"total": total, "objects": [o.to_dict() for o in objs]}
 
 
 @app.post("/api/objects/", summary="Create DataOS Object")
 async def create_object(req: ObjectCreateRequest):
+    # These fields are owned by trusted ingestion/storage code. Accepting
+    # caller-supplied values would let clients forge duplicate hashes or attach
+    # arbitrary blob references to objects.
+    server_managed_metadata = {"blob", "content_hash"}
+    supplied_managed_fields = sorted(server_managed_metadata.intersection(req.metadata))
+    if supplied_managed_fields:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Object metadata fields are managed by DataOS: "
+                + ", ".join(supplied_managed_fields)
+            ),
+        )
+
     obj = DataObject(
         type=req.type,
         schema=req.schema_ref,
         properties=req.properties,
         content=req.content,
         source=req.source,
-        metadata=req.metadata
+        metadata=dict(req.metadata),
     )
     saved = dataos.storage.save_object(obj)
     return saved.to_dict()
@@ -152,22 +354,30 @@ async def list_relationships(
     source_id: Optional[str] = None,
     target_id: Optional[str] = None,
     relation_type: Optional[str] = None,
-    min_confidence: float = 0.0,
-    limit: int = 1000
+    min_confidence: float = FastQuery(default=0.0, ge=0.0, le=1.0),
+    limit: int = FastQuery(default=1000, ge=1, le=1000),
+    offset: int = FastQuery(default=0, ge=0, le=1_000_000),
 ):
     rels = dataos.storage.list_relationships(
         source_id=source_id,
         target_id=target_id,
         relation_type=relation_type,
         min_confidence=min_confidence,
-        limit=limit
+        limit=limit,
+        offset=offset,
     )
-    return {"total": len(rels), "relationships": [r.to_dict() for r in rels]}
+    total = dataos.storage.count_relationships(
+        source_id=source_id,
+        target_id=target_id,
+        relation_type=relation_type,
+        min_confidence=min_confidence,
+    )
+    return {"total": total, "relationships": [r.to_dict() for r in rels]}
 
 
 @app.post("/api/relationships/", summary="Create Relationship")
 async def create_relationship(req: RelationCreateRequest):
-    rel = dataos.create_relationship(
+    rel = dataos.graph.create_relation(
         source_id=req.source_id,
         target_id=req.target_id,
         relation_type=req.relation_type,
@@ -178,31 +388,40 @@ async def create_relationship(req: RelationCreateRequest):
 
 
 @app.get("/api/graph/neighbors/{object_id}", summary="Get Object Neighbors")
-async def get_neighbors(object_id: str, direction: str = "both"):
-    neighbors = dataos.get_neighbors(object_id, direction=direction)
+async def get_neighbors(
+    object_id: str,
+    direction: Literal["outgoing", "incoming", "both"] = "both",
+):
+    neighbors = dataos.graph.neighbors(object_id, direction=direction)
     return {"object_id": object_id, "total": len(neighbors), "neighbors": neighbors}
 
 
 @app.get("/api/graph/traverse/{object_id}", summary="Multi-Hop Graph Traversal")
-async def traverse_graph(object_id: str, max_hops: int = 3, min_confidence: float = 0.0):
-    traversal = dataos.graph.traverse(start_id=object_id, max_hops=max_hops, min_confidence=min_confidence)
-    return traversal
+async def traverse_graph(
+    object_id: str,
+    max_hops: int = FastQuery(default=3, ge=1, le=10),
+    min_confidence: float = FastQuery(default=0.0, ge=0.0, le=1.0),
+):
+    return dataos.graph.engine.traverse(
+        start_id=object_id,
+        max_hops=max_hops,
+        min_confidence=min_confidence,
+    )
 
 
 @app.get("/api/graph/analytics", summary="Graph Analytics & PageRank")
 async def graph_analytics(algorithm: str = "pagerank"):
+    metrics = dataos.graph.analytics()
     if algorithm == "pagerank":
-        scores = dataos.graph_analytics.compute_pagerank()
-        return {"algorithm": "pagerank", "scores": scores}
-    elif algorithm == "centrality":
-        deg = dataos.graph_analytics.compute_degree_centrality()
-        bc = dataos.graph_analytics.compute_betweenness_centrality()
-        return {"degree_centrality": deg, "betweenness_centrality": bc}
-    elif algorithm == "communities":
-        comms = dataos.graph_analytics.detect_communities()
-        return {"communities": comms}
-    else:
-        raise HTTPException(status_code=400, detail=f"Unsupported algorithm: {algorithm}")
+        return {"algorithm": "pagerank", "scores": metrics["pagerank"]}
+    if algorithm == "centrality":
+        return {
+            "degree_centrality": metrics["degree_centrality"],
+            "betweenness_centrality": metrics["betweenness_centrality"],
+        }
+    if algorithm == "communities":
+        return {"communities": metrics["communities"]}
+    raise HTTPException(status_code=400, detail=f"Unsupported algorithm: {algorithm}")
 
 
 # =============================================================================
@@ -211,25 +430,55 @@ async def graph_analytics(algorithm: str = "pagerank"):
 
 @app.post("/api/compute/sql", summary="Execute SQL Query")
 async def compute_sql(req: SQLQueryRequest):
-    res = dataos.execute_sql(req.query)
+    res = dataos.sql(req.query)
     return res
 
 
 @app.post("/api/compute/python", summary="Execute Python Sandbox")
 async def compute_python(req: PythonComputeRequest):
-    res = dataos.execute_python(req.code, input_object_ids=req.input_object_ids)
+    require_python_compute_enabled()
+    res = dataos.python(req.code, input_object_ids=req.input_object_ids)
     return res
 
 
 @app.post("/api/query/", summary="Unified Query Execution")
-async def query_unified(req: UnifiedQueryRequest):
-    res = dataos.query.execute_query(
-        query_text=req.query,
-        query_type=req.query_type,
-        context_object_id=req.context_object_id,
-        agent_or_user=req.agent_or_user
+async def query_unified(req: UnifiedQueryRequest, current_user: Optional[User] = Depends(get_current_user)):
+    query_type = req.query_type.strip().lower()
+    if query_type == "auto":
+        query_type = "sql" if req.query.lstrip().lower().startswith(("select ", "with ")) else "ask"
+
+    required_capability: Optional[str] = None
+    if query_type == "sql":
+        required_capability = Capability.QUERY_SQL.value
+    elif query_type == "python":
+        required_capability = Capability.COMPUTE_PYTHON.value
+    elif query_type in {"ask", "natural_language", "search"}:
+        required_capability = Capability.SEARCH.value
+
+    if current_user is not None and required_capability and not current_user.has_capability(required_capability):
+        raise HTTPException(
+            status_code=403,
+            detail=f"Capability '{required_capability}' is not permitted for role '{current_user.role}'.",
+        )
+
+    if query_type == "sql":
+        return dataos.sql(req.query)
+    if query_type == "python":
+        require_python_compute_enabled()
+        return dataos.python(req.query)
+    if query_type in {"ask", "natural_language"}:
+        return dataos.ask(req.query)
+    if query_type == "search":
+        results = dataos.search_engine.search(
+            query=req.query,
+            context_object_id=req.context_object_id,
+            limit=20,
+        )
+        return {"query": req.query, "total_matches": len(results), "results": results}
+    raise HTTPException(
+        status_code=400,
+        detail="Unsupported query_type. Use auto, sql, python, ask, or search.",
     )
-    return res
 
 
 # =============================================================================
@@ -241,16 +490,21 @@ async def hybrid_search(
     q: str = FastQuery(..., description="Search query string"),
     object_type: Optional[str] = None,
     context_id: Optional[str] = None,
-    limit: int = 20
+    limit: int = FastQuery(default=20, ge=1, le=100)
 ):
-    results = dataos.search.search(query=q, object_type=object_type, context_object_id=context_id, limit=limit)
+    results = dataos.search_engine.search(
+        query=q,
+        object_type=object_type,
+        context_object_id=context_id,
+        limit=limit,
+    )
     return {"query": q, "total_matches": len(results), "results": results}
 
 
 @app.get("/api/vectors/search", summary="Persistent Vector Similarity Search (Rule #45)")
 async def search_vectors(
     q: str = FastQuery(..., description="Semantic query string"),
-    top_k: int = 10
+    top_k: int = FastQuery(default=10, ge=1, le=100),
 ):
     results = dataos.search_vector(query_text=q, top_k=top_k)
     return {"query": q, "total_matches": len(results), "results": results}
@@ -258,8 +512,7 @@ async def search_vectors(
 
 @app.post("/api/vectors/recompute", summary="Recompute All Vector Embeddings (Rule #45)")
 async def recompute_vectors():
-    res = dataos.recompute_vector_index()
-    return res
+    return dataos.vector_index.recompute_all(dataos.storage)
 
 
 @app.post("/api/notebooks/ingest", summary="Ingest Jupyter Notebook DAG (Rule #51)")
@@ -267,8 +520,10 @@ async def ingest_notebook_api(
     filename: str = Form("analysis.ipynb"),
     content: str = Form(...)
 ):
-    res = dataos.ingest_notebook(notebook_json_str=content, filename=filename)
-    return res
+    try:
+        return dataos.ingest(content, filename=filename, discover_relations=True)
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=422, detail=f"Notebook ingestion failed: {exc}") from exc
 
 
 @app.post("/api/documents/extract_rich", summary="Extract Rich Document Tables & Citations (Rule #54)")
@@ -276,8 +531,10 @@ async def extract_rich_document_api(
     filename: str = Form("paper.md"),
     content: str = Form(...)
 ):
-    res = dataos.ingest_rich_document(content_str=content, filename=filename)
-    return res
+    try:
+        return dataos.ingest(content, filename=filename, discover_relations=True)
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=422, detail=f"Document ingestion failed: {exc}") from exc
 
 
 # =============================================================================
@@ -287,33 +544,37 @@ async def extract_rich_document_api(
 @app.get("/api/time_travel/object/{object_id}", summary="Time-Travel Point-in-Time Object Query (Rule #27)")
 async def time_travel_object(
     object_id: str,
-    as_of: str = FastQuery(..., description="Timestamp ISO string to travel to"),
-    temporal_axis: str = "system_time"
+    as_of: str = FastQuery(..., min_length=17, max_length=64, description="Offset-aware ISO 8601 timestamp"),
+    temporal_axis: Literal["system_time", "validity_time"] = "system_time"
 ):
-    obj = dataos.get_object_as_of(object_id, as_of, temporal_axis=temporal_axis)
+    timestamp = _parse_time_travel_timestamp(as_of, "as_of")
+    normalized_as_of = timestamp.isoformat()
+    obj = dataos.time_travel.get_object_as_of(object_id, normalized_as_of, temporal_axis=temporal_axis)
     if not obj:
-        raise HTTPException(status_code=404, detail=f"Object {object_id} not found as of {as_of}")
+        raise HTTPException(status_code=404, detail=f"Object {object_id} not found as of {normalized_as_of}")
     return obj.to_dict()
 
 
 @app.get("/api/time_travel/graph", summary="Time-Travel Point-in-Time Graph Topology Query (Rule #27)")
 async def time_travel_graph(
-    as_of: str = FastQuery(..., description="Timestamp ISO string"),
-    temporal_axis: str = "system_time"
+    as_of: str = FastQuery(..., min_length=17, max_length=64, description="Offset-aware ISO 8601 timestamp"),
+    temporal_axis: Literal["system_time", "validity_time"] = "system_time"
 ):
-    graph = dataos.get_graph_as_of(as_of, temporal_axis=temporal_axis)
-    return graph
+    timestamp = _parse_time_travel_timestamp(as_of, "as_of")
+    return dataos.time_travel.get_graph_as_of(timestamp.isoformat(), temporal_axis=temporal_axis)
 
 
 @app.get("/api/time_travel/changes", summary="Changes Between Two Historical Timestamps (Rule #27)")
 async def time_travel_changes(
-    t1: str = FastQuery(..., description="Start timestamp ISO"),
-    t2: str = FastQuery(..., description="End timestamp ISO"),
-    temporal_axis: str = "system_time"
+    t1: str = FastQuery(..., min_length=17, max_length=64, description="Start offset-aware ISO 8601 timestamp"),
+    t2: str = FastQuery(..., min_length=17, max_length=64, description="End offset-aware ISO 8601 timestamp"),
+    temporal_axis: Literal["system_time", "validity_time"] = "system_time"
 ):
-    changes = dataos.get_changes_between(t1, t2, temporal_axis=temporal_axis)
-    return changes
-
+    start = _parse_time_travel_timestamp(t1, "t1")
+    end = _parse_time_travel_timestamp(t2, "t2")
+    if start > end:
+        raise HTTPException(status_code=422, detail="t1 must be earlier than or equal to t2")
+    return dataos.time_travel.changes_between(start.isoformat(), end.isoformat(), temporal_axis=temporal_axis)
 
 class ConflictResolutionRequest(BaseModel):
     conflict_object_id: str
@@ -324,7 +585,7 @@ class ConflictResolutionRequest(BaseModel):
 @app.post("/api/sync/resolve_conflict", summary="Explicit Conflict Resolution (Rule #59)")
 async def resolve_conflict_api(req: ConflictResolutionRequest):
     try:
-        res = dataos.resolve_conflict(
+        res = dataos.sync.resolve_conflict(
             conflict_object_id=req.conflict_object_id,
             strategy=req.strategy,
             manual_properties=req.manual_properties
@@ -387,11 +648,14 @@ async def evaluate_quality(object_id: str, req: QualityEvaluateRequest):
 # =============================================================================
 
 @app.get("/api/provenance/lineage/{object_id}", summary="Data Lineage Traversal")
-async def get_lineage(object_id: str, direction: str = "upstream", max_depth: int = 10):
+async def get_lineage(
+    object_id: str,
+    direction: Literal["upstream", "downstream"] = FastQuery(default="upstream"),
+    max_depth: int = FastQuery(default=10, ge=1, le=10),
+):
     if direction == "upstream":
         return dataos.lineage.trace_upstream_lineage(object_id, max_depth=max_depth)
-    else:
-        return dataos.lineage.trace_downstream_impact(object_id, max_depth=max_depth)
+    return dataos.lineage.trace_downstream_impact(object_id, max_depth=max_depth)
 
 
 # =============================================================================
@@ -407,11 +671,11 @@ class MultiAgentPipelineRequest(BaseModel):
 
 @app.post("/api/agents/pipeline/research", summary="Run Composable Multi-Agent Research Pipeline (Rule #20)")
 async def run_multi_agent_pipeline_api(req: MultiAgentPipelineRequest):
-    res = dataos.run_multi_agent_pipeline(
+    res = dataos.multi_agent.run_end_to_end_research_pipeline(
         goal_prompt=req.goal_prompt,
         target_dataset_id=req.target_dataset_id,
         analysis_sql_or_python=req.analysis_sql_or_python,
-        quality_rules=req.quality_rules
+        quality_rules=req.quality_rules,
     )
     return res
 
@@ -419,32 +683,77 @@ async def run_multi_agent_pipeline_api(req: MultiAgentPipelineRequest):
 @app.get("/api/recommendations/connections/{object_id}", summary="Graph Recommendation & Missing Link Discovery (Rule #57)")
 async def recommend_connections_api(
     object_id: str,
-    top_k: int = 10
+    top_k: int = FastQuery(default=10, ge=1, le=100),
 ):
-    recs = dataos.recommend_connections(target_object_id=object_id, top_k=top_k)
+    recs = dataos.graph.recommendations(object_id, top_k=top_k)
     return {"target_object_id": object_id, "recommendations": recs}
 
 
 @app.get("/api/recommendations/datasets/{object_id}", summary="Recommend Relevant Datasets (Rule #57)")
 async def recommend_datasets_api(
     object_id: str,
-    top_k: int = 5
+    top_k: int = FastQuery(default=5, ge=1, le=100),
 ):
-    recs = dataos.recommend_datasets(target_object_id=object_id, top_k=top_k)
+    target = dataos.storage.get_object(object_id)
+    if target is None:
+        raise HTTPException(status_code=404, detail="Object not found")
+    query = str(target.properties.get("filename") or target.properties.get("title") or target.type)
+    recs = dataos.search_engine.search(
+        query=query,
+        object_type="dataset",
+        context_object_id=object_id,
+        limit=top_k,
+    )
     return {"target_object_id": object_id, "recommended_datasets": recs}
 
 
 @app.post("/api/agents/execute", summary="Execute Agent Capability")
-async def execute_agent(req: AgentExecutionRequest):
-    agent = dataos.create_agent(req.agent_id)
-    res = agent.execute_capability(Capability(req.capability), req.params)
-    return res
+async def execute_agent(req: AgentExecutionRequest, current_user: Optional[User] = Depends(get_current_user)):
+    agents = {
+        "agent_research": dataos.multi_agent.research_agent,
+        "agent_analysis": dataos.multi_agent.analysis_agent,
+        "agent_quality": dataos.multi_agent.quality_agent,
+        "agent_report": dataos.multi_agent.report_agent,
+    }
+    agent = agents.get(req.agent_id)
+    if agent is None:
+        raise HTTPException(status_code=404, detail="Unknown built-in agent")
+    try:
+        capability = Capability(req.capability)
+        if current_user is not None and not current_user.has_capability(capability.value):
+            raise HTTPException(
+                status_code=403,
+                detail=f"Capability '{capability.value}' is not permitted for role '{current_user.role}'.",
+            )
+        return agent.execute_capability(capability, req.params)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid capability: {req.capability}") from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail="Agent capability is not permitted") from exc
 
 
-@app.post("/api/workflows/execute", summary="Execute Workflow DAG")
+@app.post("/api/workflows/execute", summary="Execute a bounded built-in Workflow DAG")
 async def execute_workflow(req: WorkflowExecutionRequest):
-    res = dataos.workflows.execute_workflow(req.definition, context_data=req.context)
-    return res
+    # Do not queue an unbounded number of workflow requests behind the shared
+    # ASGI worker pool. Reject overload explicitly so clients can retry.
+    if not workflow_slots.acquire(blocking=False):
+        raise HTTPException(
+            status_code=503,
+            detail="Workflow execution capacity is full; retry shortly.",
+            headers={"Retry-After": "1"},
+        )
+    try:
+        try:
+            # The DAG engine performs synchronous work and bounded retry sleeps.
+            # Run it in Starlette's worker pool so API requests and health checks
+            # are not blocked while a workflow is executing.
+            return await run_in_threadpool(
+                execute_safe_workflow, workflow_engine, req.definition, req.context
+            )
+        except WorkflowRequestError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+    finally:
+        workflow_slots.release()
 
 
 # =============================================================================
@@ -456,8 +765,11 @@ async def detect_duplicates_api(
     object_id: Optional[str] = None,
     min_similarity: float = 0.75
 ):
-    results = dataos.find_duplicates(target_object_id=object_id, min_similarity=min_similarity)
-    return {"total_matches": len(results), "duplicates": results}
+    results = dataos.duplicates.find_duplicates(
+        target_object_id=object_id,
+        min_similarity=min_similarity,
+    )
+    return {"total": len(results), "duplicates": results}
 
 
 @app.get("/api/governance/quota/{principal_id}", summary="Get Principal Quota & Usage Status (Rule #61)")
@@ -466,23 +778,30 @@ async def get_quota_status_api(principal_id: str):
 
 
 class IssueSharingTokenRequest(BaseModel):
-    issuer: str
-    subject_principal: str
-    subgraph_root_id: str
-    allowed_object_ids: Optional[List[str]] = None
-    allowed_capabilities: Optional[List[str]] = None
-    duration_seconds: Optional[int] = 3600
+    issuer: str = Field(min_length=1, max_length=200)
+    subject_principal: str = Field(min_length=1, max_length=200)
+    subgraph_root_id: str = Field(min_length=1, max_length=200)
+    allowed_object_ids: Optional[List[str]] = Field(default=None, max_length=500)
+    allowed_capabilities: Optional[List[str]] = Field(default=None, max_length=50)
+    duration_seconds: int = Field(default=3600, ge=1, le=86400)
 
 
 @app.post("/api/sharing/issue_token", summary="Issue Cryptographically Signed Subgraph Token (Rule #65)")
 async def issue_sharing_token_api(req: IssueSharingTokenRequest):
-    token = dataos.issue_sharing_token(
+    if not os.getenv("DATAOS_SHARING_TOKEN_SECRET"):
+        raise HTTPException(
+            status_code=503,
+            detail="Sharing tokens are disabled until DATAOS_SHARING_TOKEN_SECRET is configured.",
+        )
+    if not 1 <= req.duration_seconds <= 86400:
+        raise HTTPException(status_code=422, detail="duration_seconds must be between 1 and 86400")
+    token = dataos.tokens.issue_token(
         issuer=req.issuer,
         subject_principal=req.subject_principal,
         subgraph_root_id=req.subgraph_root_id,
         allowed_object_ids=req.allowed_object_ids,
         allowed_capabilities=req.allowed_capabilities,
-        duration_seconds=req.duration_seconds
+        duration_seconds=req.duration_seconds,
     )
     return {"token": token, "expires_in_seconds": req.duration_seconds}
 
@@ -493,8 +812,13 @@ class VerifySharingTokenRequest(BaseModel):
 
 @app.post("/api/sharing/verify_token", summary="Verify and Decode Sharing Token (Rule #65)")
 async def verify_sharing_token_api(req: VerifySharingTokenRequest):
+    if not os.getenv("DATAOS_SHARING_TOKEN_SECRET"):
+        raise HTTPException(
+            status_code=503,
+            detail="Sharing tokens are disabled until DATAOS_SHARING_TOKEN_SECRET is configured.",
+        )
     try:
-        payload = dataos.verify_sharing_token(req.token)
+        payload = dataos.tokens.verify_and_decode_token(req.token)
         import dataclasses
         return {"status": "valid", "payload": dataclasses.asdict(payload)}
     except Exception as e:
@@ -504,10 +828,9 @@ async def verify_sharing_token_api(req: VerifySharingTokenRequest):
 @app.get("/api/federation/search", summary="Federated Cross-Instance Search (Rule #64)")
 async def federated_search_api(
     q: str = FastQuery(..., description="Query string"),
-    top_k: int = 10
+    top_k: int = FastQuery(default=10, ge=1, le=100),
 ):
-    res = dataos.federated_search(query=q, top_k=top_k)
-    return res
+    return dataos.federation.federated_search(query=q, top_k=top_k)
 
 
 # =============================================================================
@@ -531,7 +854,7 @@ async def explain_object_impact(object_id: str):
 
 
 class AskDataOSRequest(BaseModel):
-    query: str
+    query: str = Field(min_length=1, max_length=20000)
 
 
 @app.post("/api/ask", summary="Ask DataOS Grounded System Query")
@@ -560,17 +883,11 @@ async def ingest_text(
     content: str = Form(...),
     format_type: str = Form("text")
 ):
-    import tempfile
-    with tempfile.NamedTemporaryFile("w", delete=False, suffix=f"_{filename}", encoding="utf-8") as tmp:
-        tmp.write(content)
-        tmp_path = tmp.name
-
-    try:
-        res = dataos.ingest_file(tmp_path, discover_relations=True)
-        return res
-    finally:
-        if os.path.exists(tmp_path):
-            os.remove(tmp_path)
+    # Ingest content directly; never construct a temporary path from client input.
+    safe_name = os.path.basename(filename.strip().replace("\\", "/")) or "text.txt"
+    if not os.path.splitext(safe_name)[1]:
+        safe_name = f"{safe_name}.txt"
+    return dataos.ingest(content, filename=safe_name, discover_relations=True)
 
 
 @app.get("/api/io/export", summary="Export DataOS Graph")
@@ -593,12 +910,22 @@ async def export_graph(format: str = "json_ld"):
 
 @app.get("/api/catalog/health", summary="System Health & Catalog Overview")
 async def get_health_overview():
-    return dataos.get_system_health()
+    try:
+        # A bounded read verifies that the configured storage backend is reachable.
+        dataos.storage.list_objects(limit=1)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="DataOS storage is unavailable") from exc
+    return {
+        "status": "operational",
+        "storage_backend": type(dataos.storage).__name__,
+        "storage_reachable": True,
+        "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    }
 
 
 @app.get("/health", summary="Basic Health Check")
 async def health_check():
-    return {"status": "operational", "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat()}
+    return await get_health_overview()
 
 
 # =============================================================================

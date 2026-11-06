@@ -13,6 +13,7 @@ networkx>=3.0
 
 # ── API backend ──────────────────────────────────────────────────────────────
 fastapi>=0.110
+python-multipart>=0.0.20  # Required for FastAPI Form/File routes at app import time.
 pydantic>=2.0
 uvicorn>=0.27
 requests>=2.31
@@ -30,3 +31,4 @@ idna>=3.6
 # pyarrow>=15.0              # Parquet support
 # sentence-transformers>=3.0 # real embeddings; without it DataOS falls back to
 #                            # the built-in HashEmbeddingProvider (dimension=128)
+python-multipart>=0.0.20

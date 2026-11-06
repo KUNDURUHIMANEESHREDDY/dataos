@@ -10,6 +10,7 @@ import json
 import base64
 import time
 import datetime
+import os
 from typing import Dict, Any, List, Optional, Set
 from dataclasses import dataclass, field, asdict
 from core.permissions.policy import Capability
@@ -49,8 +50,18 @@ class SharingTokenPayload:
 class SubgraphTokenManager:
     """Issues and verifies cryptographically signed HMAC-SHA256 sharing tokens."""
 
-    def __init__(self, secret_key: str = "dataos_subgraph_master_secret_2026"):
-        """Initialize with an HMAC secret key for signing."""
+    def __init__(self, secret_key: Optional[str] = None):
+        """Initialize with an explicit or environment-provided HMAC secret.
+
+        A hard-coded signing key is unsafe because anyone with source access could
+        mint tokens accepted by every default installation. Require an operator-
+        managed secret of at least 32 UTF-8 bytes.
+        """
+        secret_key = secret_key or os.getenv("DATAOS_SHARING_TOKEN_SECRET")
+        if not secret_key:
+            raise ValueError("DATAOS_SHARING_TOKEN_SECRET must be configured; no default signing key is permitted.")
+        if len(secret_key.encode("utf-8")) < 32:
+            raise ValueError("Sharing-token signing secret must be at least 32 UTF-8 bytes.")
         self.secret_key = secret_key.encode("utf-8")
 
     def issue_token(

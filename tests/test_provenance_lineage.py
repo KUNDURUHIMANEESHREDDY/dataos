@@ -58,6 +58,46 @@ class TestLineageAndGovernance(unittest.TestCase):
         self.assertIn(self.clean_obj.id, impacted_ids)
         self.assertIn(self.report_obj.id, impacted_ids)
 
+    def test_downstream_traversal_reports_global_node_budget(self):
+        impact = self.lineage.trace_downstream_impact(
+            self.raw_obj.id,
+            max_depth=5,
+            max_nodes=2,
+        )
+        self.assertEqual(impact["total_downstream_dependents"], 1)
+        self.assertEqual(impact["max_nodes"], 2)
+        self.assertTrue(impact["truncated"])
+        self.assertEqual(impact["truncation_reason"], "max_nodes")
+
+    def test_upstream_traversal_reports_global_node_budget(self):
+        trace = self.lineage.trace_upstream_lineage(
+            self.report_obj.id,
+            max_depth=5,
+            max_nodes=2,
+        )
+        self.assertEqual(trace["total_ancestors"], 1)
+        self.assertTrue(trace["truncated"])
+        self.assertEqual(trace["truncation_reason"], "max_nodes")
+
+    def test_relationship_budget_is_global_across_downstream_nodes(self):
+        impact = self.lineage.trace_downstream_impact(
+            self.raw_obj.id,
+            max_depth=5,
+            max_relationships=1,
+        )
+        self.assertEqual(impact["relationships_scanned"], 1)
+        self.assertEqual(impact["total_downstream_dependents"], 1)
+        self.assertTrue(impact["truncated"])
+        self.assertEqual(impact["truncation_reason"], "max_relationships")
+
+    def test_invalid_traversal_budgets_are_rejected(self):
+        with self.assertRaises(ValueError):
+            self.lineage.trace_downstream_impact(self.raw_obj.id, max_nodes=0)
+        with self.assertRaises(ValueError):
+            self.lineage.trace_upstream_lineage(self.report_obj.id, max_relationships=0)
+        with self.assertRaises(ValueError):
+            self.lineage.trace_downstream_impact(self.raw_obj.id, max_depth=33)
+
     def test_agent_permission_enforcement(self):
         """Verify agent capability enforcement and execution tracing."""
         policy = PermissionPolicy(
