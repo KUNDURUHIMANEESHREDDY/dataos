@@ -190,7 +190,9 @@ async fn object_ownership_isolation_blocks_cross_user_reads_writes_and_relations
     assert_eq!(status, StatusCode::OK);
 
     let (status, _) = call(&app, Method::DELETE, &format!("/api/objects/{alice_object}"), None, Some(&bob)).await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
+    // Operators cannot delete objects at all; the capability gate rejects this
+    // before the resource-level ownership check.
+    assert_eq!(status, StatusCode::FORBIDDEN);
 
     // A user cannot connect their own object to another user's object.
     let (status, body) = call(
