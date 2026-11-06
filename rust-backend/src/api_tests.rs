@@ -73,6 +73,39 @@ async fn call(
     (status, parsed)
 }
 
+async fn call_with_cookie(
+    app: &Router,
+    method: Method,
+    uri: &str,
+    body: Option<Value>,
+    cookie: Option<&str>,
+) -> (StatusCode, Value, Option<String>) {
+    let mut builder = Request::builder().method(method).uri(uri);
+    if let Some(cookie) = cookie {
+        builder = builder.header(header::COOKIE, cookie);
+    }
+    let request = match body {
+        Some(value) => builder
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(serde_json::to_vec(&value).expect("serialisable body")))
+            .expect("request"),
+        None => builder.body(Body::empty()).expect("request"),
+    };
+    let response = app.clone().oneshot(request).await.expect("router response");
+    let status = response.status();
+    let set_cookie = response.headers().get(header::SET_COOKIE)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
+    let bytes = response.into_body().collect().await.expect("body").to_bytes();
+    let parsed = if bytes.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_slice(&bytes)
+            .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&bytes).to_string()))
+    };
+    (status, parsed, set_cookie)
+}
+
 async fn register(_app: &Router, db: &Db, role: &str) -> String {
     let username = format!("user_{}", &uuid::Uuid::new_v4().simple().to_string()[..8]);
     let user = db
@@ -151,6 +184,58 @@ async fn auth_roundtrip_issue_me_and_capability_gate() {
     assert_eq!(status, StatusCode::OK);
 }
 
+
+#[tokio::test]
+async fn http_only_cookie_session_supports_me_and_logout() {
+    let (app, db) = test_app();
+    let username = format!("cookie_user_{}", &uuid::Uuid::new_v4().simple().to_string()[..8]);
+    let user = db.user_register(
+        &username,
+        &format!("{username}@example.com"),
+        "password123",
+        "viewer",
+    ).expect("create cookie-session user");
+
+    let (status, body, set_cookie) = call_with_cookie(
+        &app,
+        Method::POST,
+        "/api/auth/login",
+        Some(json!({"login": user.email, "password": "password123"})),
+        None,
+    ).await;
+    assert_eq!(status, StatusCode::OK, "login failed: {body}");
+    let set_cookie = set_cookie.expect("login must issue a session cookie");
+    assert!(set_cookie.contains("HttpOnly"));
+    assert!(set_cookie.contains("SameSite=Strict"));
+    assert!(set_cookie.contains("Path=/"));
+    assert!(set_cookie.contains("Max-Age=3600"));
+    let cookie_pair = set_cookie.split(';').next().expect("cookie pair").to_string();
+
+    let (status, body, _) = call_with_cookie(
+        &app,
+        Method::GET,
+        "/api/auth/me",
+        None,
+        Some(&cookie_pair),
+    ).await;
+    assert_eq!(status, StatusCode::OK, "cookie authentication failed: {body}");
+    assert_eq!(body["authenticated"], true);
+    assert_eq!(body["user"]["id"], user.id);
+
+    let (status, _, cleared_cookie) = call_with_cookie(
+        &app,
+        Method::POST,
+        "/api/auth/logout",
+        None,
+        Some(&cookie_pair),
+    ).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let cleared_cookie = cleared_cookie.expect("logout must clear the session cookie");
+    assert!(cleared_cookie.contains("HttpOnly"));
+    assert!(cleared_cookie.contains("SameSite=Strict"));
+    assert!(cleared_cookie.contains("Path=/"));
+    assert!(cleared_cookie.contains("Max-Age=0"));
+}
 
 #[tokio::test]
 async fn object_ownership_isolation_blocks_cross_user_reads_writes_and_relationships() {
