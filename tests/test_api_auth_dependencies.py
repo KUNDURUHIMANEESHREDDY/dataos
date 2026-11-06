@@ -93,6 +93,7 @@ def test_login_sets_httponly_cookie_and_logout_clears_it(monkeypatch, tmp_path):
         assert response.headers["cache-control"] == "no-store"
 
         logout_response = run(api.logout_user(Response()))
+        assert logout_response.status_code == 204
         cleared = logout_response.headers["set-cookie"]
         assert "dataos_session=" in cleared
         assert "HttpOnly" in cleared
