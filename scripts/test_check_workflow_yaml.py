@@ -26,8 +26,8 @@ def _aggregate(required_needs):
         for dependency in required_needs
     }
     run = "\n".join(
-        f'test "${variable}" = "success"'
-        for variable in env
+        ["set -euo pipefail"]
+        + [f'test "${variable}" = "success"' for variable in env]
     )
     return {"if": "always()", "needs": list(required_needs), "steps": [{"env": env, "run": run}]}
 
@@ -60,6 +60,7 @@ def _valid_workflow():
         }
     )
     return {
+        "on": {"pull_request": None},
         "jobs": {
             "security-required": security,
             "backend-required": _aggregate(backend_needs),
@@ -68,6 +69,21 @@ def _valid_workflow():
 
 
 class WorkflowYamlGateTests(unittest.TestCase):
+    def test_pull_request_trigger_is_required(self):
+        workflow = _valid_workflow()
+        del workflow["on"]["pull_request"]
+        self.assertFalse(validate_gate_contract(Path("workflow.yml"), workflow))
+
+    def test_pull_request_branch_filter_is_rejected(self):
+        workflow = _valid_workflow()
+        workflow["on"]["pull_request"] = {"branches": ["main"]}
+        self.assertFalse(validate_gate_contract(Path("workflow.yml"), workflow))
+
+    def test_pull_request_branches_ignore_filter_is_rejected(self):
+        workflow = _valid_workflow()
+        workflow["on"]["pull_request"] = {"branches-ignore": ["release/**"]}
+        self.assertFalse(validate_gate_contract(Path("workflow.yml"), workflow))
+
     def test_duplicate_mapping_key_is_rejected(self):
         source = "jobs:\n  backend: {}\n  backend: {}\n"
         with self.assertRaises(yaml.constructor.ConstructorError):
@@ -79,6 +95,12 @@ class WorkflowYamlGateTests(unittest.TestCase):
     def test_aggregate_with_dependencies_but_no_result_guards_fails(self):
         workflow = _valid_workflow()
         workflow["jobs"]["security-required"]["steps"][0]["run"] = "echo looks good"
+        self.assertFalse(validate_gate_contract(Path("workflow.yml"), workflow))
+
+    def test_aggregate_without_fail_fast_shell_mode_fails(self):
+        workflow = _valid_workflow()
+        step = workflow["jobs"]["security-required"]["steps"][0]
+        step["run"] = step["run"].replace("set -euo pipefail\n", "", 1)
         self.assertFalse(validate_gate_contract(Path("workflow.yml"), workflow))
 
     def test_comment_only_result_guards_fail(self):
@@ -94,7 +116,6 @@ class WorkflowYamlGateTests(unittest.TestCase):
         workflow = _valid_workflow()
         workflow["jobs"]["backend-required"]["needs"].remove("postgres-storage")
         self.assertFalse(validate_gate_contract(Path("workflow.yml"), workflow))
-
 
     def test_missing_critical_high_alert_gate_fails(self):
         workflow = _valid_workflow()
@@ -121,9 +142,11 @@ class WorkflowYamlGateTests(unittest.TestCase):
     def test_alert_gate_deduplication_is_rejected(self):
         workflow = _valid_workflow()
         alert_step = workflow["jobs"]["security-required"]["steps"][-1]
-        alert_step["run"] = alert_step["run"].replace('fetch_alerts "ref=refs/pull/${PR_NUMBER}/merge"', 'fetch_alerts "ref=refs/pull/${PR_NUMBER}/merge" | sort -u')
+        alert_step["run"] = alert_step["run"].replace(
+            'fetch_alerts "ref=refs/pull/${PR_NUMBER}/merge"',
+            'fetch_alerts "ref=refs/pull/${PR_NUMBER}/merge" | sort -u',
+        )
         self.assertFalse(validate_gate_contract(Path("workflow.yml"), workflow))
-
 
     def test_alert_gate_uses_pull_request_merge_ref_filter(self):
         workflow = _valid_workflow()
@@ -140,7 +163,6 @@ class WorkflowYamlGateTests(unittest.TestCase):
         workflow = _valid_workflow()
         workflow["jobs"]["security-required"]["if"] = "success()"
         self.assertFalse(validate_gate_contract(Path("workflow.yml"), workflow))
-
 
     def test_result_guard_hidden_in_here_document_fails(self):
         workflow = _valid_workflow()
@@ -160,6 +182,32 @@ class WorkflowYamlGateTests(unittest.TestCase):
         workflow["jobs"]["security-required"]["steps"][0]["run"] = (
             "if false; then\n" + expected_guard + "\nfi"
         )
+        self.assertFalse(validate_gate_contract(Path("workflow.yml"), workflow))
+
+
+    def test_aggregate_guard_cannot_ignore_failure_with_step_continue_on_error(self):
+        workflow = _valid_workflow()
+        workflow["jobs"]["security-required"]["steps"][0]["continue-on-error"] = True
+        self.assertFalse(validate_gate_contract(Path("workflow.yml"), workflow))
+
+    def test_aggregate_job_cannot_ignore_failure_with_continue_on_error(self):
+        workflow = _valid_workflow()
+        workflow["jobs"]["backend-required"]["continue-on-error"] = True
+        self.assertFalse(validate_gate_contract(Path("workflow.yml"), workflow))
+
+    def test_aggregate_guard_cannot_be_conditionally_skipped(self):
+        workflow = _valid_workflow()
+        workflow["jobs"]["backend-required"]["steps"][0]["if"] = "false"
+        self.assertFalse(validate_gate_contract(Path("workflow.yml"), workflow))
+
+    def test_critical_alert_gate_cannot_ignore_failure_with_continue_on_error(self):
+        workflow = _valid_workflow()
+        workflow["jobs"]["security-required"]["steps"][-1]["continue-on-error"] = True
+        self.assertFalse(validate_gate_contract(Path("workflow.yml"), workflow))
+
+    def test_critical_alert_gate_cannot_be_conditionally_skipped(self):
+        workflow = _valid_workflow()
+        workflow["jobs"]["security-required"]["steps"][-1]["if"] = "false"
         self.assertFalse(validate_gate_contract(Path("workflow.yml"), workflow))
 
 

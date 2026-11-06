@@ -11,4 +11,9 @@ python -m pip install PyYAML==6.0.2
 python scripts/check_workflow_yaml.py
 ```
 
-The `Backend required` aggregate depends on the workflow-integrity job in addition to backend tests, live PostgreSQL storage checks, and the security gate. A failed or skipped prerequisite must not be treated as a passing release gate.
+The `Backend required` aggregate depends on the workflow-integrity job in addition to backend tests, live PostgreSQL storage checks, and the security gate. A failed or skipped prerequisite must not be treated as a passing release gate. The checker also rejects job- or step-level `continue-on-error` and conditional execution on guard steps, because either can turn a failed prerequisite into a green aggregate.
+
+
+## Stacked pull requests
+
+The backend verification workflow intentionally uses an unfiltered `pull_request` trigger. A branch filter such as `branches: [main]` silently omits pull requests whose base is another feature branch, so a stacked PR can otherwise receive frontend checks without the backend, PostgreSQL and security gates. The workflow validator rejects both `branches` and `branches-ignore` filters on `pull_request` to keep the release contract active for every PR base branch.

@@ -56,10 +56,21 @@ RESULT_ENV = {
 }
 
 
+def is_enforced_step(job: dict, step: dict) -> bool:
+    """Reject guards that a workflow can skip or mark as non-blocking."""
+    job_continue = job.get("continue-on-error")
+    step_continue = step.get("continue-on-error")
+    return (
+        (job_continue is None or job_continue is False)
+        and (step_continue is None or step_continue is False)
+        and "if" not in step
+    )
+
+
 def has_fail_closed_result_checks(job: dict, required_needs: set[str]) -> bool:
     """Require every prerequisite result to be explicitly checked for success."""
     for step in job.get("steps", []):
-        if not isinstance(step, dict):
+        if not isinstance(step, dict) or not is_enforced_step(job, step):
             continue
         env = step.get("env")
         run = step.get("run")
@@ -82,6 +93,10 @@ def has_fail_closed_result_checks(job: dict, required_needs: set[str]) -> bool:
         if any(not simple_command.fullmatch(line) for line in active_lines):
             continue
         active_commands = set(active_lines)
+        # Without fail-fast shell mode, an early failed test can be masked by a
+        # later successful test, allowing a required aggregate to exit zero.
+        if "set -euo pipefail" not in active_commands:
+            continue
         for dependency in required_needs:
             variable = RESULT_ENV.get(dependency)
             expected_expression = f"${{{{ needs.{dependency}.result }}}}"
@@ -95,7 +110,6 @@ def has_fail_closed_result_checks(job: dict, required_needs: set[str]) -> bool:
         else:
             return True
     return False
-
 
 
 def has_critical_high_alert_gate(job: dict) -> bool:
@@ -112,7 +126,7 @@ def has_critical_high_alert_gate(job: dict) -> bool:
         "exit 1",
     )
     for step in job.get("steps", []):
-        if not isinstance(step, dict):
+        if not isinstance(step, dict) or not is_enforced_step(job, step):
             continue
         if step.get("name") != "Fail on open critical/high code-scanning alerts":
             continue
@@ -128,6 +142,23 @@ def has_critical_high_alert_gate(job: dict) -> bool:
         if all(fragment in run for fragment in required_fragments) and "sort -u" not in run:
             return True
     return False
+
+
+def has_unfiltered_pull_request_trigger(workflow: dict) -> bool:
+    """Require backend/security verification for PRs targeting stacked feature branches."""
+    # PyYAML's YAML 1.1 resolver may load the unquoted key on as boolean True.
+    triggers = workflow.get("on")
+    if triggers is None:
+        triggers = workflow.get(True)
+    if not isinstance(triggers, dict) or "pull_request" not in triggers:
+        return False
+    pull_request = triggers["pull_request"]
+    if isinstance(pull_request, dict) and (
+        "branches" in pull_request or "branches-ignore" in pull_request
+    ):
+        return False
+    return True
+
 
 def validate_gate_contract(path: Path, workflow: object) -> bool:
     """Ensure release aggregates both depend on and fail closed for required jobs."""
@@ -150,6 +181,12 @@ def validate_gate_contract(path: Path, workflow: object) -> bool:
         },
     }
     ok = True
+    if not has_unfiltered_pull_request_trigger(workflow):
+        print(
+            f"FAIL: {path}: pull_request must be unfiltered so stacked feature PRs receive backend and security verification",
+            file=sys.stderr,
+        )
+        ok = False
     for job_id, required_needs in expected.items():
         job = jobs.get(job_id)
         if not isinstance(job, dict):
@@ -177,7 +214,7 @@ def validate_gate_contract(path: Path, workflow: object) -> bool:
 
         if not has_fail_closed_result_checks(job, required_needs):
             print(
-                f"FAIL: {path}: {job_id!r} must explicitly require success for every prerequisite result",
+                f"FAIL: {path}: {job_id!r} must explicitly require success for every prerequisite result under fail-fast shell mode",
                 file=sys.stderr,
             )
             ok = False
