@@ -123,6 +123,38 @@ class TestDualStorageBackends(unittest.TestCase):
     def test_sqlite_storage_contract(self):
         self._test_backend_contract_parity(self.sqlite_store, "SQLiteStorage")
 
+    def test_sqlite_soft_delete_is_idempotent_and_preserves_timestamp(self):
+        obj = self.sqlite_store.save_object(DataObject(
+            type=ObjectType.DATASET.value,
+            properties={"name": "soft-delete-idempotency"},
+        ))
+
+        self.assertTrue(self.sqlite_store.delete_object(obj.id, soft=True))
+
+        conn = self.sqlite_store._get_connection()
+        try:
+            first = conn.execute(
+                "SELECT deleted_at FROM objects WHERE id = ?",
+                (obj.id,),
+            ).fetchone()["deleted_at"]
+        finally:
+            self.sqlite_store._close(conn)
+
+        self.assertIsNotNone(first)
+        self.assertFalse(self.sqlite_store.delete_object(obj.id, soft=True))
+
+        conn = self.sqlite_store._get_connection()
+        try:
+            second = conn.execute(
+                "SELECT deleted_at FROM objects WHERE id = ?",
+                (obj.id,),
+            ).fetchone()["deleted_at"]
+        finally:
+            self.sqlite_store._close(conn)
+
+        self.assertEqual(second, first)
+        self.assertIsNone(self.sqlite_store.get_object(obj.id))
+
     def test_postgres_storage_contract(self):
         self._test_backend_contract_parity(self.postgres_store, "PostgresStorage")
 

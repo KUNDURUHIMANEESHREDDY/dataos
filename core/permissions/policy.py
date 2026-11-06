@@ -33,18 +33,51 @@ class Capability(str, Enum):
     EXPORT_DATA = "export_data"
 
 
+class Role(str, Enum):
+    """Role tiers mapping to Capability sets via ROLE_CAPABILITIES."""
+    VIEWER = "viewer"
+    ANALYST = "analyst"
+    OPERATOR = "operator"
+    ADMIN = "admin"
+
+
+ROLE_CAPABILITIES: Dict[str, Set[str]] = {
+    Role.VIEWER.value: {
+        Capability.SEARCH.value,
+        Capability.READ_OBJECT.value,
+    },
+    Role.ANALYST.value: {
+        Capability.SEARCH.value,
+        Capability.READ_OBJECT.value,
+        Capability.CREATE_RELATION.value,
+        Capability.QUERY_SQL.value,
+        Capability.EXTRACT_KNOWLEDGE.value,
+        Capability.EXPORT_DATA.value,
+    },
+    Role.OPERATOR.value: {
+        Capability.SEARCH.value,
+        Capability.READ_OBJECT.value,
+        Capability.CREATE_OBJECT.value,
+        Capability.UPDATE_OBJECT.value,
+        Capability.CREATE_RELATION.value,
+        Capability.QUERY_SQL.value,
+        Capability.COMPUTE_PYTHON.value,
+        Capability.TRANSFORM_DATA.value,
+        Capability.EXTRACT_KNOWLEDGE.value,
+        Capability.EXECUTE_WORKFLOW.value,
+        Capability.CALL_CONNECTOR.value,
+        Capability.EXPORT_DATA.value,
+    },
+    Role.ADMIN.value: {c.value for c in Capability},
+}
+
+
 @dataclass
 class PermissionPolicy:
     """Access policy attached to an agent, user role, or object."""
     principal_id: str
     role: str = "operator"
-    allowed_capabilities: Set[str] = field(default_factory=lambda: {
-        Capability.SEARCH.value,
-        Capability.READ_OBJECT.value,
-        Capability.CREATE_RELATION.value,
-        Capability.QUERY_SQL.value,
-        Capability.COMPUTE_PYTHON.value
-    })
+    allowed_capabilities: Set[str] = field(default_factory=lambda: set(ROLE_CAPABILITIES[Role.OPERATOR.value]))
     object_whitelist: Optional[List[str]] = None  # Specific object IDs allowed
     type_whitelist: Optional[List[str]] = None    # Specific object types allowed
     time_bound_until: Optional[str] = None         # ISO timestamp for lease expiration

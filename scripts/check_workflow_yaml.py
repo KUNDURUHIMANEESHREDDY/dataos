@@ -127,6 +127,7 @@ def has_critical_high_alert_gate(job: dict) -> bool:
     )
     for step in job.get("steps", []):
         if not isinstance(step, dict) or not is_enforced_step(job, step):
+        if not isinstance(step, dict):
             continue
         if step.get("name") != "Fail on open critical/high code-scanning alerts":
             continue
@@ -226,6 +227,25 @@ def validate_gate_contract(path: Path, workflow: object) -> bool:
             file=sys.stderr,
         )
         ok = False
+    if isinstance(security_job, dict):
+        permissions = security_job.get("permissions", workflow.get("permissions", {}))
+        security_events_permission = (
+            permissions.get("security-events")
+            if isinstance(permissions, dict)
+            else None
+        )
+        if security_events_permission not in {"read", "write"}:
+            print(
+                f"FAIL: {path}: security-required needs security-events: read to query code-scanning alerts",
+                file=sys.stderr,
+            )
+            ok = False
+        if not has_critical_high_alert_gate(security_job):
+            print(
+                f"FAIL: {path}: security-required must fail closed on open critical/high code-scanning alerts",
+                file=sys.stderr,
+            )
+            ok = False
 
     if ok:
         print(f"PASS: {path}: required release-gate dependencies and fail-closed checks are intact")
