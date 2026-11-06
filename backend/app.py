@@ -20,6 +20,7 @@ from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 
 from dataos_system import DataOS
+from engines.catalog.catalog_engine import DataCatalogEngine
 from core.object.model import DataObject, ObjectType
 from core.relation.model import Relationship, RelationType
 from core.permissions.policy import Capability
@@ -91,6 +92,7 @@ def require_python_compute_enabled() -> None:
 
 # Initialize single DataOS kernel
 dataos = DataOS(db_path="dataos.db", blob_dir=".dataos_blobs")
+catalog_engine = DataCatalogEngine(dataos.storage)
 workflow_engine = WorkflowEngine(storage=dataos.storage)
 # Bound concurrent synchronous DAG runs so API clients cannot exhaust the worker pool.
 workflow_slots = threading.BoundedSemaphore(value=4)
@@ -761,6 +763,18 @@ async def export_graph(format: str = "json_ld"):
 # =============================================================================
 # CATALOG & HEALTH ROUTES
 # =============================================================================
+
+@app.get("/api/catalog/summary", summary="Bounded catalog inventory and data-health summary")
+async def get_catalog_summary():
+    try:
+        return catalog_engine.get_catalog_summary()
+    except Exception as exc:
+        # Do not expose database/driver details through this read-only endpoint.
+        raise HTTPException(
+            status_code=503,
+            detail="DataOS catalog summary is unavailable",
+        ) from exc
+
 
 @app.get("/api/catalog/health", summary="System Health & Catalog Overview")
 async def get_health_overview():
