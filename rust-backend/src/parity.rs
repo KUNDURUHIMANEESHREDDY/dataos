@@ -712,6 +712,7 @@ fn check(name: &str, passed: bool, severity: &str, message: String, details: Val
 
 pub(crate) async fn quality(
     State(state): State<AppState>,
+    Extension(CurrentUser(user)): Extension<CurrentUser>,
     Path(object_id): Path<String>,
     Json(request): Json<QualityRequest>,
 ) -> Result<Json<Value>, ApiError> {
@@ -735,25 +736,35 @@ pub(crate) async fn quality(
         .filter(|entry| entry.get("passed").and_then(Value::as_bool).unwrap_or(false))
         .count();
     let failed_checks = total_checks - passed_checks;
-    let report = state
-        .db
-        .create_object(
+    let report_properties = json!({
+        "target_object_id": object_id,
+        "overall_pass": failed_checks == 0,
+        "quality_score": round4(passed_checks as f64 / total_checks.max(1) as f64 * 100.0),
+        "total_checks": total_checks,
+        "passed_checks": passed_checks,
+        "failed_checks": failed_checks,
+        "evaluated_at": now_rfc3339()
+    });
+    let report = if let Some(user) = user {
+        state.db.create_object_for_owner(
             "quality_report",
             "quality_report.v1",
-            json!({
-                "target_object_id": object_id,
-                "overall_pass": failed_checks == 0,
-                "quality_score": round4(passed_checks as f64 / total_checks.max(1) as f64 * 100.0),
-                "total_checks": total_checks,
-                "passed_checks": passed_checks,
-                "failed_checks": failed_checks,
-                "evaluated_at": now_rfc3339()
-            }),
+            report_properties,
+            json!({"checks": checks}),
+            "dataos://engine/quality",
+            json!({}),
+            &user.id,
+        )
+    } else {
+        state.db.create_object(
+            "quality_report",
+            "quality_report.v1",
+            report_properties,
             json!({"checks": checks}),
             "dataos://engine/quality",
             json!({}),
         )
-        .map_err(internal)?;
+    }.map_err(internal)?;
     Ok(Json(report))
 }
 
