@@ -69,25 +69,8 @@ jobs:
         run: python -m cli health
 
   rust-backend:
-    name: Rust production backend build
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    steps:
-      - name: Check out source
-        uses: actions/checkout@v4
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: stable
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: rust-backend
-      - name: Verify lockfile and build
-        working-directory: rust-backend
-        run: |
-          cargo test --locked
-          cargo build --release --locked
+    name: Rust authorization tests and release build
+    uses: ./.github/workflows/rust-authorization.yml
 
   frontend:
     name: Frontend production build
@@ -286,23 +269,26 @@ jobs:
   backend-required:
     name: Backend required
     if: always()
-    needs: [backend, postgres-storage, security-required, workflow-lint]
+    needs: [backend, rust-backend, postgres-storage, security-required, workflow-lint]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - name: Fail closed unless backend, PostgreSQL, security, and workflow verification passed
         env:
           BACKEND_RESULT: ${{ needs.backend.result }}
+          RUST_BACKEND_RESULT: ${{ needs.rust-backend.result }}
           POSTGRES_RESULT: ${{ needs.postgres-storage.result }}
           SECURITY_RESULT: ${{ needs.security-required.result }}
           WORKFLOW_LINT_RESULT: ${{ needs.workflow-lint.result }}
         run: |
           set -euo pipefail
           echo "backend: $BACKEND_RESULT"
+          echo "rust-backend: $RUST_BACKEND_RESULT"
           echo "postgres-storage: $POSTGRES_RESULT"
           echo "security-required: $SECURITY_RESULT"
           echo "workflow-lint: $WORKFLOW_LINT_RESULT"
           test "$BACKEND_RESULT" = "success"
+          test "$RUST_BACKEND_RESULT" = "success"
           test "$POSTGRES_RESULT" = "success"
           test "$SECURITY_RESULT" = "success"
           test "$WORKFLOW_LINT_RESULT" = "success"
