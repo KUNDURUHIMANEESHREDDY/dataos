@@ -12,6 +12,7 @@ Architecture:
 
 from __future__ import annotations
 import os
+from pathlib import Path
 from typing import Dict, Any, List, Optional, Union
 
 # Core Models
@@ -223,9 +224,22 @@ class DataOS:
     # TOP-LEVEL CONVENIENCE SYSTEM APIS
     # -------------------------------------------------------------------------
 
-    def ingest(self, file_path_or_content: Any, filename: Optional[str] = None, discover_relations: bool = True) -> Dict[str, Any]:
-        """Ingest any file format (Markdown, PDF, CSV, Notebook, Code, Audio/Video) in one call."""
-        return self.ingestion_pipeline.ingest(file_path_or_content, filename=filename, discover_relations=discover_relations)
+    def ingest(self, content: Any, filename: Optional[str] = None, discover_relations: bool = True) -> Dict[str, Any]:
+        """Ingest supplied content; string values are never interpreted as local paths."""
+        return self.ingestion_pipeline.ingest(content, filename=filename, discover_relations=discover_relations)
+
+    def ingest_file(
+        self,
+        file_path: Union[str, os.PathLike],
+        filename: Optional[str] = None,
+        discover_relations: bool = True,
+    ) -> Dict[str, Any]:
+        """Ingest an explicit local file path for trusted CLI and local workflows."""
+        return self.ingestion_pipeline.ingest(
+            Path(file_path),
+            filename=filename,
+            discover_relations=discover_relations,
+        )
 
     def why(self, object_id: str) -> Dict[str, Any]:
         """Explain the complete origin, lineage, and rationale of any object."""

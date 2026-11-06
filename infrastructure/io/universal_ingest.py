@@ -36,14 +36,20 @@ class UniversalIngestionPipeline:
         discover_relations: bool = True
     ) -> Dict[str, Any]:
         """
-        Unified ingestion entry point for any file format.
+        Ingest content, or an explicit os.PathLike for trusted local-file ingestion.
+        String values are always treated as content and are never opened as paths.
         """
-        # Determine filename and content
-        if isinstance(file_path_or_content, str) and os.path.exists(file_path_or_content):
-            file_path = file_path_or_content
+        # Only an explicit PathLike value authorizes local filesystem reads.
+        # Plain strings are always content, even when they happen to name an
+        # existing file. This keeps HTTP form content from becoming a server-side
+        # file-read primitive.
+        if isinstance(file_path_or_content, os.PathLike):
+            file_path = os.fspath(file_path_or_content)
+            if not os.path.isfile(file_path):
+                raise FileNotFoundError(file_path)
             fn = filename or os.path.basename(file_path)
-            with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
-                content_str = f.read()
+            with open(file_path, "r", encoding="utf-8", errors="ignore") as file_handle:
+                content_str = file_handle.read()
         else:
             fn = filename or "unnamed_artifact"
             content_str = str(file_path_or_content)
