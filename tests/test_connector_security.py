@@ -46,11 +46,15 @@ class TestDatabaseConnectorSecurity(unittest.TestCase):
         for query in (
             "ATTACH DATABASE ':memory:' AS injected",
             "PRAGMA query_only = OFF",
-            "CREATE TABLE injected (id INTEGER)",
         ):
             with self.subTest(query=query):
                 with self.assertRaises(sqlite3.DatabaseError):
                     self.connector.execute_query(query)
+
+        # The early read-only guard may reject obvious DDL before SQLite's
+        # authorizer sees it; either way the statement must not execute.
+        with self.assertRaises(PermissionError):
+            self.connector.execute_query("CREATE TABLE injected (id INTEGER)")
         self.assertIn("orders", [item["name"] for item in self.connector.list_resources()])
 
     def test_read_only_sqlite_still_allows_select(self):
