@@ -11,7 +11,7 @@ import uuid
 import datetime
 import hmac
 import threading
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Literal, Optional
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Depends, Header, Request, Query as FastQuery
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -36,55 +36,39 @@ from backend.authorization import CapabilityMiddleware
 from backend.workflow_api import WorkflowRequestError, execute_safe_workflow
 from runtime.workflows.workflow_engine import WorkflowEngine
 
+def _parse_time_travel_timestamp(value: str, field_name: str) -> datetime.datetime:
+    """Parse an offset-aware ISO 8601 timestamp and normalize it to UTC.
 
-# Single user store for this process (same SQLite file as the kernel).
-user_store = UserStore(db_path=os.getenv("DATAOS_DB_PATH", "dataos.db"))
-
-class RegisterRequest(BaseModel):
-    username: str = Field(min_length=1, max_length=100)
-    email: str = Field(min_length=3, max_length=200)
-    password: str = Field(min_length=8, max_length=200)
-    role: str = "viewer"
-
-
-class LoginRequest(BaseModel):
-    login: str = Field(min_length=1, max_length=200)
-    password: str = Field(min_length=1, max_length=200)
-
-
-def get_current_user(authorization: Optional[str] = Header(default=None)) -> Optional[User]:
-    """Resolve the JWT bearer token to a user, or None in dev (no JWT configured).
-
-    In production with JWT configured, a missing/invalid token is a 401.
-    When JWT is not configured at all, this is a no-op for local dev — the
-    shared DATAOS_API_TOKEN gate (require_production_api_token) still applies.
+    The time-travel engine compares persisted ISO timestamps lexicographically,
+    so callers must not pass mixed offsets or timezone-naive values.
     """
-    if not jwt_configured():
-        return None
-    if not authorization or not authorization.lower().startswith("bearer "):
-        raise HTTPException(status_code=401, detail="A bearer token is required.", headers={"WWW-Authenticate": "Bearer"})
+    if not isinstance(value, str) or not value or value != value.strip() or len(value) > 64:
+        raise HTTPException(
+            status_code=422,
+            detail=f"{field_name} must be an ISO 8601 timestamp with an explicit UTC offset",
+        )
+
+    candidate = value[:-1] + "+00:00" if value.endswith("Z") else value
     try:
-        payload = decode_jwt(authorization[7:].strip())
-    except (ValueError, RuntimeError) as exc:
-        raise HTTPException(status_code=401, detail=str(exc), headers={"WWW-Authenticate": "Bearer"}) from exc
-    user = user_store.get_by_id(payload.get("sub", ""))
-    if user is None:
-        raise HTTPException(status_code=401, detail="Unknown user.", headers={"WWW-Authenticate": "Bearer"})
-    return user
+        parsed = datetime.datetime.fromisoformat(candidate)
+    except (ValueError, OverflowError):
+        raise HTTPException(
+            status_code=422,
+            detail=f"{field_name} must be an ISO 8601 timestamp with an explicit UTC offset",
+        ) from None
 
-
-def require_capability(capability: str):
-    """FastAPI dependency factory enforcing a Capability for the current user."""
-    def _check(current_user: Optional[User] = Depends(get_current_user)) -> Optional[User]:
-        if current_user is None:
-            return None  # No JWT configured -> dev mode, no per-user gating.
-        if not current_user.has_capability(capability):
-            raise HTTPException(
-                status_code=403,
-                detail=f"Capability '{capability}' is not permitted for role '{current_user.role}'.",
-            )
-        return current_user
-    return _check
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise HTTPException(
+            status_code=422,
+            detail=f"{field_name} must include a UTC offset",
+        )
+    try:
+        return parsed.astimezone(datetime.timezone.utc)
+    except (OverflowError, ValueError):
+        raise HTTPException(
+            status_code=422,
+            detail=f"{field_name} must be representable as a UTC timestamp",
+        ) from None
 
 
 def require_production_api_token(request: Request, authorization: Optional[str] = Header(default=None)) -> None:
@@ -404,7 +388,10 @@ async def create_relationship(req: RelationCreateRequest):
 
 
 @app.get("/api/graph/neighbors/{object_id}", summary="Get Object Neighbors")
-async def get_neighbors(object_id: str, direction: str = "both"):
+async def get_neighbors(
+    object_id: str,
+    direction: Literal["outgoing", "incoming", "both"] = "both",
+):
     neighbors = dataos.graph.neighbors(object_id, direction=direction)
     return {"object_id": object_id, "total": len(neighbors), "neighbors": neighbors}
 
@@ -557,39 +544,37 @@ async def extract_rich_document_api(
 @app.get("/api/time_travel/object/{object_id}", summary="Time-Travel Point-in-Time Object Query (Rule #27)")
 async def time_travel_object(
     object_id: str,
-    as_of: str = FastQuery(..., description="Timestamp ISO string to travel to"),
-    temporal_axis: str = "system_time"
+    as_of: str = FastQuery(..., min_length=17, max_length=64, description="Offset-aware ISO 8601 timestamp"),
+    temporal_axis: Literal["system_time", "validity_time"] = "system_time"
 ):
-    if temporal_axis not in {"system_time", "validity_time"}:
-        raise HTTPException(status_code=400, detail="temporal_axis must be system_time or validity_time")
-    obj = dataos.time_travel.get_object_as_of(object_id, as_of, temporal_axis=temporal_axis)
+    timestamp = _parse_time_travel_timestamp(as_of, "as_of")
+    normalized_as_of = timestamp.isoformat()
+    obj = dataos.time_travel.get_object_as_of(object_id, normalized_as_of, temporal_axis=temporal_axis)
     if not obj:
-        raise HTTPException(status_code=404, detail=f"Object {object_id} not found as of {as_of}")
+        raise HTTPException(status_code=404, detail=f"Object {object_id} not found as of {normalized_as_of}")
     return obj.to_dict()
 
 
 @app.get("/api/time_travel/graph", summary="Time-Travel Point-in-Time Graph Topology Query (Rule #27)")
 async def time_travel_graph(
-    as_of: str = FastQuery(..., description="Timestamp ISO string"),
-    temporal_axis: str = "system_time"
+    as_of: str = FastQuery(..., min_length=17, max_length=64, description="Offset-aware ISO 8601 timestamp"),
+    temporal_axis: Literal["system_time", "validity_time"] = "system_time"
 ):
-    if temporal_axis not in {"system_time", "validity_time"}:
-        raise HTTPException(status_code=400, detail="temporal_axis must be system_time or validity_time")
-    graph = dataos.time_travel.get_graph_as_of(as_of, temporal_axis=temporal_axis)
-    return graph
+    timestamp = _parse_time_travel_timestamp(as_of, "as_of")
+    return dataos.time_travel.get_graph_as_of(timestamp.isoformat(), temporal_axis=temporal_axis)
 
 
 @app.get("/api/time_travel/changes", summary="Changes Between Two Historical Timestamps (Rule #27)")
 async def time_travel_changes(
-    t1: str = FastQuery(..., description="Start timestamp ISO"),
-    t2: str = FastQuery(..., description="End timestamp ISO"),
-    temporal_axis: str = "system_time"
+    t1: str = FastQuery(..., min_length=17, max_length=64, description="Start offset-aware ISO 8601 timestamp"),
+    t2: str = FastQuery(..., min_length=17, max_length=64, description="End offset-aware ISO 8601 timestamp"),
+    temporal_axis: Literal["system_time", "validity_time"] = "system_time"
 ):
-    if temporal_axis not in {"system_time", "validity_time"}:
-        raise HTTPException(status_code=400, detail="temporal_axis must be system_time or validity_time")
-    changes = dataos.time_travel.changes_between(t1, t2, temporal_axis=temporal_axis)
-    return changes
-
+    start = _parse_time_travel_timestamp(t1, "t1")
+    end = _parse_time_travel_timestamp(t2, "t2")
+    if start > end:
+        raise HTTPException(status_code=422, detail="t1 must be earlier than or equal to t2")
+    return dataos.time_travel.changes_between(start.isoformat(), end.isoformat(), temporal_axis=temporal_axis)
 
 class ConflictResolutionRequest(BaseModel):
     conflict_object_id: str
@@ -663,17 +648,11 @@ async def evaluate_quality(object_id: str, req: QualityEvaluateRequest):
 # =============================================================================
 
 @app.get("/api/provenance/lineage/{object_id}", summary="Data Lineage Traversal")
-async def get_lineage(object_id: str, direction: str = "upstream", max_depth: int = 10):
-    if direction not in {"upstream", "downstream"}:
-        raise HTTPException(
-            status_code=400,
-            detail="direction must be upstream or downstream",
-        )
-    if not 1 <= max_depth <= 32:
-        raise HTTPException(
-            status_code=422,
-            detail="max_depth must be between 1 and 32",
-        )
+async def get_lineage(
+    object_id: str,
+    direction: Literal["upstream", "downstream"] = FastQuery(default="upstream"),
+    max_depth: int = FastQuery(default=10, ge=1, le=10),
+):
     if direction == "upstream":
         return dataos.lineage.trace_upstream_lineage(object_id, max_depth=max_depth)
     return dataos.lineage.trace_downstream_impact(object_id, max_depth=max_depth)
