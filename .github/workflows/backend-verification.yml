@@ -4,7 +4,7 @@ on:
   push:
     branches: [main, production-hardening]
   pull_request:
-    branches: [main]
+    branches: [main, 'fix/**', 'security/**']
   workflow_dispatch:
 
 permissions:
@@ -22,9 +22,9 @@ jobs:
     timeout-minutes: 45
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.11"
           cache: pip
@@ -34,7 +34,17 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt pytest
       - name: Run correctness suite
-        run: python -m pytest tests/ --ignore=tests/test_benchmarks.py
+        run: |
+          mkdir -p test-results
+          python -m pytest tests/ --ignore=tests/test_benchmarks.py --junitxml=test-results/junit.xml
+      - name: Upload JUnit report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: dataos-pytest-${{ github.run_id }}
+          path: test-results/junit.xml
+          if-no-files-found: warn
+          retention-days: 14
       - name: Run end-to-end scenario
         run: python scenario_demo.py
       - name: Smoke-test CLI health
@@ -100,9 +110,9 @@ jobs:
       DATAOS_TEST_POSTGRES_URL: postgresql://dataos:dataos-test-password@localhost:5432/dataos_test
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.11"
           cache: pip
@@ -121,8 +131,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - name: Check out source
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - name: Scan for secrets
@@ -135,45 +144,178 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - name: Check out source
-        uses: actions/checkout@v4
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
           cache: pip
           cache-dependency-path: requirements.txt
-      - name: Audit Python dependencies
-        run: |
-          python -m pip install --upgrade pip pip-audit
-          pip-audit -r requirements.txt
-      - name: Audit npm dependencies
-        uses: actions/setup-node@v4
+      - name: Install audit tool
+        run: python -m pip install --upgrade pip pip-audit
+      - name: Audit declared dependencies
+        run: pip-audit -r requirements.txt
+
+  sbom:
+    name: Generate Python dependency SBOM
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
-          node-version: "20"
-          cache: npm
-      - run: npm audit --audit-level=high
+          python-version: "3.11"
+      - name: Install CycloneDX tooling
+        run: python -m pip install --upgrade pip cyclonedx-bom
+      - name: Generate requirements SBOM
+        run: cyclonedx-py requirements requirements.txt --output-format JSON --output-file sbom.json
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dataos-python-sbom
+          path: sbom.json
+          if-no-files-found: error
+          retention-days: 30
+
+  codeql:
+    name: Python CodeQL
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: github/codeql-action/init@v4
+        with:
+          languages: python
+          build-mode: none
+      - uses: github/codeql-action/analyze@v4
+      - name: Stage exact-head CodeQL SARIF inside the workspace
+        run: |
+          set -euo pipefail
+          test -s ../results/python.sarif
+          mkdir -p codeql-artifacts
+          cp ../results/python.sarif codeql-artifacts/python.sarif
+      - name: Preserve exact-head CodeQL SARIF for the release gate
+        uses: actions/upload-artifact@v7
+        with:
+          name: dataos-codeql-sarif-${{ github.run_id }}
+          path: codeql-artifacts/python.sarif
+          if-no-files-found: error
+          retention-days: 7
 
   backend-required:
-    name: Release required
+    name: Backend required
+    if: always()
+    needs: [backend, postgres-storage]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Fail closed unless backend and PostgreSQL verification passed
+        env:
+          BACKEND_RESULT: ${{ needs.backend.result }}
+          POSTGRES_RESULT: ${{ needs.postgres-storage.result }}
+        run: |
+          set -euo pipefail
+          echo "backend: $BACKEND_RESULT"
+          echo "postgres-storage: $POSTGRES_RESULT"
+          test "$BACKEND_RESULT" = "success"
+          test "$POSTGRES_RESULT" = "success"
+          echo "Backend and live PostgreSQL storage verification passed."
+
+  security-required:
+    name: security-required
     if: always()
     needs: [backend, frontend, postgres-storage, secret-scan, dependency-audit, rust-backend]
     runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
     steps:
-      - name: Fail closed unless verification passed
+      - name: Download exact-head CodeQL SARIF
+        uses: actions/download-artifact@v7
+        with:
+          name: dataos-codeql-sarif-${{ github.run_id }}
+          path: codeql-results
+      - name: Fail closed on any security workflow failure
         env:
-          BACKEND: ${{ needs.backend.result }}
-          FRONTEND: ${{ needs.frontend.result }}
-          POSTGRES: ${{ needs.postgres-storage.result }}
-          SECRET_SCAN: ${{ needs.secret-scan.result }}
-          DEPENDENCY_AUDIT: ${{ needs.dependency-audit.result }}
-          RUST_BACKEND: ${{ needs.rust-backend.result }}
+          SECRET_SCAN_RESULT: ${{ needs.secret-scan.result }}
+          DEPENDENCY_AUDIT_RESULT: ${{ needs.dependency-audit.result }}
+          SBOM_RESULT: ${{ needs.sbom.result }}
+          CODEQL_RESULT: ${{ needs.codeql.result }}
         run: |
           set -euo pipefail
-          echo "backend=$BACKEND frontend=$FRONTEND postgres=$POSTGRES secret-scan=$SECRET_SCAN dependency-audit=$DEPENDENCY_AUDIT rust-backend=$RUST_BACKEND"
-          test "$BACKEND" = "success"
-          test "$FRONTEND" = "success"
-          test "$POSTGRES" = "success"
-          test "$SECRET_SCAN" = "success"
-          test "$DEPENDENCY_AUDIT" = "success"
-          test "$RUST_BACKEND" = "success"
+          echo "secret-scan: $SECRET_SCAN_RESULT"
+          echo "dependency-audit: $DEPENDENCY_AUDIT_RESULT"
+          echo "sbom: $SBOM_RESULT"
+          echo "codeql: $CODEQL_RESULT"
+          test "$SECRET_SCAN_RESULT" = "success"
+          test "$DEPENDENCY_AUDIT_RESULT" = "success"
+          test "$SBOM_RESULT" = "success"
+          test "$CODEQL_RESULT" = "success"
+
+      - name: Fail on high/critical findings in this run's CodeQL SARIF
+        shell: bash
+        run: |
+          set -euo pipefail
+          sarif="codeql-results/python.sarif"
+          if [[ ! -s "$sarif" ]]; then
+            echo "::error::Exact-head CodeQL SARIF is missing; refusing to treat missing analysis as zero alerts."
+            exit 1
+          fi
+          alerts="$(jq -r '
+            .runs[] as $run
+            | $run.results[]
+            | . as $result
+            | (
+                if ($result.ruleIndex | type) == "number" then
+                  ($run.tool.driver.rules[$result.ruleIndex] // {})
+                else
+                  ($run.tool.driver.rules | map(select(.id == $result.ruleId)) | .[0] // {})
+                end
+              ) as $rule
+            | (($result.properties["security-severity"] // $rule.properties["security-severity"] // "0") | tonumber) as $severity
+            | select($severity >= 7.0)
+            | [
+                $result.ruleId,
+                ($severity | tostring),
+                ($result.locations[0].physicalLocation.artifactLocation.uri // ""),
+                (($result.locations[0].physicalLocation.region.startLine // 0) | tostring)
+              ]
+            | @tsv
+          ' "$sarif")"
+          if [[ -n "$alerts" ]]; then
+            count="$(printf '%s\n' "$alerts" | wc -l | tr -d ' ')"
+            echo "High/critical CodeQL SARIF findings: $count"
+            printf 'High/critical findings (rule, security-severity, path, line):\n%s\n' "$alerts"
+            {
+              echo "### High/critical CodeQL findings in this exact run"
+              echo
+              echo 'Rule | Security severity | Path | Line'
+              echo '--- | --- | --- | ---'
+              printf '%s\n' "$alerts" | awk -F '\t' '{ printf "%s | %s | %s | %s\n", $1, $2, $3, $4 }'
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::Found $count high/critical CodeQL finding(s); remediate before release."
+            exit 1
+          fi
+          echo "High/critical CodeQL SARIF findings: 0"
+
+  release-required:
+    name: release-required
+    if: always()
+    needs: [backend-required, security-required]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Fail closed unless backend, PostgreSQL and security gates passed
+        env:
+          BACKEND_RESULT: ${{ needs.backend-required.result }}
+          SECURITY_RESULT: ${{ needs.security-required.result }}
+        run: |
+          set -euo pipefail
+          echo "backend-required: $BACKEND_RESULT"
+          echo "security-required: $SECURITY_RESULT"
+          test "$BACKEND_RESULT" = "success"
+          test "$SECURITY_RESULT" = "success"
+          echo "Backend, PostgreSQL and security verification passed."

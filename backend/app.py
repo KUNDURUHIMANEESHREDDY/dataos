@@ -319,13 +319,27 @@ async def list_objects(
 
 @app.post("/api/objects/", summary="Create DataOS Object")
 async def create_object(req: ObjectCreateRequest):
+    # These fields are owned by trusted ingestion/storage code. Accepting
+    # caller-supplied values would let clients forge duplicate hashes or attach
+    # arbitrary blob references to objects.
+    server_managed_metadata = {"blob", "content_hash"}
+    supplied_managed_fields = sorted(server_managed_metadata.intersection(req.metadata))
+    if supplied_managed_fields:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Object metadata fields are managed by DataOS: "
+                + ", ".join(supplied_managed_fields)
+            ),
+        )
+
     obj = DataObject(
         type=req.type,
         schema=req.schema_ref,
         properties=req.properties,
         content=req.content,
         source=req.source,
-        metadata=req.metadata
+        metadata=dict(req.metadata),
     )
     saved = dataos.storage.save_object(obj)
     return saved.to_dict()
@@ -650,10 +664,19 @@ async def evaluate_quality(object_id: str, req: QualityEvaluateRequest):
 
 @app.get("/api/provenance/lineage/{object_id}", summary="Data Lineage Traversal")
 async def get_lineage(object_id: str, direction: str = "upstream", max_depth: int = 10):
+    if direction not in {"upstream", "downstream"}:
+        raise HTTPException(
+            status_code=400,
+            detail="direction must be upstream or downstream",
+        )
+    if not 1 <= max_depth <= 32:
+        raise HTTPException(
+            status_code=422,
+            detail="max_depth must be between 1 and 32",
+        )
     if direction == "upstream":
         return dataos.lineage.trace_upstream_lineage(object_id, max_depth=max_depth)
-    else:
-        return dataos.lineage.trace_downstream_impact(object_id, max_depth=max_depth)
+    return dataos.lineage.trace_downstream_impact(object_id, max_depth=max_depth)
 
 
 # =============================================================================
