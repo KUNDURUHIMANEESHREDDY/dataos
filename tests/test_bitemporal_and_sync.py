@@ -17,7 +17,8 @@ from infrastructure.sync.sync_engine import VectorClock, ClockOrdering, Distribu
 class TestBiTemporalAndTimeTravel(unittest.TestCase):
 
     def setUp(self):
-        self.temp_db = tempfile.mktemp(suffix=".db")
+        fd, self.temp_db = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
         self.storage = SQLiteStorage(db_path=self.temp_db)
         self.time_travel = TimeTravelEngine(self.storage)
         self.sync_engine = DistributedSyncEngine(self.storage, node_id="node_us_east")

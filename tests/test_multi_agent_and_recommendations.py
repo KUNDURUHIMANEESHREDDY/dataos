@@ -16,7 +16,8 @@ from runtime.agents.orchestrator import MultiAgentPipeline
 class TestMultiAgentAndRecommendations(unittest.TestCase):
 
     def setUp(self):
-        self.temp_db = tempfile.mktemp(suffix=".db")
+        fd, self.temp_db = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
         self.storage = SQLiteStorage(db_path=self.temp_db)
         self.recommendations = GraphRecommendationEngine(self.storage)
         self.pipeline = MultiAgentPipeline(self.storage)
