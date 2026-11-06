@@ -25,6 +25,7 @@ import subprocess
 import sys
 from collections.abc import Sequence
 from typing import Any
+from urllib.parse import urlsplit
 
 try:
   from google.cloud import aiplatform_v1beta1
@@ -37,6 +38,35 @@ except ImportError:
 
 
 DEFAULT_VERTEX_REGIONS = ["us-central1", "us-east1", "us-west1", "europe-west1"]
+
+
+def _resource_name_from_asset_name(full_name: str) -> str | None:
+  """Normalize a CAI resource name without substring-based URL sanitization."""
+  if not full_name:
+    return None
+
+  parsed = urlsplit(full_name)
+  if parsed.netloc:
+    try:
+      port = parsed.port
+    except ValueError:
+      return None
+    if (
+        parsed.scheme not in ("", "https")
+        or parsed.hostname != "aiplatform.googleapis.com"
+        or parsed.username is not None
+        or parsed.password is not None
+        or port not in (None, 443)
+        or parsed.query
+        or parsed.fragment
+    ):
+      return None
+    resource_name = parsed.path.lstrip("/")
+    return resource_name or None
+
+  if parsed.scheme or full_name.startswith("//"):
+    return None
+  return full_name
 
 
 def run_command(
@@ -93,18 +123,18 @@ def find_agent_via_cais(
         if asset_type == "aiplatform.googleapis.com/ReasoningEngine":
           print(f"FOUND via CAIS: Reasoning Engine in {location}")
           full_name = asset.get("name", "")
-          engine_id = full_name.split("/")[-1] if full_name else agent_name
+          resource_name = _resource_name_from_asset_name(full_name)
+          if resource_name is None:
+            print("Warning: CAI returned an invalid Vertex AI resource name", file=sys.stderr)
+            continue
+          engine_id = resource_name.rsplit("/", 1)[-1] or agent_name
 
           return {
               "runtime": "Vertex AI Reasoning Engine",
               "id": engine_id,
               "display_name": agent_name,
               "location": location,
-              "resource_name": (
-                  full_name.split("//aiplatform.googleapis.com/")[-1]
-                  if "//aiplatform.googleapis.com/" in full_name
-                  else full_name
-              ),
+              "resource_name": resource_name,
           }
         elif asset_type == "run.googleapis.com/Service":
           print(f"FOUND via CAIS: Cloud Run service in {location}")
