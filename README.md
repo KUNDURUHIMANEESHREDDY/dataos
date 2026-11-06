@@ -68,7 +68,7 @@ This secret protects sharing-token signatures only.
 
 ### Production API authentication
 
-Per-user authentication is available when `DATAOS_JWT_SECRET` is configured. Users authenticate with `/api/auth/login` and receive a signed HS256 JWT; role capabilities are derived from `ROLE_CAPABILITIES`. Without `DATAOS_JWT_SECRET`, local development falls back to shared-token behavior.
+Per-user authentication is available when `DATAOS_JWT_SECRET` is configured. Users authenticate with `/api/auth/login` and receive a signed HS256 JWT; role capabilities are derived from `ROLE_CAPABILITIES`. Without `DATAOS_JWT_SECRET`, local development falls back to shared-token behavior. Public self-registration creates `viewer` accounts only; the registration contract rejects caller-supplied role fields. Higher-privilege role assignment is not exposed through self-service registration.
 
 When any of `DATAOS_ENV`, `APP_ENV`, or `ENVIRONMENT` is set to `production` or `prod`, every `/api/*` route requires an `Authorization: Bearer …` header. Configure `DATAOS_API_TOKEN` as a high-entropy secret of at least 32 UTF-8 bytes through the deployment secret manager. If the token is absent, padded with accidental whitespace, or too short, API requests fail closed with HTTP 503; missing or incorrect bearer credentials return HTTP 401. Environment markers are checked independently, so a conflicting `development` marker does not disable the production guard. The non-`/api` health route remains available for liveness monitoring.
 
