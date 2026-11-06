@@ -13,6 +13,7 @@ use axum::{
     Json,
     extract::{Path, Query, State},
     http::StatusCode,
+    Extension,
 };
 use chrono::{Duration, Utc};
 use hmac::{Hmac, Mac};
@@ -21,7 +22,7 @@ use serde_json::{Map, Value, json};
 use sha2::Sha256;
 
 use crate::sql_engine;
-use crate::{AppState, ApiError, clamp_i64, search_objects};
+use crate::{AppState, ApiError, CurrentUser, clamp_i64, search_objects};
 use base64::Engine as _;
 
 const DERIVATION_TYPES: &[&str] = &["derived_from", "transforms_to", "reads_from", "produces"];
@@ -2399,16 +2400,18 @@ pub(crate) async fn agents_execute(
 
 pub(crate) async fn notebooks_ingest(
     State(state): State<AppState>,
+    Extension(CurrentUser(user)): Extension<CurrentUser>,
     fields: crate::FormFields,
 ) -> Result<Json<Value>, ApiError> {
-    ingest_with_default_filename(state, fields, "analysis.ipynb", "notebook")
+    ingest_with_default_filename(state, fields, "analysis.ipynb", "notebook", user.as_ref().map(|principal| principal.id.as_str()))
 }
 
 pub(crate) async fn documents_extract_rich(
     State(state): State<AppState>,
+    Extension(CurrentUser(user)): Extension<CurrentUser>,
     fields: crate::FormFields,
 ) -> Result<Json<Value>, ApiError> {
-    ingest_with_default_filename(state, fields, "paper.md", "document")
+    ingest_with_default_filename(state, fields, "paper.md", "document", user.as_ref().map(|principal| principal.id.as_str()))
 }
 
 fn ingest_with_default_filename(
@@ -2416,6 +2419,7 @@ fn ingest_with_default_filename(
     fields: crate::FormFields,
     default_filename: &str,
     default_type: &str,
+    owner_id: Option<&str>,
 ) -> Result<Json<Value>, ApiError> {
     let fields = fields.0;
     let mut filename = fields
@@ -2455,9 +2459,18 @@ fn ingest_with_default_filename(
         properties["extracted_citations"] = json!(citations);
     }
 
-    let stored = state
-        .db
-        .create_object(
+    let stored = if let Some(owner_id) = owner_id {
+        state.db.create_object_for_owner(
+            object_type,
+            "generic.v1",
+            properties,
+            Value::String(content),
+            "api://rust-ingest",
+            json!({}),
+            owner_id,
+        )
+    } else {
+        state.db.create_object(
             object_type,
             "generic.v1",
             properties,
@@ -2465,7 +2478,7 @@ fn ingest_with_default_filename(
             "api://rust-ingest",
             json!({}),
         )
-        .map_err(internal)?;
+    }.map_err(internal)?;
 
     Ok(Json(json!({
         "status": "ok",
