@@ -119,11 +119,12 @@ async fn call_with_cookie(
 
 async fn register(_app: &Router, db: &Db, role: &str) -> String {
     let username = format!("user_{}", &uuid::Uuid::new_v4().simple().to_string()[..8]);
+    let password = random_test_secret();
     let user = db
         .user_register(
             &username,
             &format!("{username}@example.com"),
-            "password123",
+            &password,
             role,
         )
         .expect("create test user directly in isolated test database");
@@ -200,10 +201,11 @@ async fn auth_roundtrip_issue_me_and_capability_gate() {
 async fn http_only_cookie_session_supports_me_and_logout() {
     let (app, db) = test_app();
     let username = format!("cookie_user_{}", &uuid::Uuid::new_v4().simple().to_string()[..8]);
+    let password = random_test_secret();
     let user = db.user_register(
         &username,
         &format!("{username}@example.com"),
-        "password123",
+        &password,
         "viewer",
     ).expect("create cookie-session user");
 
@@ -211,7 +213,7 @@ async fn http_only_cookie_session_supports_me_and_logout() {
         &app,
         Method::POST,
         "/api/auth/login",
-        Some(json!({"login": user.email, "password": "password123"})),
+        Some(json!({"login": user.email, "password": password})),
         None,
     ).await;
     assert_eq!(status, StatusCode::OK, "login failed: {body}");
@@ -338,6 +340,7 @@ async fn object_ownership_isolation_blocks_cross_user_reads_writes_and_relations
 async fn public_registration_cannot_assign_privileged_role() {
     let (app, _db) = test_app();
     let username = format!("self_register_{}", &uuid::Uuid::new_v4().simple().to_string()[..8]);
+    let password = random_test_secret();
 
     let (status, registered) = call(
         &app,
@@ -346,7 +349,7 @@ async fn public_registration_cannot_assign_privileged_role() {
         Some(json!({
             "username": username,
             "email": format!("{username}@example.com"),
-            "password": "password123",
+            "password": password.clone(),
             "role": "admin"
         })),
         None,
@@ -359,7 +362,7 @@ async fn public_registration_cannot_assign_privileged_role() {
         &app,
         Method::POST,
         "/api/auth/login",
-        Some(json!({"login": username, "password": "password123"})),
+        Some(json!({"login": username, "password": password})),
         None,
     )
     .await;
