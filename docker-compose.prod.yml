@@ -1,0 +1,52 @@
+# Production deployment for DataOS.
+# Required environment variables (set via secret manager or .env):
+#   DATAOS_JWT_SECRET            per-user JWT signing secret (>=32 UTF-8 bytes)
+#   DATAOS_API_TOKEN             shared /api bearer secret (>=32 UTF-8 bytes)
+#   DATAOS_SHARING_TOKEN_SECRET  sharing-token signing secret (>=32 UTF-8 bytes)
+# Optional:
+#   DATAOS_ALLOW_PYTHON_COMPUTE=true   only after sandbox/security review
+#   DATAOS_CORS_ORIGINS=https://app.example.com
+#
+# Persistent state lives in the ./data volume. Back it up before upgrades.
+services:
+  backend:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      DATAOS_ENV: production
+      APP_ENV: production
+      ENVIRONMENT: production
+      DATAOS_DB_PATH: /app/data/dataos.db
+      DATAOS_BLOB_DIR: /app/data/.dataos_blobs
+      DATAOS_JWT_SECRET: ${DATAOS_JWT_SECRET:?required}
+      DATAOS_API_TOKEN: ${DATAOS_API_TOKEN:?required}
+      DATAOS_SHARING_TOKEN_SECRET: ${DATAOS_SHARING_TOKEN_SECRET:?required}
+      DATAOS_ALLOW_PYTHON_COMPUTE: ${DATAOS_ALLOW_PYTHON_COMPUTE:-false}
+      DATAOS_CORS_ORIGINS: ${DATAOS_CORS_ORIGINS:-}
+    volumes:
+      - dataos-data:/app/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      BACKEND_URL: http://backend:8000
+    depends_on:
+      backend:
+        condition: service_healthy
+    profiles: ["frontend"]
+
+volumes:
+  dataos-data:

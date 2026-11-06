@@ -71,9 +71,9 @@ export default function DropZone() {
         properties: o.properties || {},
       }));
       const edges = (relsRes.relationships || []).map((r: any) => ({
-        id: r.id || `${r.source_id}-${r.target_id}`,
-        source: r.source_id,
-        target: r.target_id,
+        id: r.id || `${r.source}-${r.target}`,
+        source: r.source,
+        target: r.target,
         type: r.relation_type || "related_to",
         confidence: r.confidence || 1.0,
       }));
@@ -137,3 +137,4 @@ export default function DropZone() {
     </div>
   );
 }
+

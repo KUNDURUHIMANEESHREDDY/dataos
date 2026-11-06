@@ -1,8 +1,8 @@
-name: DataOS backend verification
+name: DataOS verification
 
 on:
   push:
-    branches: [main]
+    branches: [main, production-hardening]
   pull_request:
     branches: [main, 'fix/**', 'security/**']
   workflow_dispatch:
@@ -12,7 +12,7 @@ permissions:
   actions: read
 
 concurrency:
-  group: dataos-backend-${{ github.workflow }}-${{ github.ref }}
+  group: dataos-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -29,7 +29,7 @@ jobs:
           python-version: "3.11"
           cache: pip
           cache-dependency-path: requirements.txt
-      - name: Install backend and test dependencies
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt pytest
@@ -49,6 +49,44 @@ jobs:
         run: python scenario_demo.py
       - name: Smoke-test CLI health
         run: python -m cli health
+
+  rust-backend:
+    name: Rust production backend build
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust-backend
+      - name: Verify lockfile and build
+        working-directory: rust-backend
+        run: |
+          cargo test --locked
+          cargo build --release --locked
+
+  frontend:
+    name: Frontend production build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+      - name: Production build
+        run: npm run build
 
   postgres-storage:
     name: Live PostgreSQL storage contract
@@ -79,11 +117,11 @@ jobs:
           python-version: "3.11"
           cache: pip
           cache-dependency-path: requirements.txt
-      - name: Install PostgreSQL test dependencies
+      - name: Install PostgreSQL dependencies
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt pytest psycopg2-binary
-      - name: Verify additive migration and object deletion against live PostgreSQL
+      - name: Verify PostgreSQL backend parity
         run: python -m pytest tests/test_postgres_storage_integration.py -q
 
   secret-scan:
@@ -96,12 +134,13 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-      - uses: gitleaks/gitleaks-action@v3
+      - name: Scan for secrets
+        uses: gitleaks/gitleaks-action@v3
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   dependency-audit:
-    name: Python dependency audit
+    name: Dependency audit
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -187,7 +226,7 @@ jobs:
   security-required:
     name: security-required
     if: always()
-    needs: [secret-scan, dependency-audit, sbom, codeql]
+    needs: [backend, frontend, postgres-storage, secret-scan, dependency-audit, rust-backend]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:

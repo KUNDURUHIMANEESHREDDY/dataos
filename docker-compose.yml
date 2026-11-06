@@ -1,0 +1,41 @@
+services:
+  backend:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      # Development defaults — override in production via .env
+      DATAOS_ENV: development
+      DATAOS_CORS_ORIGINS: "http://localhost:3000,http://127.0.0.1:3000"
+      # Required before using /api/sharing/* — generate with:
+      #   python -c "import secrets; print(secrets.token_urlsafe(48))"
+      DATAOS_SHARING_TOKEN_SECRET: "${DATAOS_SHARING_TOKEN_SECRET:-}"
+      # Required in production for /api/* — leave empty for local dev
+      DATAOS_API_TOKEN: "${DATAOS_API_TOKEN:-}"
+      # Required for per-user /api/auth/* JWT register/login/me
+      DATAOS_JWT_SECRET: "${DATAOS_JWT_SECRET:-}"
+      DATAOS_ALLOW_PYTHON_COMPUTE: "${DATAOS_ALLOW_PYTHON_COMPUTE:-false}"
+      DATAOS_DB_PATH: "${DATAOS_DB_PATH:-/app/data/dataos.db}"
+      DATAOS_BLOB_DIR: "${DATAOS_BLOB_DIR:-/app/data/.dataos_blobs}"
+    volumes:
+      - ./data:/app/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    ports:
+      - "3000:3000"
+    environment:
+      # Next.js proxies /api → backend via rewrites in next.config.js
+      BACKEND_URL: "http://backend:8000"
+    depends_on:
+      backend:
+        condition: service_healthy
+    profiles: ["frontend"]
