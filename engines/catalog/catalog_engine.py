@@ -29,8 +29,13 @@ class DataCatalogEngine:
             ("max_objects", max_objects),
             ("max_relationships", max_relationships),
         ):
-            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
-                raise ValueError(f"{name} must be a positive integer")
+            maximum = (
+                DEFAULT_CATALOG_OBJECT_SAMPLE_LIMIT
+                if name == "max_objects"
+                else DEFAULT_CATALOG_RELATIONSHIP_SAMPLE_LIMIT
+            )
+            if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= maximum:
+                raise ValueError(f"{name} must be an integer between 1 and {maximum}")
         self.storage = storage
         self.max_objects = max_objects
         self.max_relationships = max_relationships
@@ -65,17 +70,25 @@ class DataCatalogEngine:
             score = properties.get("quality_score")
             if isinstance(score, bool) or not isinstance(score, (int, float)):
                 continue
-            if not math.isfinite(float(score)):
+            try:
+                numeric_score = float(score)
+            except (OverflowError, ValueError):
                 continue
-            quality_scores.append(max(0.0, min(100.0, float(score))))
+            if not math.isfinite(numeric_score):
+                continue
+            quality_scores.append(max(0.0, min(100.0, numeric_score)))
 
         confidences: List[float] = []
         for relationship in relationships:
             confidence = relationship.confidence
             if isinstance(confidence, bool) or not isinstance(confidence, (int, float)):
                 continue
-            if math.isfinite(float(confidence)):
-                confidences.append(max(0.0, min(1.0, float(confidence))))
+            try:
+                numeric_confidence = float(confidence)
+            except (OverflowError, ValueError):
+                continue
+            if math.isfinite(numeric_confidence):
+                confidences.append(max(0.0, min(1.0, numeric_confidence)))
 
         average_quality = (
             sum(quality_scores) / len(quality_scores) if quality_scores else None
