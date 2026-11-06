@@ -9,7 +9,7 @@ from scripts.check_workflow_yaml import UniqueKeyLoader, validate_gate_contract
 
 
 RESULT_ENV = {
-    "secret-scan": "SECRET_SCAN_RESULT",
+    "secret-scan": "GITLEAKS_RESULT",
     "dependency-audit": "DEPENDENCY_AUDIT_RESULT",
     "sbom": "SBOM_RESULT",
     "codeql": "CODEQL_RESULT",
@@ -294,6 +294,26 @@ core.info("alerts found");
         workflow = _valid_workflow()
         workflow["jobs"]["security-required"]["steps"][-1]["if"] = "false"
         self.assertFalse(validate_gate_contract(Path("workflow.yml"), workflow))
+
+
+    def test_postgres_service_requires_password_authentication(self):
+        workflow_path = Path(".github/workflows/backend-verification.yml")
+        workflow = yaml.load(workflow_path.read_text(encoding="utf-8"), Loader=UniqueKeyLoader)
+        postgres_job = workflow["jobs"]["postgres-storage"]
+        service_env = postgres_job["services"]["postgres"]["env"]
+        self.assertNotIn("POSTGRES_HOST_AUTH_METHOD", service_env)
+        self.assertEqual(service_env.get("POSTGRES_PASSWORD"), "${{ secrets.GITHUB_TOKEN }}")
+        self.assertEqual(
+            postgres_job["env"]["DATAOS_TEST_POSTGRES_URL"],
+            "postgresql://dataos:${{ secrets.GITHUB_TOKEN }}@localhost:5432/dataos_test",
+        )
+
+    def test_secret_scan_result_is_named_for_its_actual_value(self):
+        workflow_path = Path(".github/workflows/backend-verification.yml")
+        workflow = yaml.load(workflow_path.read_text(encoding="utf-8"), Loader=UniqueKeyLoader)
+        step = workflow["jobs"]["security-required"]["steps"][0]
+        self.assertEqual(step["env"]["GITLEAKS_RESULT"], "${{ needs.secret-scan.result }}")
+        self.assertNotIn("SECRET_SCAN_RESULT", step["env"])
 
 
 if __name__ == "__main__":
