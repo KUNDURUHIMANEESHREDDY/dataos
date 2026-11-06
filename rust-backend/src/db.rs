@@ -224,21 +224,6 @@ impl Db {
         conn.query_row(&format!("{} WHERE id = ? AND deleted_at IS NULL", object_select_sql()), [id], object_from_row).optional().map_err(|e| e.to_string())
     }
 
-    /// Assign an object to the authenticated principal and remove implicit
-    /// world-readable permissions. Ownership is stored in the existing JSON
-    /// permissions column so this migration is safe for existing databases.
-    pub fn set_object_owner(&self, id: &str, owner_id: &str) -> Result<Option<Value>, String> {
-        let Some(mut object) = self.get_object(id)? else { return Ok(None); };
-        object["permissions"] = json!({
-            "owner": owner_id,
-            "read": [owner_id],
-            "write": [owner_id]
-        });
-        object["provenance"]["created_by"] = Value::String(owner_id.to_string());
-        self.save_object(&object)?;
-        Ok(Some(object))
-    }
-
     pub fn can_access_object(&self, id: &str, principal_id: &str, is_admin: bool) -> Result<bool, String> {
         if is_admin { return Ok(self.get_object(id)?.is_some()); }
         let Some(object) = self.get_object(id)? else { return Ok(false); };
@@ -283,6 +268,14 @@ impl Db {
     }
 
     pub fn create_object(&self, object_type: &str, schema: &str, properties: Value, content: Value, source: &str, metadata: Value) -> Result<Value, String> {
+        self.create_object_with_owner(object_type, schema, properties, content, source, metadata, None)
+    }
+
+    pub fn create_object_for_owner(&self, object_type: &str, schema: &str, properties: Value, content: Value, source: &str, metadata: Value, owner_id: &str) -> Result<Value, String> {
+        self.create_object_with_owner(object_type, schema, properties, content, source, metadata, Some(owner_id))
+    }
+
+    fn create_object_with_owner(&self, object_type: &str, schema: &str, properties: Value, content: Value, source: &str, metadata: Value, owner_id: Option<&str>) -> Result<Value, String> {
         let created = now();
         let mut object = json!({
             "id": Uuid::new_v4().to_string(),
@@ -292,12 +285,12 @@ impl Db {
             "content": content,
             "relations": {},
             "provenance": {
-                "created_by": "dataos-rust",
+                "created_by": owner_id.unwrap_or("dataos-rust"),
                 "creation_timestamp": created,
                 "input_sources": [source],
                 "transformations": []
             },
-            "permissions": {"owner": "system", "read": ["*"], "write": ["owner"]},
+            "permissions": owner_id.map(|owner| json!({"owner": owner, "read": [owner], "write": [owner]})).unwrap_or_else(|| json!({"owner": "system", "read": ["*"], "write": ["owner"]})),
             "timestamps": {
                 "created_at": created,
                 "updated_at": created,
