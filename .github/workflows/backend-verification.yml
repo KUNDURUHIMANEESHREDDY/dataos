@@ -282,7 +282,11 @@ jobs:
             );
             core.info(`Open critical/high code-scanning alerts on ${ref}: ${blocking.length}`);
             for (const alert of blocking) {
-              core.error(`#${alert.number} ${alert.rule?.security_severity_level}: ${alert.rule?.id}`);
+              const location = alert.most_recent_instance?.location;
+              const where = location?.path
+                ? `${location.path}:${location.start_line ?? "?"}`
+                : "location unavailable";
+              core.error(`#${alert.number} ${alert.rule?.security_severity_level}: ${alert.rule?.id} at ${where}`);
             }
             if (blocking.length > 0) {
               core.setFailed("Open critical/high code-scanning alerts must be triaged and remediated before release.");
