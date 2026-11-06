@@ -146,7 +146,18 @@ fn is_global_data_route(path: &str) -> bool {
         "/api/search" |
         "/api/search/" |
         "/api/vectors/search" |
-        "/api/ask"
+        "/api/ask" |
+        "/api/compute/sql" |
+        "/api/query" |
+        "/api/query/" |
+        "/api/agents/execute" |
+        "/api/agents/pipeline/research" |
+        "/api/workflows/execute" |
+        "/api/vectors/recompute" |
+        "/api/sync/resolve_conflict" |
+        "/api/sharing/issue_token" |
+        "/api/sharing/verify_token" |
+        "/api/knowledge/query"
     )
 }
 
@@ -559,16 +570,21 @@ where
 
 async fn universal_ingest(
     State(state): State<AppState>,
+    Extension(CurrentUser(user)): Extension<CurrentUser>,
     fields: FormFields,
 ) -> Result<Json<Value>, ApiError> {
-    ingest_into_storage(state, fields, "")
+    ingest_into_storage(state, fields, "", user.as_ref().map(|principal| principal.id.as_str()))
 }
 
-async fn ingest_text(State(state): State<AppState>, fields: FormFields) -> Result<Json<Value>, ApiError> {
-    ingest_into_storage(state, fields, "")
+async fn ingest_text(
+    State(state): State<AppState>,
+    Extension(CurrentUser(user)): Extension<CurrentUser>,
+    fields: FormFields,
+) -> Result<Json<Value>, ApiError> {
+    ingest_into_storage(state, fields, "", user.as_ref().map(|principal| principal.id.as_str()))
 }
 
-fn ingest_into_storage(state: AppState, fields: FormFields, _name: &str) -> Result<Json<Value>, ApiError> {
+fn ingest_into_storage(state: AppState, fields: FormFields, _name: &str, owner_id: Option<&str>) -> Result<Json<Value>, ApiError> {
     let fields = fields.0;
     let filename = fields
         .get("filename")
@@ -581,8 +597,11 @@ fn ingest_into_storage(state: AppState, fields: FormFields, _name: &str) -> Resu
     let object_type = if lowered.ends_with(".csv") { "dataset" } else if lowered.ends_with(".json") { "dataset" } else if lowered.ends_with(".ipynb") { "notebook" } else { "document" };
     let mut properties = json!({"filename": filename});
     if lowered.ends_with(".csv") { properties["raw_csv"] = Value::String(content.clone()); }
-    let stored = state.db.create_object(object_type, "generic.v1", properties, Value::String(content), "api://rust-ingest", json!({}))
-        .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let stored = if let Some(owner_id) = owner_id {
+        state.db.create_object_for_owner(object_type, "generic.v1", properties, Value::String(content), "api://rust-ingest", json!({}), owner_id)
+    } else {
+        state.db.create_object(object_type, "generic.v1", properties, Value::String(content), "api://rust-ingest", json!({}))
+    }.map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     ok_json(json!({
         "status": "ok",
         "primary_object_id": stored.get("id").cloned().unwrap_or(Value::Null),
