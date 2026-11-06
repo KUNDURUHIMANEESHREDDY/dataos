@@ -224,6 +224,64 @@ impl Db {
         conn.query_row(&format!("{} WHERE id = ? AND deleted_at IS NULL", object_select_sql()), [id], object_from_row).optional().map_err(|e| e.to_string())
     }
 
+    /// Assign an object to the authenticated principal and remove implicit
+    /// world-readable permissions. Ownership is stored in the existing JSON
+    /// permissions column so this migration is safe for existing databases.
+    pub fn set_object_owner(&self, id: &str, owner_id: &str) -> Result<Option<Value>, String> {
+        let Some(mut object) = self.get_object(id)? else { return Ok(None); };
+        object["permissions"] = json!({
+            "owner": owner_id,
+            "read": [owner_id],
+            "write": [owner_id]
+        });
+        object["provenance"]["created_by"] = Value::String(owner_id.to_string());
+        self.save_object(&object)?;
+        Ok(Some(object))
+    }
+
+    pub fn can_access_object(&self, id: &str, principal_id: &str, is_admin: bool) -> Result<bool, String> {
+        if is_admin { return Ok(self.get_object(id)?.is_some()); }
+        let Some(object) = self.get_object(id)? else { return Ok(false); };
+        Ok(object.pointer("/permissions/owner").and_then(Value::as_str) == Some(principal_id))
+    }
+
+    pub fn list_objects_for_owner(
+        &self,
+        owner_id: &str,
+        object_type: Option<&str>,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<Value>, String> {
+        let conn = self.conn.lock().map_err(|_| "database lock poisoned".to_string())?;
+        let mut sql = format!("{} WHERE deleted_at IS NULL AND json_extract(permissions, '$.owner') = ?", object_select_sql());
+        let mut values: Vec<Value> = vec![Value::String(owner_id.to_string())];
+        if let Some(kind) = object_type {
+            sql.push_str(" AND type = ?");
+            values.push(Value::String(kind.to_string()));
+        }
+        sql.push_str(" ORDER BY updated_at DESC LIMIT ? OFFSET ?");
+        values.push(Value::from(limit));
+        values.push(Value::from(offset));
+        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+        let mut rows = stmt.query(rusqlite::params_from_iter(values.iter().map(param_value).map(|v| v.unwrap_or(rusqlite::types::Value::Null)))).map_err(|e| e.to_string())?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+            out.push(object_from_row(row).map_err(|e| e.to_string())?);
+        }
+        Ok(out)
+    }
+
+    pub fn count_objects_for_owner(&self, owner_id: &str, object_type: Option<&str>) -> Result<i64, String> {
+        let conn = self.conn.lock().map_err(|_| "database lock poisoned".to_string())?;
+        let mut sql = "SELECT COUNT(*) FROM objects WHERE deleted_at IS NULL AND json_extract(permissions, '$.owner') = ?".to_string();
+        let mut values: Vec<Value> = vec![Value::String(owner_id.to_string())];
+        if let Some(kind) = object_type {
+            sql.push_str(" AND type = ?");
+            values.push(Value::String(kind.to_string()));
+        }
+        conn.query_row(&sql, rusqlite::params_from_iter(values.iter().map(param_value).map(|v| v.unwrap_or(rusqlite::types::Value::Null))), |row| row.get(0)).map_err(|e| e.to_string())
+    }
+
     pub fn create_object(&self, object_type: &str, schema: &str, properties: Value, content: Value, source: &str, metadata: Value) -> Result<Value, String> {
         let created = now();
         let mut object = json!({
