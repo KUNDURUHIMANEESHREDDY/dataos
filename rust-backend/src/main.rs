@@ -771,12 +771,10 @@ async fn list_objects(
                 state.db.count_objects(params.object_type.as_deref(), params.source.as_deref()),
             )
         } else {
-            let all = state.db.list_objects_for_owner(&user.id, params.object_type.as_deref(), 10000, 0)
-                .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-            let filtered: Vec<Value> = all.into_iter().filter(|object| params.source.as_deref().map(|source| object.get("source").and_then(Value::as_str).unwrap_or("").contains(source)).unwrap_or(true)).collect();
-            let total = filtered.len() as i64;
-            let objects = filtered.into_iter().skip(offset as usize).take(limit as usize).collect();
-            (Ok(objects), Ok(total))
+            (
+                state.db.list_objects_for_owner(&user.id, params.object_type.as_deref(), params.source.as_deref(), limit, offset),
+                state.db.count_objects_for_owner(&user.id, params.object_type.as_deref(), params.source.as_deref()),
+            )
         }
     } else {
         (
