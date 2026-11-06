@@ -121,6 +121,8 @@ def has_critical_high_alert_gate(job: dict) -> bool:
         'gh api --paginate --jq',
         'fetch_alerts "ref=refs/pull/${PR_NUMBER}/merge"',
         'fetch_alerts "ref=refs/heads/${GITHUB_REF_NAME}"',
+        'elif [[ "$GITHUB_REF_NAME" == "main" || "$GITHUB_REF_NAME" == "production-hardening" ]]; then',
+        'Feature-branch pushes are checked against the PR merge ref',
         '== "critical"',
         '== "high"',
         '.number // 0',
