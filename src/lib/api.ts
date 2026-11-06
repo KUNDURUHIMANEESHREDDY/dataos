@@ -1,5 +1,11 @@
 const API_BASE = "";
 
+const MAX_ERROR_BODY_BYTES = 4096;
+const MAX_ERROR_DETAIL_CHARS = 1000;
+
+const truncateText = (value: string, maxChars = MAX_ERROR_DETAIL_CHARS): string =>
+  value.length > maxChars ? `${value.slice(0, maxChars - 1)}…` : value;
+
 const pathSegment = (value: string): string => {
   if (value.length === 0 || value === "." || value === "..") {
     throw new TypeError("DataOS resource IDs must be non-empty and cannot be dot path segments.");
@@ -7,24 +13,107 @@ const pathSegment = (value: string): string => {
   return encodeURIComponent(value);
 };
 
+async function readBoundedErrorBody(response: Response): Promise<string> {
+  const reader = response.body?.getReader();
+  if (!reader) return "";
+
+  const decoder = new TextDecoder();
+  let text = "";
+  let bytesRead = 0;
+  let truncated = false;
+
+  try {
+    while (bytesRead < MAX_ERROR_BODY_BYTES) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      const remaining = MAX_ERROR_BODY_BYTES - bytesRead;
+      const chunk = value.subarray(0, remaining);
+      text += decoder.decode(chunk, { stream: true });
+      bytesRead += chunk.byteLength;
+
+      if (chunk.byteLength < value.byteLength) {
+        truncated = true;
+        await reader.cancel().catch(() => undefined);
+        break;
+      }
+    }
+
+    if (bytesRead === MAX_ERROR_BODY_BYTES) {
+      truncated = true;
+      await reader.cancel().catch(() => undefined);
+    }
+
+    text += decoder.decode();
+    return truncated ? `${text}…` : text;
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+function errorDetail(body: string, contentType: string, statusText: string): string {
+  const fallback = statusText || "Request failed";
+  if (!body) return fallback;
+
+  if (contentType.includes("json")) {
+    try {
+      const payload: unknown = JSON.parse(body);
+      if (payload && typeof payload === "object") {
+        const record = payload as Record<string, unknown>;
+        const detail = record.detail ?? record.message ?? record.error;
+        if (typeof detail === "string" && detail.trim()) return truncateText(detail.trim());
+        if (detail !== undefined) return truncateText(JSON.stringify(detail));
+      }
+    } catch {
+      return fallback;
+    }
+    return fallback;
+  }
+
+  // Never surface an upstream HTML error page or an unbounded response body
+  // in the application UI. Plain-text API errors remain useful when bounded.
+  if (contentType.includes("text/plain")) {
+    const safeText = body.replace(/[\\u0000-\\u0008\\u000B\\u000C\\u000E-\\u001F\\u007F]/g, "").trim();
+    return truncateText(safeText) || fallback;
+  }
+  return fallback;
+}
+
 async function apiFetch(path: string, options?: RequestInit): Promise<any> {
+  const headers = new Headers({ "Content-Type": "application/json" });
+  new Headers(options?.headers).forEach((value, name) => headers.set(name, value));
+
   const res = await fetch(`${API_BASE}${path}`, {
-    headers: { "Content-Type": "application/json" },
     ...options,
+    headers,
   });
   if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`API ${res.status}: ${text}`);
+    const contentType = (res.headers.get("content-type") || "").toLowerCase();
+    const body = await readBoundedErrorBody(res);
+    throw new Error(`API ${res.status}: ${errorDetail(body, contentType, res.statusText)}`);
   }
-  return res.json();
+  if (res.status === 204 || res.status === 205) return undefined;
+
+  const contentType = (res.headers.get("content-type") || "").toLowerCase();
+  if (contentType && !contentType.includes("json")) {
+    if (res.body) await res.body.cancel().catch(() => undefined);
+    throw new Error(`API ${res.status}: expected a JSON response`);
+  }
+  try {
+    return await res.json();
+  } catch {
+    throw new Error(`API ${res.status}: invalid or empty JSON response`);
+  }
 }
+
+type ReadOptions = Pick<RequestInit, "signal" | "headers">;
 
 export const api = {
   health: () => apiFetch("/api/catalog/health"),
 
   listObjects: (
     params?: { object_type?: string; limit?: number; offset?: number },
-    options?: Pick<RequestInit, "signal">,
+    options?: ReadOptions,
   ) => {
     const qs = new URLSearchParams();
     if (params?.object_type) qs.set("object_type", params.object_type);
@@ -43,7 +132,7 @@ export const api = {
 
   listRelationships: (
     params?: { source_id?: string; target_id?: string; limit?: number; offset?: number },
-    options?: Pick<RequestInit, "signal">,
+    options?: ReadOptions,
   ) => {
     const qs = new URLSearchParams();
     if (params?.source_id) qs.set("source_id", params.source_id);
