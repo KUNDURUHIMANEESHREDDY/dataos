@@ -45,7 +45,7 @@ UniqueKeyLoader.add_constructor(
 
 
 RESULT_ENV = {
-    "secret-scan": "SECRET_SCAN_RESULT",
+    "secret-scan": "GITLEAKS_RESULT",
     "dependency-audit": "DEPENDENCY_AUDIT_RESULT",
     "sbom": "SBOM_RESULT",
     "codeql": "CODEQL_RESULT",
