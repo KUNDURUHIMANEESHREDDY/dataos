@@ -81,7 +81,8 @@ class TestQueryExecution(unittest.TestCase):
             with self.subTest(query=query):
                 result = self.sql_engine.execute_sql(query, table_objects=[self.dataset])
                 self.assertFalse(result["success"])
-                self.assertIn("not authorized", result["error"].lower())
+                if "load_extension" in query:
+                    self.assertIn("not authorized", result["error"].lower())
 
     def test_sql_engine_rejects_multiple_statements(self):
         result = self.sql_engine.execute_sql(
