@@ -63,6 +63,24 @@ class TestDataOSKernel(unittest.TestCase):
         self.assertEqual(v2.properties["word_count"], 150)
         self.assertEqual(len(v2.provenance["transformations"]), 1)
 
+    def test_empty_or_invalid_content_hash_metadata_is_recomputed_before_persistence(self):
+        for cached_hash in (None, "", "   ", 123):
+            with self.subTest(cached_hash=cached_hash):
+                obj = DataObject(
+                    type="document",
+                    properties={"title": "Hash invariant"},
+                    content="persistable content",
+                    metadata={"content_hash": cached_hash},
+                )
+                expected_hash = obj.compute_hash()
+                self.assertEqual(obj.metadata["content_hash"], expected_hash)
+                self.assertEqual(len(expected_hash), 64)
+
+                self.storage.save_object(obj)
+                stored = self.storage.get_object(obj.id)
+                self.assertIsNotNone(stored)
+                self.assertEqual(stored.metadata["content_hash"], expected_hash)
+
     def test_schema_definition_and_validation(self):
         """Verify dynamic schema validation and constraints."""
         schema = Schema(name="user_profile.v1", target_object_type="user")

@@ -153,30 +153,36 @@ class TestGovernanceAndFederation(unittest.TestCase):
         self.assertEqual([obj.hash_calls for obj in objects], [1, 1, 1])
 
     def test_empty_cached_hash_metadata_falls_back_to_computed_hash(self):
-        """Empty caller-supplied hashes must not make unrelated objects exact matches."""
-        for cached_hash in (None, ""):
-            first = self.storage.save_object(DataObject(
-                type="document",
-                properties={"title": "Alpha source document"},
-                metadata={"content_hash": cached_hash},
-                content="alpha source payload",
-            ))
-            second = self.storage.save_object(DataObject(
-                type="document",
-                properties={"title": "Omega unrelated document"},
-                metadata={"content_hash": cached_hash},
-                content="omega unrelated payload",
-            ))
+        """Legacy storage objects with empty cached hashes must not compare as exact matches."""
+        class LegacyObject:
+            def __init__(self, object_id, cached_hash, content, title):
+                self.id = object_id
+                self.metadata = {"content_hash": cached_hash}
+                self.content = content
+                self.properties = {"title": title}
+                self.hash_calls = 0
 
-            matches = self.deduplication.find_duplicates(
-                min_similarity=1.0,
-                auto_link_graph=False,
-            )
-            pair_ids = {first.id, second.id}
-            self.assertFalse(
-                any({item["object_a_id"], item["object_b_id"]} == pair_ids for item in matches),
-                f"cached hash {cached_hash!r} must fall back to each object's computed hash",
-            )
+            def compute_hash(self):
+                self.hash_calls += 1
+                return f"computed-{self.id}"
+
+        class MemoryStorage:
+            def __init__(self, objects):
+                self.objects = objects
+
+            def list_objects(self, limit):
+                return self.objects[:limit]
+
+        for cached_hash in (None, ""):
+            objects = [
+                LegacyObject("alpha-object", cached_hash, "alpha payload", "Alpha source"),
+                LegacyObject("omega-object", cached_hash, "omega payload", "Omega source"),
+            ]
+            engine = DuplicateDetectionEngine(MemoryStorage(objects))
+            matches = engine.find_duplicates(min_similarity=1.0, auto_link_graph=False)
+
+            self.assertEqual(matches, [])
+            self.assertEqual([obj.hash_calls for obj in objects], [1, 1])
 
     def test_duplicate_detection_skips_title_distance_when_length_bound_fails(self):
         """Avoid quadratic edit-distance work when title lengths cannot meet the threshold."""

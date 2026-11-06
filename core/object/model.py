@@ -106,8 +106,11 @@ class DataObject:
                 "input_sources": [self.source] if self.source else [],
                 "transformations": []
             }
-        # Compute content hash if applicable
-        if "content_hash" not in self.metadata:
+        # A persisted content hash is an invariant, not optional caller metadata.
+        # Recompute missing, blank, or non-string values before storage writes them
+        # into the NOT NULL object_versions.content_hash column.
+        cached_hash = self.metadata.get("content_hash")
+        if not isinstance(cached_hash, str) or not cached_hash.strip():
             self.metadata["content_hash"] = self.compute_hash()
 
     def compute_hash(self) -> str:
