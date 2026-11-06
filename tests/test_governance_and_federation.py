@@ -118,6 +118,48 @@ class TestGovernanceAndFederation(unittest.TestCase):
         )
         self.assertEqual(len(matching_edges()), 1)
 
+    def test_duplicate_detection_preserves_existing_similarity_metadata(self):
+        """Updating a similarity edge must preserve unrelated operator metadata."""
+        first = self.storage.save_object(DataObject(
+            type="document",
+            properties={"title": "Shared report"},
+            content="shared duplicate payload",
+        ))
+        second = self.storage.save_object(DataObject(
+            type="document",
+            properties={"title": "Shared report"},
+            content="shared duplicate payload",
+        ))
+        existing = self.storage.save_relationship(Relationship(
+            source=first.id,
+            target=second.id,
+            relation_type=RelationType.SIMILAR_TO.value,
+            confidence=0.7,
+            metadata={"operator_note": "preserve this field"},
+        ))
+
+        # Target-scoped scan reverses the existing edge's orientation.
+        self.deduplication.find_duplicates(
+            target_object_id=second.id,
+            min_similarity=1.0,
+            auto_link_graph=True,
+        )
+
+        edges = [
+            rel
+            for rel in self.storage.list_relationships(
+                relation_type=RelationType.SIMILAR_TO.value,
+                limit=100,
+            )
+            if {rel.source, rel.target} == {first.id, second.id}
+        ]
+        self.assertEqual(len(edges), 1)
+        self.assertEqual(edges[0].id, existing.id)
+        self.assertEqual(edges[0].metadata["operator_note"], "preserve this field")
+        self.assertEqual(edges[0].metadata["method"], "exact_hash")
+        self.assertTrue(edges[0].metadata["is_exact"])
+        self.assertEqual(edges[0].confidence, 1.0)
+
     def test_empty_content_does_not_match_other_empty_documents(self):
         """Blank payloads provide no evidence that two different objects are duplicates."""
         first = self.storage.save_object(DataObject(
