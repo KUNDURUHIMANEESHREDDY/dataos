@@ -8,7 +8,8 @@ import pytest
 from fastapi import HTTPException, Request
 
 import backend.authorization as authorization
-from backend.app import require_production_api_token
+from backend.authorization import get_current_user, require_capability
+from backend.app import RegisterRequest, register_user, require_production_api_token
 from core.permissions.auth import UserStore, issue_jwt
 from core.permissions.policy import Role
 
@@ -95,5 +96,74 @@ def test_jwt_middleware_enforces_role_capabilities(monkeypatch, tmp_path):
         assert _asgi_status("POST", "/api/objects/", headers) == 403
         assert _asgi_status("POST", "/api/compute/python", headers) == 403
         assert _asgi_status("POST", "/api/compute/sql", headers) == 403
+    finally:
+        store.close()
+
+
+
+def test_jwt_configured_routes_require_identity_except_auth_me(monkeypatch):
+    monkeypatch.setenv("DATAOS_JWT_SECRET", "j" * 48)
+    assert get_current_user(_request("/api/auth/me"), authorization=None) is None
+    with pytest.raises(HTTPException) as exc:
+        get_current_user(_request("/api/query/"), authorization=None)
+    assert exc.value.status_code == 401
+
+
+def test_get_current_user_resolves_registered_jwt_principal(monkeypatch, tmp_path):
+    monkeypatch.setenv("DATAOS_JWT_SECRET", "j" * 48)
+    store = UserStore(db_path=str(tmp_path / "principal.db"))
+    try:
+        user = store.register("analyst", "analyst@example.com", "password123", role=Role.ANALYST.value)
+        monkeypatch.setattr(authorization, "_user_store", store)
+        token = issue_jwt(user.id, user.role)
+        resolved = get_current_user(_request("/api/query/"), authorization=f"Bearer {token}")
+        assert resolved is not None
+        assert resolved.id == user.id
+        assert resolved.role == Role.ANALYST.value
+    finally:
+        store.close()
+
+
+def test_self_registration_rejects_role_escalation():
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        RegisterRequest(
+            username="attacker",
+            email="attacker@example.com",
+            password="password123",
+            role="admin",
+        )
+
+
+def test_registration_always_creates_viewer(monkeypatch, tmp_path):
+    monkeypatch.setenv("DATAOS_JWT_SECRET", "j" * 48)
+    store = UserStore(db_path=str(tmp_path / "registration.db"))
+    try:
+        monkeypatch.setattr(authorization, "_user_store", store)
+        result = asyncio.run(
+            register_user(
+                RegisterRequest(
+                    username="new-user",
+                    email="new-user@example.com",
+                    password="password123",
+                )
+            )
+        )
+        assert result["role"] == Role.VIEWER.value
+        assert "password_hash" not in result
+    finally:
+        store.close()
+
+
+def test_capability_dependency_rejects_viewer_write(monkeypatch, tmp_path):
+    monkeypatch.setenv("DATAOS_JWT_SECRET", "j" * 48)
+    store = UserStore(db_path=str(tmp_path / "capability.db"))
+    try:
+        user = store.register("viewer", "viewer2@example.com", "password123", role=Role.VIEWER.value)
+        dependency = require_capability("create_object")
+        with pytest.raises(HTTPException) as exc:
+            dependency(user)
+        assert exc.value.status_code == 403
     finally:
         store.close()
