@@ -116,6 +116,21 @@ def _asgi_status(method: str, path: str, headers: dict | None = None):
     return next(m["status"] for m in messages if m["type"] == "http.response.start")
 
 
+def test_jwt_middleware_accepts_httponly_session_cookie(monkeypatch, tmp_path):
+    monkeypatch.setenv("DATAOS_JWT_SECRET", "s" * 48)
+    store = UserStore(db_path=str(tmp_path / "cookie-auth.db"))
+    try:
+        user = store.register("cookie-viewer", "cookie-viewer@example.com", "password123", role=Role.VIEWER.value)
+        token = issue_jwt(user.id, user.role)
+        monkeypatch.setattr(authorization, "_user_store", store)
+        cookie_headers = {"cookie": f"dataos_session={token}"}
+        assert _asgi_status("GET", "/api/objects/", cookie_headers) == 204
+        assert _asgi_status("POST", "/api/objects/", cookie_headers) == 403
+        assert _asgi_status("GET", "/api/objects/") == 401
+    finally:
+        store.close()
+
+
 def test_jwt_middleware_enforces_role_capabilities(monkeypatch, tmp_path):
     monkeypatch.setenv("DATAOS_JWT_SECRET", "s" * 48)
     store = UserStore(db_path=str(tmp_path / "auth.db"))
