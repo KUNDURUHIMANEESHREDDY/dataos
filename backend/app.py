@@ -17,7 +17,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from starlette.concurrency import run_in_threadpool
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 
 from dataos_system import DataOS
 from core.object.model import DataObject, ObjectType
@@ -284,6 +284,20 @@ class WorkflowExecutionRequest(BaseModel):
     context: Dict[str, Any] = Field(default_factory=dict)
 
 
+class RegisterRequest(BaseModel):
+    # Public self-registration never accepts a caller-selected role.
+    model_config = ConfigDict(extra="forbid")
+    username: str = Field(min_length=1, max_length=128)
+    email: str = Field(min_length=3, max_length=320)
+    password: str = Field(min_length=8, max_length=1024)
+
+
+class LoginRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    login: str = Field(min_length=1, max_length=320)
+    password: str = Field(min_length=1, max_length=1024)
+
+
 # =============================================================================
 # AUTH ROUTES
 # =============================================================================
@@ -296,7 +310,7 @@ async def register_user(req: RegisterRequest):
             detail="User auth is disabled until DATAOS_JWT_SECRET is configured.",
         )
     try:
-        user = get_user_store().register(req.username, req.email, req.password, role=req.role)
+        user = get_user_store().register(req.username, req.email, req.password)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return user.to_dict()
@@ -703,8 +717,14 @@ async def evaluate_quality(object_id: str, req: QualityEvaluateRequest):
 async def get_lineage(
     object_id: str,
     direction: Literal["upstream", "downstream"] = FastQuery(default="upstream"),
-    max_depth: int = FastQuery(default=10, ge=1, le=10),
+    max_depth: int = FastQuery(default=10, ge=1, le=32),
 ):
+    # Direct Python callers bypass FastAPI's request validation, so keep the
+    # same contract at the engine boundary as well.
+    if direction not in {"upstream", "downstream"}:
+        raise HTTPException(status_code=400, detail="direction must be upstream or downstream")
+    if isinstance(max_depth, bool) or not isinstance(max_depth, int) or not 1 <= max_depth <= 32:
+        raise HTTPException(status_code=422, detail="max_depth must be between 1 and 32")
     if direction == "upstream":
         return dataos.lineage.trace_upstream_lineage(object_id, max_depth=max_depth)
     return dataos.lineage.trace_downstream_impact(object_id, max_depth=max_depth)
