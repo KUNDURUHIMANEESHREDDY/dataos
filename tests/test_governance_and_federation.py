@@ -12,6 +12,7 @@ from infrastructure.storage.sqlite_store import SQLiteStorage
 from engines.governance.deduplication import DuplicateDetectionEngine, compute_levenshtein_similarity, compute_minhash_jaccard
 from core.governance.resource_governor import ResourceGovernor, ResourceQuota, RateLimitExceededError, QuotaExceededError
 from core.permissions.sharing_tokens import SubgraphTokenManager
+from unittest.mock import patch
 from infrastructure.federation.federation_engine import DataOSFederationEngine
 
 
@@ -22,12 +23,20 @@ class TestGovernanceAndFederation(unittest.TestCase):
         self.storage = SQLiteStorage(db_path=self.temp_db)
         self.deduplication = DuplicateDetectionEngine(self.storage)
         self.governor = ResourceGovernor()
-        self.token_manager = SubgraphTokenManager(secret_key="unit_test_secret_key")
+        self.token_manager = SubgraphTokenManager(secret_key="unit_test_secret_key_that_is_at_least_32_chars")
         self.federation = DataOSFederationEngine(self.storage, local_instance_id="node_test_local")
 
     def tearDown(self):
         if os.path.exists(self.temp_db):
             os.remove(self.temp_db)
+
+    def test_sharing_token_manager_requires_operator_managed_secret(self):
+        """Never fall back to a predictable source-controlled signing key."""
+        with patch.dict(os.environ, {"DATAOS_SHARING_TOKEN_SECRET": ""}):
+            with self.assertRaises(ValueError):
+                SubgraphTokenManager()
+        with self.assertRaises(ValueError):
+            SubgraphTokenManager(secret_key="short")
 
     def test_fuzzy_duplicate_detection(self):
         """Rule #58: Exact hash, MinHash Jaccard, and Levenshtein similarity detection."""

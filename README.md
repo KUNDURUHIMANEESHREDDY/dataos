@@ -6,10 +6,7 @@ graph**, and **first-class provenance** — every derived result traceable back 
 The design principle, stated in `context/ai-workflow-rules.md`: **AI is an operator over the graph, never an
 authority over it.**
 
-> ⚠️ **The library is real. The API layer is not.** ~180 Python files, 12 engine packages, and ~670 unit tests
-> form a coherent, substantial core. The package imports cleanly, **653 correctness tests pass**, the **CLI works
-> end to end**, and **`scenario_demo.py` runs all 10 steps**. What remains broken is the FastAPI backend, which
-> still calls a `DataOS` API that no longer exists. See [Current blockers](#current-blockers).
+> **Backend status:** the Docker backend now targets the Rust/Axum implementation in `rust-backend/`, which now declares **every route** in the Python `backend/app.py` / `backend/knowledge_rag.py` surface: storage, auth, objects/relationships, graph traversal, time-travel, lineage, profiling, quality, sharing tokens, vector search, sync conflict resolution, bounded workflows, agent dispatch, the 4-stage research pipeline, scoped knowledge retrieval, safe read-only SQL, and ingest. Routes whose engine has no Rust equivalent (Ask/RAG, Python compute, LLM-backed agents, model-backed embeddings) return HTTP 501 with an explicit message rather than fabricating results. Python backend remains as a legacy reference. Remaining production risks are per-object authorization, secrets/operations, TLS/reverse proxy, and live deployment testing.
 
 ---
 
@@ -37,46 +34,54 @@ Six bugs that made the project unusable, fixed in `dab962b` and `4193152`:
   frontend cannot use). Now resolves 252 packages.
 - **No Python dependency manifest existed.** Added `requirements.txt`.
 
-### Still open
+### Remaining production blockers
 
-#### 1. The FastAPI backend targets an API that no longer exists
+#### 1. Per-user authorization is implemented but not yet resource-level everywhere
 
-`backend/app.py` makes 52 `dataos.*` attribute accesses; only about 13 resolve. **Roughly 22 of ~35 endpoints
-return HTTP 500.** It was written against an older, richer `DataOS` and never updated.
+Per-user identity now exists (`/api/auth/register`, `/api/auth/login`, `/api/auth/me`) and JWT sessions are enforced when `DATAOS_JWT_SECRET` is configured. Roles map to capability sets in `core/permissions/policy.py` (`viewer`, `analyst`, `operator`, `admin`). The production shared bearer token remains as an additional boundary.
 
-Broken calls include `dataos.execute_sql` (the real name is `DataOS.sql`), `dataos.execute_python` (`.python`),
-`dataos.ingest_file`, `dataos.get_object`, `dataos.graph.traverse` (use `dataos.graph.engine.traverse`),
-`dataos.create_agent`, `dataos.get_system_health` (no such method anywhere), `dataos.run_multi_agent_pipeline`,
-and `dataos.query.execute_query` (where `dataos.query` is a bound method, not a namespace).
+Remaining authorization work is still material:
 
-Working endpoints: `/api/objects` CRUD, `/api/relationships`, `/api/vectors/search`,
-`/api/provenance/lineage/{id}`, `/api/profiling/{id}`, `/api/quality/{id}`, `/api/objects/{id}/why`,
-`/api/objects/{id}/impact`, `/api/ask`, `/api/ingest/universal`, `/api/io/export`, `/health`.
+- Capability enforcement is wired at auth/admin boundaries but not consistently enforced on every data-modifying or high-risk handler.
+- Python compute is disabled by default in production unless `DATAOS_ALLOW_PYTHON_COMPUTE=true`; that opt-in does not prove the sandbox is safe.
+- Live PostgreSQL parity coverage exists via the CI service job, but should be expanded as routes are added.
 
-The CLI and `scenario_demo.py` show exactly how each missing call should be rewritten.
-
-#### 2. Prisma is dead weight
-
-There is a 224-line `prisma/schema.prisma` and `prisma` in `devDependencies`, but **nothing in `src/` imports
-Prisma**, there is no `@prisma/client`, there are no Prisma scripts, and the schema's `datasource` has no `url`.
-SQLite is the default store; the schema is unused.
-
----
+Treat these as release blockers until the corresponding API and deployment tests exist.
 
 ## CI verification
 
-`.github/workflows/backend-verification.yml` runs the documented Python correctness
-suite (excluding only the benchmark module), the 10-step scenario demo, and the CLI
-health smoke test on pushes and pull requests to `main`. The stable
-`Backend required` job fails closed if the backend verification job fails, is
-cancelled, or is skipped.
+`.github/workflows/backend-verification.yml` runs the Python correctness suite, frontend production build, live PostgreSQL storage contract, secret scan, dependency audit, and a required aggregate job. The workflow is fail-closed: a skipped or failed required job fails the aggregate check.
 
-This is a backend verification gate, not a complete release gate yet. The frontend
-build is deliberately not included until the committed npm lockfile is regenerated
-from the current `package.json`: the lockfile still lists removed Python packages
-(`django`, `fastapi`, and `uvicorn`) as npm dependencies. Do not treat the frontend
-build or required-check branch protection as verified until those separate items are
-completed and checked in GitHub Settings.
+---
+
+## Runtime security configuration
+
+DataOS sharing-token signing has no built-in/default secret. Configure `DATAOS_SHARING_TOKEN_SECRET` with a randomly generated value of at least 32 UTF-8 bytes through your deployment secret manager before using `/api/sharing/issue_token` or `/api/sharing/verify_token`. If it is missing, the API returns HTTP 503 and token support remains disabled. Never commit the value to the repository or include it in logs.
+
+For local development, generate a value without printing it separately:
+
+```bash
+export DATAOS_SHARING_TOKEN_SECRET="$(python -c 'import secrets; print(secrets.token_urlsafe(48))')"
+```
+
+This secret protects sharing-token signatures only.
+
+### Production API authentication
+
+Per-user authentication is available when `DATAOS_JWT_SECRET` is configured. Users authenticate with `/api/auth/login` and receive a signed HS256 JWT; role capabilities are derived from `ROLE_CAPABILITIES`. Without `DATAOS_JWT_SECRET`, local development falls back to shared-token behavior.
+
+When any of `DATAOS_ENV`, `APP_ENV`, or `ENVIRONMENT` is set to `production` or `prod`, every `/api/*` route requires an `Authorization: Bearer …` header. Configure `DATAOS_API_TOKEN` as a high-entropy secret of at least 32 UTF-8 bytes through the deployment secret manager. If the token is absent, padded with accidental whitespace, or too short, API requests fail closed with HTTP 503; missing or incorrect bearer credentials return HTTP 401. Environment markers are checked independently, so a conflicting `development` marker does not disable the production guard. The non-`/api` health route remains available for liveness monitoring.
+
+Generate a token without committing or printing it to logs:
+
+```bash
+export DATAOS_API_TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe(48))')"
+```
+
+Python execution is a separate high-risk capability. In production, both `/api/compute/python` and unified-query `query_type=python` are disabled unless `DATAOS_ALLOW_PYTHON_COMPUTE=true` is explicitly configured. Keep it disabled unless the execution sandbox and access controls have been reviewed. This flag is an opt-in, not proof that the sandbox is safe.
+
+This boundary is in addition to per-user JWT authorization when `DATAOS_JWT_SECRET` is configured. If a public browser client authenticates only with `DATAOS_API_TOKEN`, do not embed that token in frontend code; authenticate browser users through `/api/auth/login` or an identity-aware gateway in front of DataOS.
+
 
 ---
 
@@ -89,7 +94,7 @@ pip install -r requirements.txt
 There is no `pyproject.toml`/`setup.py` — the package runs from the repo root.
 
 ```bash
-python -m pytest tests/ --ignore=tests/test_benchmarks.py   # 653 correctness tests
+python -m pytest tests/ --ignore=tests/test_benchmarks.py   # correctness suite (CI reports the current test count)
 python scenario_demo.py                                      # 10-step end-to-end demo
 python -m cli health                                         # CLI
 ```
@@ -198,7 +203,7 @@ type/schema/properties/content/source/version; `create_new_version()` appends to
 `core/relation/` provides 23 relation types (`DERIVED_FROM`, `SUPPORTED_BY`, `CONTRADICTS`, `SUPERSEDES`, …) and a
 `Relationship` dataclass whose `confidence` is clamped to `0.0–1.0` in `__post_init__`.
 
-**Note:** `prisma/schema.prisma` mirrors this model with 11 tables and 17 columns — but no code uses it.
+**Object store:** SQLite is the default and PostgreSQL is supported by the storage backend. There is no ORM schema layer; the Python model is the source of truth.
 
 ---
 
@@ -263,15 +268,21 @@ execution at 10s and 10 MB output.
 
 ## Configuration
 
-There is exactly **one environment variable** in the product: `DATAOS_MASTER_KEY`
-(`infrastructure/privacy/encryption.py:54`).
+Core encryption reads `DATAOS_MASTER_KEY` (`infrastructure/privacy/encryption.py:54`). The FastAPI
+deployment layer also reads environment markers (`DATAOS_ENV`, `APP_ENV`, `ENVIRONMENT`), the production
+API bearer secret (`DATAOS_API_TOKEN`), CORS configuration (`DATAOS_CORS_ORIGINS`), sharing-token secret
+(`DATAOS_SHARING_TOKEN_SECRET`), and the high-risk Python-compute opt-in
+(`DATAOS_ALLOW_PYTHON_COMPUTE`). Check the relevant module before deploying; this list describes the
+current core/API controls, not every optional provider's configuration.
 
-Everything else is a constructor argument: `db_path="dataos.db"`, `blob_dir=".dataos_blobs"`, and
-`PostgresStorage`'s connection string (hardcoded default, no `DATABASE_URL` lookup).
+Storage defaults remain constructor arguments: `db_path="dataos.db"`, `blob_dir=".dataos_blobs`, and
+`PostgresStorage`'s connection string (currently no `DATABASE_URL` lookup).
 
-**No external service is required.** SQLite is the default. Postgres, S3, GCS, and Azure are optional and
-degrade gracefully — notably, `PostgresStorage` **silently falls back to an in-memory SQLite** if `psycopg2`
-fails to connect (`postgres_store.py:31-41`), which means a misconfigured Postgres looks like a working one.
+**No external service is required for the default SQLite store.** Postgres, S3, GCS, and Azure are optional.
+A requested PostgreSQL store now **fails closed** if the driver, connection, or schema initialization fails; it
+does not silently downgrade to ephemeral in-memory SQLite. That avoids reporting successful writes to a temporary
+store when the operator configured durable PostgreSQL. `mock_mode=True` is explicit SQLite emulation for tests
+only; do not use it as a production fallback.
 
 **By default no LLM is wired in.** `MultiAgentPipeline` defaults to `MockDeterministicProvider`, a
 string-templating stub. Embeddings default to `HashEmbeddingProvider(dimension=128)` — a feature hash, not a
@@ -288,7 +299,7 @@ lacks `source`. The backend passes both, so those routes raise `TypeError` under
 The frontend reads `r.source_id` / `r.target_id` from relationship JSON, but `Relationship.to_dict()` emits
 `source` / `target`. Every graph edge renders as `undefined`.
 
-CORS now uses an explicit `DATAOS_CORS_ORIGINS` allowlist (defaulting to the local frontend origins), rejects wildcard or malformed origins, and does not enable credentialed cross-origin requests. Endpoint authentication is still absent despite `Depends` being imported; that remains a separate high-priority production blocker.
+CORS uses an explicit `DATAOS_CORS_ORIGINS` allowlist (defaulting to local frontend origins), rejects wildcard or malformed origins, and does not enable credentialed cross-origin requests. In production, `/api/*` routes require the configured shared bearer token; this is not per-user identity or resource-level authorization, which remains a high-priority production blocker.
 
 ---
 
@@ -304,7 +315,7 @@ python -m unittest discover -s tests
 python -m tests.benchmarks.run_all
 ```
 
-**Current result: 653 passed** excluding `tests/test_benchmarks.py`, which is a separate matter.
+**Latest verified result (2026-11-05): 712 passed and 1 skipped in the backend correctness suite and frontend production build successful**; the benchmark module remains outside this correctness gate.
 
 ### `test_benchmarks.py` is flaky
 
@@ -318,23 +329,21 @@ environment-overridable, rather than letting them gate correctness.
 
 ---
 
-## Documentation is aspirational, not descriptive
+## Documentation notes
 
-`AGENTS.md` is a **9-line auto-generated Next.js stub** that says nothing about DataOS. `CLAUDE.md` is one line:
-`@AGENTS.md`. The real prose lives in `context/` — and diverges from the code substantially:
+`AGENTS.md` now describes the clone’s actual stack and production configuration. The `context/` prose remains aspirational and diverges from the code substantially:
 
 | `context/` claims | Reality |
 |---|---|
 | Layers are `api/ core/ db/ frontend/ workflows/ search/ agents/ plugins/` | **None of those directories exist** |
-| PostgreSQL + Prisma is the core store | SQLite is the default; Prisma is entirely unused |
+| PostgreSQL + Prisma is the core store | SQLite is the default; PostgreSQL is optional |
 | Django, Celery, TensorFlow, PyTorch, mlflow, python-louvain, reportlab, openpyxl | None are imported anywhere |
 | Tailwind v4 + shadcn/ui | No `components/ui/`, no shadcn; v3 and v4 configs both present and contradictory |
 | "Supports DuckDB" | No DuckDB reference anywhere |
 | "74 Engineering Rules" | Rules are cited by number in docstrings (`Rule #73`), but no rule list, audit, or enforcement harness exists |
 | ui-context: dark mode only, `#0a0a0f`, accent `#d97757`, never `#8b5cf6`, never Inter | `globals.css` is a **light** theme, sets `--color-entity: #8b5cf6` — the explicitly banned purple — and `--font-body: "Inter"` |
 
-`context/progress-tracker.md` is also stale by several phases: it still lists the Prisma schema and FastAPI
-routes as unchecked, though both exist.
+`context/progress-tracker.md` is also stale by several phases: it still lists artifacts as unchecked even though they exist.
 
 Also: `skills/` is a ~400-entry vendored library of unrelated third-party agent `SKILL.md` files. It is not part
 of the product and dominates the repo's file count.
@@ -345,3 +354,10 @@ of the product and dominates the repo's file count.
 
 ~181 Python files excluding `skills/`: `core/` 22, `engines/` 35, `infrastructure/` 36, `intelligence/` 20,
 `runtime/` 14, `tests/` 48, `backend/` 1, `cli/` 2.
+
+
+## API pagination contract
+
+- `GET /api/objects/` accepts `limit=1..500` and `offset=0..1,000,000`. Its `total` is the count of all active objects matching `object_type` and `source`, before page slicing.
+- `GET /api/relationships/` accepts `limit=1..1,000`, `offset=0..1,000,000`, and `min_confidence=0..1`. Its `total` counts all active relationships matching the filters before page slicing. Soft-deleted relationships are excluded consistently across built-in storage backends.
+- Built-in SQLite, PostgreSQL, and cloud-index backends use database-level counts. Third-party storage adapters should implement efficient count methods; the base interface provides a bounded-page fallback when listing supports offsets.

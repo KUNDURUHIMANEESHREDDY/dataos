@@ -38,6 +38,31 @@ class StorageBackend(ABC):
         """List objects with optional filtering."""
         pass
 
+    def count_objects(
+        self,
+        object_type: Optional[str] = None,
+        source: Optional[str] = None,
+    ) -> int:
+        """Count matching objects. Database backends should override with COUNT(*).
+
+        The paginated fallback keeps third-party StorageBackend implementations
+        compatible while avoiding an unbounded single list request.
+        """
+        total = 0
+        offset = 0
+        page_size = 500
+        while True:
+            page = self.list_objects(
+                object_type=object_type,
+                source=source,
+                limit=page_size,
+                offset=offset,
+            )
+            total += len(page)
+            if len(page) < page_size:
+                return total
+            offset += len(page)
+
     @abstractmethod
     def delete_object(self, object_id: str, soft: bool = True) -> bool:
         """Delete an object (soft by default to preserve provenance)."""
@@ -60,10 +85,40 @@ class StorageBackend(ABC):
         target_id: Optional[str] = None,
         relation_type: Optional[str] = None,
         min_confidence: float = 0.0,
-        limit: int = 1000
+        limit: int = 1000,
+        offset: int = 0
     ) -> List[Relationship]:
         """List relationships matching criteria."""
         pass
+
+    def count_relationships(
+        self,
+        source_id: Optional[str] = None,
+        target_id: Optional[str] = None,
+        relation_type: Optional[str] = None,
+        min_confidence: float = 0.0,
+    ) -> int:
+        """Count active matching relationships using bounded pages by default.
+
+        Storage backends should override this with COUNT(*) for efficient exact
+        totals. The fallback requires list_relationships to support offset.
+        """
+        total = 0
+        offset = 0
+        page_size = 500
+        while True:
+            page = self.list_relationships(
+                source_id=source_id,
+                target_id=target_id,
+                relation_type=relation_type,
+                min_confidence=min_confidence,
+                limit=page_size,
+                offset=offset,
+            )
+            total += len(page)
+            if len(page) < page_size:
+                return total
+            offset += len(page)
 
     @abstractmethod
     def delete_relationship(self, relation_id: str, soft: bool = True) -> bool:
