@@ -16,6 +16,63 @@ from core.relation.model import Relationship
 from infrastructure.storage.base import StorageBackend
 
 
+def _parse_timestamp(value: Optional[str], field_name: str) -> Optional[datetime.datetime]:
+    """Parse persisted ISO timestamps into UTC instants.
+
+    DataOS-generated timestamps are UTC-aware. Older imported records may be
+    timezone-naive; for backward compatibility those values are interpreted as
+    UTC. API request timestamps are validated more strictly at the HTTP boundary.
+    Invalid persisted values fail explicitly instead of producing a false
+    historical result through lexicographic string comparison.
+    """
+    if value is None or value == "":
+        return None
+    if not isinstance(value, str) or value != value.strip() or len(value) > 64:
+        raise ValueError(f"{field_name} must be a bounded ISO 8601 timestamp")
+
+    candidate = value[:-1] + "+00:00" if value.endswith("Z") else value
+    try:
+        parsed = datetime.datetime.fromisoformat(candidate)
+    except (ValueError, OverflowError):
+        raise ValueError(f"{field_name} must be a valid ISO 8601 timestamp") from None
+
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        parsed = parsed.replace(tzinfo=datetime.timezone.utc)
+    return parsed.astimezone(datetime.timezone.utc)
+
+
+def _validate_temporal_axis(axis: str) -> str:
+    """Reject unsupported temporal axes instead of silently treating them as system time."""
+    if axis not in {"system_time", "validity_time"}:
+        raise ValueError("temporal_axis must be 'system_time' or 'validity_time'")
+    return axis
+
+
+def _relationship_is_active_at(
+    relationship: Relationship,
+    boundary: datetime.datetime,
+    temporal_axis: str,
+) -> bool:
+    """Apply the selected temporal axis to relationship lifecycle metadata.
+
+    System time uses created_at/deleted_at. Validity time uses the explicit
+    metadata.valid_from/valid_to interval; relationships without a validity
+    start are omitted rather than incorrectly treating creation time as real-
+    world validity.
+    """
+    if temporal_axis == "validity_time":
+        metadata = getattr(relationship, "metadata", None)
+        if not isinstance(metadata, dict):
+            return False
+        start = _parse_timestamp(metadata.get("valid_from"), "relationship.valid_from")
+        end = _parse_timestamp(metadata.get("valid_to"), "relationship.valid_to")
+        return start is not None and start <= boundary and (end is None or boundary <= end)
+
+    created = _parse_timestamp(getattr(relationship, "created_at", None), "relationship.created_at")
+    deleted = _parse_timestamp(getattr(relationship, "deleted_at", None), "relationship.deleted_at")
+    return created is not None and created <= boundary and (deleted is None or boundary < deleted)
+
+
 @dataclass
 class BiTemporalInterval:
     """Bi-temporal interval representing both real-world validity and system recording time."""
@@ -25,19 +82,28 @@ class BiTemporalInterval:
     system_superseded_at: Optional[str] = None  # None indicates current system state
 
     def is_valid_at(self, timestamp: str, axis: str = "system_time") -> bool:
-        """Check if this interval is active at the given timestamp along the specified axis."""
+        """Check interval membership using chronological UTC instants."""
+        _validate_temporal_axis(axis)
+        instant = _parse_timestamp(timestamp, "timestamp")
+        if instant is None:
+            return False
+
         if axis == "validity_time":
-            if self.valid_from > timestamp:
+            start = _parse_timestamp(self.valid_from, "valid_from")
+            end = _parse_timestamp(self.valid_to, "valid_to")
+            if start is None or start > instant:
                 return False
-            if self.valid_to and self.valid_to < timestamp:
-                return False
-            return True
-        else:  # system_time
-            if self.system_recorded_at > timestamp:
-                return False
-            if self.system_superseded_at and self.system_superseded_at <= timestamp:
+            if end is not None and end < instant:
                 return False
             return True
+
+        start = _parse_timestamp(self.system_recorded_at, "system_recorded_at")
+        end = _parse_timestamp(self.system_superseded_at, "system_superseded_at")
+        if start is None or start > instant:
+            return False
+        if end is not None and end <= instant:
+            return False
+        return True
 
 
 class TimeTravelEngine:
@@ -52,40 +118,50 @@ class TimeTravelEngine:
         as_of_timestamp: str,
         temporal_axis: str = "system_time"
     ) -> Optional[DataObject]:
-        """
-        Reconstruct the state of a DataObject as it existed at `as_of_timestamp`.
-        Uses version history snapshots in storage.
-        """
-        # Fetch all version snapshots for this object from storage
+        """Reconstruct an object using timezone-correct historical comparisons."""
+        _validate_temporal_axis(temporal_axis)
+        boundary = _parse_timestamp(as_of_timestamp, "as_of_timestamp")
+        if boundary is None:
+            raise ValueError("as_of_timestamp is required")
+
         snapshots = self.storage.get_version_history(object_id)
         if not snapshots:
-            # Check current object if no snapshot history exists
             current = self.storage.get_object(object_id)
-            if current and current.timestamps["created_at"] <= as_of_timestamp:
-                return current
+            if current:
+                timestamps = current.timestamps
+                created_at = (
+                    timestamps.get("created_at")
+                    if isinstance(timestamps, dict)
+                    else getattr(timestamps, "created_at", None)
+                )
+                created = _parse_timestamp(created_at, "object.created_at")
+                if created is not None and created <= boundary:
+                    return current
             return None
 
-        # Filter snapshots valid as of timestamp
         valid_snapshots = []
-        for s in snapshots:
-            rec_time = s.get("created_at") or s.get("system_recorded_at") or ""
+        for snapshot in snapshots:
+            recorded_at = snapshot.get("created_at") or snapshot.get("system_recorded_at")
             if temporal_axis == "validity_time":
-                val_from = s.get("data_snapshot", {}).get("properties", {}).get("valid_from", rec_time)
-                val_to = s.get("data_snapshot", {}).get("properties", {}).get("valid_to")
-                if val_from <= as_of_timestamp and (val_to is None or val_to >= as_of_timestamp):
-                    valid_snapshots.append(s)
+                properties = snapshot.get("data_snapshot", {}).get("properties", {})
+                valid_from = properties.get("valid_from") or recorded_at
+                valid_to = properties.get("valid_to")
+                start = _parse_timestamp(valid_from, "snapshot.valid_from")
+                end = _parse_timestamp(valid_to, "snapshot.valid_to")
+                if start is not None and start <= boundary and (end is None or end >= boundary):
+                    valid_snapshots.append(snapshot)
             else:  # system_time
-                if rec_time <= as_of_timestamp:
-                    valid_snapshots.append(s)
+                recorded = _parse_timestamp(recorded_at, "snapshot.created_at")
+                if recorded is not None and recorded <= boundary:
+                    valid_snapshots.append(snapshot)
 
         if not valid_snapshots:
             return None
 
-        # Pick the latest valid snapshot
-        valid_snapshots.sort(key=lambda x: x.get("version", 0))
+        # Version numbers define the object's revision order; timestamps only
+        # determine which revisions existed at the requested instant.
+        valid_snapshots.sort(key=lambda item: item.get("version", 0))
         latest_snapshot = valid_snapshots[-1]
-        
-        # Reconstruct DataObject from snapshot dictionary
         return DataObject.from_dict(latest_snapshot["data_snapshot"])
 
     def get_graph_as_of(
@@ -97,6 +173,7 @@ class TimeTravelEngine:
         Reconstruct the entire graph topology (active objects and active relationships)
         as it existed at `as_of_timestamp`.
         """
+        _validate_temporal_axis(temporal_axis)
         all_objects = self.storage.list_objects(limit=10000)
         all_relationships = self.storage.list_relationships(limit=10000)
 
@@ -108,11 +185,13 @@ class TimeTravelEngine:
 
         active_obj_ids = {o.id for o in active_objects}
 
-        # Filter relationships created on or before timestamp between active objects
+        # Apply the same temporal axis to edge lifecycle as to object history.
         active_relationships: List[Relationship] = []
+        boundary = _parse_timestamp(as_of_timestamp, "as_of_timestamp")
+        if boundary is None:
+            raise ValueError("as_of_timestamp is required")
         for rel in all_relationships:
-            created_at = rel.created_at or ""
-            if created_at <= as_of_timestamp:
+            if _relationship_is_active_at(rel, boundary, temporal_axis):
                 if rel.source in active_obj_ids and rel.target in active_obj_ids:
                     active_relationships.append(rel)
 
@@ -138,6 +217,7 @@ class TimeTravelEngine:
         - Deleted/superseded objects
         - Added/removed relationships
         """
+        _validate_temporal_axis(temporal_axis)
         g1 = self.get_graph_as_of(t1, temporal_axis=temporal_axis)
         g2 = self.get_graph_as_of(t2, temporal_axis=temporal_axis)
 
