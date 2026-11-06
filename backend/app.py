@@ -7,6 +7,7 @@ search, provenance, agents, workflows, and catalog to the web frontend and exter
 
 from __future__ import annotations
 import os
+import math
 import uuid
 import datetime
 import hmac
@@ -629,7 +630,7 @@ async def execute_workflow(req: WorkflowExecutionRequest):
 @app.get("/api/governance/duplicates", summary="Fuzzy Duplicate Detection (Rule #58)")
 async def detect_duplicates_api(
     object_id: Optional[str] = None,
-    min_similarity: float = 0.75,
+    min_similarity: float = FastQuery(default=0.75, gt=0.0, le=1.0),
 ):
     """Return duplicate candidates without mutating the graph from a GET request."""
     if object_id is not None:
@@ -642,10 +643,14 @@ async def detect_duplicates_api(
         if target_object is None:
             raise HTTPException(status_code=404, detail="Object not found.")
 
-    if not 0.0 <= min_similarity <= 1.0:
+    if (
+        isinstance(min_similarity, bool)
+        or not math.isfinite(min_similarity)
+        or not 0.0 < min_similarity <= 1.0
+    ):
         raise HTTPException(
             status_code=422,
-            detail="min_similarity must be between 0.0 and 1.0.",
+            detail="min_similarity must be a finite number greater than 0.0 and at most 1.0.",
         )
 
     # Probe only one object beyond the engine's cap; avoid counting the whole
