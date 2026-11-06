@@ -161,6 +161,10 @@ async fn object_ownership_isolation_blocks_cross_user_reads_writes_and_relations
     let alice_object = create_dataset(&app, &alice, SAMPLE_CSV).await;
     let bob_object = create_dataset(&app, &bob, SAMPLE_CSV).await;
 
+    let alice_id = crate::auth::decode_token(&alice).expect("valid Alice JWT").sub;
+    let (status, _) = call(&app, Method::GET, &format!("/api/governance/quota/{alice_id}"), None, Some(&bob)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "users must not inspect another principal's quota");
+
     // Each principal sees only their own objects in collection responses.
     let (status, alice_list) = call(&app, Method::GET, "/api/objects/", None, Some(&alice)).await;
     assert_eq!(status, StatusCode::OK);
