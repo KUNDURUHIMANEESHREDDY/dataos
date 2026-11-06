@@ -238,7 +238,11 @@ class DuplicateDetectionEngine:
                         if existing:
                             relationship = existing[0]
                             relationship.confidence = sim_score
-                            relationship.metadata = {"method": method, "is_exact": is_exact}
+                            relationship.metadata = {
+                                **(relationship.metadata or {}),
+                                "method": method,
+                                "is_exact": is_exact,
+                            }
                             relationship.updated_at = datetime.datetime.now(
                                 datetime.timezone.utc
                             ).isoformat()
