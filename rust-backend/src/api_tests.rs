@@ -1031,3 +1031,57 @@ fn urlencode(value: &str) -> String {
         })
         .collect()
 }
+
+
+#[tokio::test]
+async fn object_creation_recomputes_server_managed_hash_and_validates_metadata() {
+    let (app, db) = test_app();
+    let token = register(&app, &db, "operator").await;
+    let forged_hash = "0".repeat(64);
+
+    let (status, body) = call(
+        &app,
+        Method::POST,
+        "/api/objects/",
+        Some(json!({
+            "type": "document",
+            "properties": {"name": "canonical"},
+            "content": {"text": "private evidence"},
+            "metadata": {
+                "content_hash": forged_hash,
+                "source_note": "preserve this caller metadata"
+            }
+        })),
+        Some(&token),
+    ).await;
+    assert_eq!(status, StatusCode::OK, "object creation failed: {body}");
+
+    let object_id = body["id"].as_str().expect("created object id");
+    let stored = db.get_object(object_id).expect("read stored object").expect("object exists");
+    let stored_hash = stored.pointer("/metadata/content_hash")
+        .and_then(Value::as_str)
+        .expect("server-managed content hash");
+    assert_ne!(stored_hash, forged_hash, "caller-supplied content hash must never be trusted");
+    assert_eq!(stored_hash, body.pointer("/metadata/content_hash").and_then(Value::as_str).unwrap());
+    assert_eq!(
+        stored.pointer("/metadata/source_note").and_then(Value::as_str),
+        Some("preserve this caller metadata"),
+        "ordinary caller metadata should be preserved"
+    );
+    assert_eq!(stored_hash.len(), 64);
+    assert!(stored_hash.chars().all(|c| c.is_ascii_hexdigit()));
+
+    let (status, body) = call(
+        &app,
+        Method::POST,
+        "/api/objects/",
+        Some(json!({
+            "type": "document",
+            "properties": {},
+            "content": {},
+            "metadata": "not-an-object"
+        })),
+        Some(&token),
+    ).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "invalid metadata shape was accepted: {body}");
+}
