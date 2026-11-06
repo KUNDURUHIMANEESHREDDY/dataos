@@ -73,36 +73,17 @@ async fn call(
     (status, parsed)
 }
 
-async fn register(app: &Router, role: &str) -> String {
+async fn register(_app: &Router, db: &Db, role: &str) -> String {
     let username = format!("user_{}", &uuid::Uuid::new_v4().simple().to_string()[..8]);
-    let (status, body) = call(
-        app,
-        Method::POST,
-        "/api/auth/register",
-        Some(json!({
-            "username": username,
-            "email": format!("{username}@example.com"),
-            "password": "password123",
-            "role": role
-        })),
-        None,
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "register failed: {body}");
-
-    let (status, body) = call(
-        app,
-        Method::POST,
-        "/api/auth/login",
-        Some(json!({"login": username, "password": "password123"})),
-        None,
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "login failed: {body}");
-    body["access_token"]
-        .as_str()
-        .expect("access_token present")
-        .to_string()
+    let user = db
+        .user_register(
+            &username,
+            &format!("{username}@example.com"),
+            "password123",
+            role,
+        )
+        .expect("create test user directly in isolated test database");
+    crate::auth::issue_token(&user.id, &user.role).expect("issue test JWT")
 }
 
 async fn create_dataset(app: &Router, token: &str, raw_csv: &str) -> String {
@@ -139,7 +120,7 @@ async fn health_reports_operational() {
 #[tokio::test]
 async fn auth_roundtrip_issue_me_and_capability_gate() {
     let (app, _db) = test_app();
-    let viewer = register(&app, "viewer").await;
+    let viewer = register(&app, &_db, "viewer").await;
 
     let (status, body) = call(&app, Method::GET, "/api/auth/me", None, Some(&viewer)).await;
     assert_eq!(status, StatusCode::OK);
@@ -158,7 +139,7 @@ async fn auth_roundtrip_issue_me_and_capability_gate() {
     assert_eq!(status, StatusCode::FORBIDDEN, "expected 403, got {body}");
 
     // operators may
-    let operator = register(&app, "operator").await;
+    let operator = register(&app, &_db, "operator").await;
     let (status, _) = call(
         &app,
         Method::POST,
@@ -170,10 +151,58 @@ async fn auth_roundtrip_issue_me_and_capability_gate() {
     assert_eq!(status, StatusCode::OK);
 }
 
+
+#[tokio::test]
+async fn public_registration_cannot_assign_privileged_role() {
+    let (app, _db) = test_app();
+    let username = format!("self_register_{}", &uuid::Uuid::new_v4().simple().to_string()[..8]);
+
+    let (status, registered) = call(
+        &app,
+        Method::POST,
+        "/api/auth/register",
+        Some(json!({
+            "username": username,
+            "email": format!("{username}@example.com"),
+            "password": "password123",
+            "role": "admin"
+        })),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "registration failed: {registered}");
+    assert_eq!(registered["role"], "viewer", "public registration must ignore caller-selected roles");
+
+    let (status, login) = call(
+        &app,
+        Method::POST,
+        "/api/auth/login",
+        Some(json!({"login": username, "password": "password123"})),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "login failed: {login}");
+    let token = login["access_token"].as_str().expect("access token").to_string();
+
+    let (status, me) = call(&app, Method::GET, "/api/auth/me", None, Some(&token)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(me["user"]["role"], "viewer");
+
+    let (status, body) = call(
+        &app,
+        Method::POST,
+        "/api/objects/",
+        Some(json!({"type": "document", "properties": {}, "content": {}})),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "self-registered user unexpectedly gained write access: {body}");
+}
+
 #[tokio::test]
 async fn objects_relationships_and_traverse() {
     let (app, _db) = test_app();
-    let token = register(&app, "operator").await;
+    let token = register(&app, &_db, "operator").await;
 
     let (status, first) = call(
         &app,
@@ -230,7 +259,7 @@ async fn objects_relationships_and_traverse() {
 #[tokio::test]
 async fn sql_executes_over_registered_dataset() {
     let (app, _db) = test_app();
-    let token = register(&app, "operator").await;
+    let token = register(&app, &_db, "operator").await;
     let id = create_dataset(&app, &token, SAMPLE_CSV).await;
     let table = format!("tbl_{}", &id[..8]);
 
@@ -264,7 +293,7 @@ async fn sql_executes_over_registered_dataset() {
 #[tokio::test]
 async fn profiling_and_quality_reports() {
     let (app, _db) = test_app();
-    let token = register(&app, "operator").await;
+    let token = register(&app, &_db, "operator").await;
     let id = create_dataset(&app, &token, SAMPLE_CSV).await;
 
     let (status, profile) = call(&app, Method::GET, &format!("/api/profiling/{id}"), None, Some(&token)).await;
@@ -368,7 +397,7 @@ async fn sharing_tokens_roundtrip_and_tamper_detection() {
 #[tokio::test]
 async fn vector_index_recompute_and_search() {
     let (app, _db) = test_app();
-    let token = register(&app, "operator").await;
+    let token = register(&app, &_db, "operator").await;
     create_dataset(&app, &token, SAMPLE_CSV).await;
 
     let (status, body) = call(&app, Method::POST, "/api/vectors/recompute", Some(json!({})), Some(&token)).await;
@@ -391,7 +420,7 @@ async fn vector_index_recompute_and_search() {
 #[tokio::test]
 async fn time_travel_returns_prior_version() {
     let (app, db) = test_app();
-    let token = register(&app, "operator").await;
+    let token = register(&app, &db, "operator").await;
 
     let (status, created) = call(
         &app,
@@ -452,7 +481,7 @@ async fn time_travel_returns_prior_version() {
 #[tokio::test]
 async fn lineage_traces_upstream_and_downstream() {
     let (app, _db) = test_app();
-    let token = register(&app, "operator").await;
+    let token = register(&app, &_db, "operator").await;
 
     let (status, raw) = call(
         &app,
@@ -573,7 +602,7 @@ async fn workflow_execution_is_bounded_and_validated() {
 #[tokio::test]
 async fn agent_dispatch_is_capability_checked() {
     let (app, _db) = test_app();
-    let token = register(&app, "operator").await;
+    let token = register(&app, &_db, "operator").await;
     create_dataset(&app, &token, SAMPLE_CSV).await;
 
     let (status, body) = call(
@@ -623,7 +652,7 @@ async fn agent_dispatch_is_capability_checked() {
 #[tokio::test]
 async fn unmigrated_routes_answer_501_not_fake_data() {
     let (app, _db) = test_app();
-    let token = register(&app, "operator").await;
+    let token = register(&app, &_db, "operator").await;
 
     let (status, body) = call(
         &app,
@@ -650,7 +679,7 @@ async fn unmigrated_routes_answer_501_not_fake_data() {
 #[tokio::test]
 async fn knowledge_query_returns_scoped_evidence() {
     let (app, _db) = test_app();
-    let token = register(&app, "operator").await;
+    let token = register(&app, &_db, "operator").await;
 
     let (status, dataset) = call(
         &app,
@@ -740,7 +769,7 @@ async fn knowledge_query_returns_scoped_evidence() {
 #[tokio::test]
 async fn research_pipeline_runs_four_deterministic_stages() {
     let (app, _db) = test_app();
-    let token = register(&app, "operator").await;
+    let token = register(&app, &_db, "operator").await;
     let id = create_dataset(&app, &token, SAMPLE_CSV).await;
     let table = format!("tbl_{}", &id[..8]);
 
@@ -813,7 +842,7 @@ async fn universal_ingest_accepts_form_encoded_body_from_frontend() {
     // `application/x-www-form-urlencoded`, which is what the FastAPI route
     // accepts via `Form(...)`. The Rust route must accept the same encoding.
     let (app, _db) = test_app();
-    let token = register(&app, "operator").await;
+    let token = register(&app, &_db, "operator").await;
 
     let request = Request::builder()
         .method(Method::POST)
