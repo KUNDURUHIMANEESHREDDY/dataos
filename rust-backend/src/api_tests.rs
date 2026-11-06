@@ -10,18 +10,26 @@ use axum::body::Body;
 use axum::http::{Method, Request, StatusCode, header};
 use axum::Router;
 use http_body_util::BodyExt;
+use rand::RngCore;
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
 use crate::db::Db;
 use crate::AppState;
 
+fn random_test_secret() -> String {
+    let mut bytes = [0_u8; 32];
+    let mut rng = rand::rngs::OsRng;
+    rng.fill_bytes(&mut bytes);
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
 fn setup_env() {
     static INIT: OnceLock<()> = OnceLock::new();
     INIT.get_or_init(|| {
-        // Use per-process random test keys; never commit reusable signing material.
-        let jwt_secret = format!("{}{}", uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
-        let sharing_secret = format!("{}{}", uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
+        // Use OS-backed random test keys; never commit reusable signing material.
+        let jwt_secret = random_test_secret();
+        let sharing_secret = random_test_secret();
         // SAFETY: called once, before any test issues requests.
         unsafe {
             std::env::set_var("DATAOS_JWT_SECRET", jwt_secret);
