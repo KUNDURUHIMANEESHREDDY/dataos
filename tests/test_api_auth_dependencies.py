@@ -3,6 +3,7 @@
 import asyncio
 
 import pytest
+from pydantic import ValidationError
 from fastapi import HTTPException
 
 import backend.app as api
@@ -74,3 +75,27 @@ def test_require_capability_enforces_user_role():
     with pytest.raises(HTTPException) as unauthenticated:
         run(dependency(current_user=None))
     assert unauthenticated.value.status_code == 401
+
+def test_public_registration_rejects_caller_selected_roles():
+    with pytest.raises(ValidationError):
+        api.RegisterRequest(
+            username="attacker",
+            email="attacker@example.com",
+            password="password123",
+            role=Role.ADMIN.value,
+        )
+
+
+def test_public_registration_always_uses_viewer_role(monkeypatch, tmp_path):
+    monkeypatch.setenv("DATAOS_JWT_SECRET", "j" * 48)
+    store = UserStore(db_path=str(tmp_path / "register.db"))
+    try:
+        monkeypatch.setattr(api, "get_user_store", lambda: store)
+        result = run(api.register_user(api.RegisterRequest(
+            username="new-user",
+            email="new-user@example.com",
+            password="password123",
+        )))
+        assert result["role"] == Role.VIEWER.value
+    finally:
+        store.close()
