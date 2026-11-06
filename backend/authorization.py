@@ -13,9 +13,10 @@ import json
 import os
 from typing import Optional
 
+from fastapi import Depends, Header, HTTPException, Request
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-from core.permissions.auth import UserStore, decode_jwt, jwt_configured
+from core.permissions.auth import User, UserStore, decode_jwt, jwt_configured
 from core.permissions.policy import Capability
 
 PUBLIC_ALLOWLIST = {
@@ -39,6 +40,80 @@ def _get_user_store() -> UserStore:
     if _user_store is None:
         _user_store = UserStore(db_path=os.getenv("DATAOS_DB_PATH", "dataos.db"))
     return _user_store
+
+def get_user_store() -> UserStore:
+    """Return the shared user store used by both route dependencies and middleware."""
+    return _get_user_store()
+
+
+def get_current_user(
+    request: Request,
+    authorization: Optional[str] = Header(default=None),
+) -> Optional[User]:
+    """Resolve the JWT principal; only /api/auth/me permits an anonymous result."""
+    if not jwt_configured():
+        return None
+
+    if not authorization:
+        if request.url.path == "/api/auth/me":
+            return None
+        raise HTTPException(
+            status_code=401,
+            detail="A bearer token is required.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    scheme, separator, token = authorization.partition(" ")
+    if (
+        not separator
+        or scheme.lower() != "bearer"
+        or not token
+        or token.strip() != token
+    ):
+        raise HTTPException(
+            status_code=401,
+            detail="A valid bearer token is required.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    try:
+        payload = decode_jwt(token)
+    except (ValueError, RuntimeError):
+        raise HTTPException(
+            status_code=401,
+            detail="A valid bearer token is required.",
+            headers={"WWW-Authenticate": "Bearer"},
+        ) from None
+
+    user = _get_user_store().get_by_id(payload.get("sub", ""))
+    if user is None:
+        raise HTTPException(
+            status_code=401,
+            detail="Unknown user.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return user
+
+
+def require_capability(capability: str):
+    """Build a FastAPI dependency that fails closed for JWT-configured routes."""
+    def dependency(current_user: Optional[User] = Depends(get_current_user)) -> Optional[User]:
+        if current_user is None:
+            if jwt_configured():
+                raise HTTPException(
+                    status_code=401,
+                    detail="A bearer token is required.",
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
+            return None
+        if not current_user.has_capability(capability):
+            raise HTTPException(
+                status_code=403,
+                detail=f"Capability '{capability}' is not permitted for role '{current_user.role}'.",
+            )
+        return current_user
+
+    return dependency
 
 
 def _matches(path: str, prefix: str) -> bool:
