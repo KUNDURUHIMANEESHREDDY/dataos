@@ -6,6 +6,7 @@ import unittest
 import tempfile
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 from core.object.model import DataObject, ObjectType
 from core.relation.model import Relationship, RelationType
 from infrastructure.storage.sqlite_store import SQLiteStorage
@@ -73,6 +74,49 @@ class TestGovernanceAndFederation(unittest.TestCase):
         rels = self.storage.list_relationships(source_id=obj_original.id, relation_type=RelationType.SIMILAR_TO.value) + \
                self.storage.list_relationships(target_id=obj_original.id, relation_type=RelationType.SIMILAR_TO.value)
         self.assertTrue(len(rels) >= 1)
+
+    def test_duplicate_detection_auto_link_is_idempotent_under_concurrent_scans(self):
+        """Repeated and concurrent scans persist one symmetric similarity edge."""
+        first = self.storage.save_object(DataObject(
+            type="document",
+            properties={"title": "Shared report"},
+            content="shared duplicate payload",
+        ))
+        second = self.storage.save_object(DataObject(
+            type="document",
+            properties={"title": "Shared report"},
+            content="shared duplicate payload",
+        ))
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            list(executor.map(
+                lambda _: self.deduplication.find_duplicates(
+                    min_similarity=1.0,
+                    auto_link_graph=True,
+                ),
+                range(2),
+            ))
+
+        def matching_edges():
+            return [
+                rel
+                for rel in self.storage.list_relationships(
+                    relation_type=RelationType.SIMILAR_TO.value,
+                    limit=100,
+                )
+                if {rel.source, rel.target} == {first.id, second.id}
+            ]
+
+        self.assertEqual(len(matching_edges()), 1)
+
+        # A target-scoped scan reverses the pair orientation; it must reuse
+        # the same undirected edge rather than create a second relationship.
+        self.deduplication.find_duplicates(
+            target_object_id=first.id,
+            min_similarity=1.0,
+            auto_link_graph=True,
+        )
+        self.assertEqual(len(matching_edges()), 1)
 
     def test_empty_content_does_not_match_other_empty_documents(self):
         """Blank payloads provide no evidence that two different objects are duplicates."""
