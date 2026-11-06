@@ -127,7 +127,7 @@ export default function DataspacePage() {
 
         const objects = (objsRes.objects || []).map((o: any) => ({
           id: o.id,
-          type: typeMap[o.type] || "dataset",
+          type: (typeMap[o.type] || "dataset") as import("@/hooks/useSpatialStore").ObjectType,
           name: o.properties?.filename || o.properties?.name || o.id.slice(0, 8),
           properties: o.properties || {},
         }));
@@ -218,3 +218,4 @@ export default function DataspacePage() {
     </div>
   );
 }
+

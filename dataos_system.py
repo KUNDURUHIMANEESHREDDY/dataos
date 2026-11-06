@@ -45,6 +45,14 @@ from engines.profiling.profiler import DataProfiler
 from engines.quality.quality_engine import DataQualityEngine
 from engines.provenance.explanation_engine import ExplanationEngine
 from engines.query.ask_dataos import AskDataOSEngine
+from engines.catalog.catalog_engine import DataCatalogEngine
+from engines.catalog.data_catalog import DataCatalog
+from engines.diff.data_diff_engine import DataDiffEngine, DiffEngineManager
+from engines.diff.diff_engine import SemanticDiffEngine
+from engines.usage.tracker import UsageTracker
+from engines.actions.registry import ActionsRegistry, register_builtin_actions
+from engines.governance.deduplication import DuplicateDetectionEngine
+from engines.governance.data_contracts import DataContractsManager, ContractValidator
 
 # Runtime & Intelligence
 from intelligence.discovery.engine import RelationshipDiscoveryEngine
@@ -213,6 +221,18 @@ class DataOS:
         self.rate_limiter = RateLimiter()
         self.dashboard = DashboardCapture()
         self.discovery_engine = AutoDiscoveryEngine()
+        # Previously-unwired engines (catalog, diff, usage, actions, governance)
+        self.catalog_engine = DataCatalogEngine(self.storage)
+        self.catalog = DataCatalog()
+        self.diff_engine = DataDiffEngine()
+        self.diff_manager = DiffEngineManager()
+        self.semantic_diff = SemanticDiffEngine()
+        self.usage = UsageTracker()
+        self.actions = ActionsRegistry()
+        register_builtin_actions(self.actions)
+        self.duplicates = DuplicateDetectionEngine(self.storage)
+        self.contracts = DataContractsManager()
+        self.contract_validator = ContractValidator()
 
     @classmethod
     def from_url(cls, db_url: str, blob_dir: str = ".dataos_blobs") -> DataOS:
@@ -305,6 +325,21 @@ class DataOS:
     def check_rate_limit(self, api_key: str) -> Dict[str, Any]:
         """Check API rate limit for a given key."""
         return self.rate_limiter.allow(api_key)
+
+    def catalog_summary(self) -> Dict[str, Any]:
+        return self.catalog_engine.get_catalog_summary()
+
+    def find_duplicates(self, object_id: Optional[str] = None, min_similarity: float = 0.75) -> List[Dict[str, Any]]:
+        return self.duplicates.find_duplicates(target_object_id=object_id, min_similarity=min_similarity)
+
+    def diff_objects(self, source: List[Dict[str, Any]], target: List[Dict[str, Any]], primary_key: str = "id") -> Dict[str, Any]:
+        return self.diff_engine.diff_rows(source, target, primary_key=primary_key).to_dict()
+
+    def usage_stats(self) -> Dict[str, Any]:
+        return self.usage.get_stats()
+
+    def list_actions(self, object_type: Optional[str] = None) -> List[Dict[str, Any]]:
+        return self.actions.list_for_object_type(object_type) if object_type else self.actions.list_all()
 
     def close(self):
         """Release all resources (storage connections, vector index)."""
