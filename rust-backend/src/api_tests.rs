@@ -1085,3 +1085,24 @@ async fn object_creation_recomputes_server_managed_hash_and_validates_metadata()
     ).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "invalid metadata shape was accepted: {body}");
 }
+
+
+#[test]
+fn principal_scoped_research_routes_are_not_admin_only_aggregates() {
+    assert!(
+        !crate::is_global_data_route("/api/knowledge/query"),
+        "knowledge retrieval enforces object ownership and should remain available to authorized analysts"
+    );
+    assert!(
+        !crate::is_global_data_route("/api/agents/pipeline/research"),
+        "the research pipeline registers and queries only the caller's datasets"
+    );
+    assert!(
+        crate::is_global_data_route("/api/compute/sql"),
+        "unscoped SQL must remain admin-only until its query contract is principal-scoped"
+    );
+    assert!(
+        crate::is_global_data_route("/api/io/export"),
+        "global export must remain admin-only"
+    );
+}
