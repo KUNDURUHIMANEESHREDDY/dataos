@@ -142,24 +142,21 @@ async fn security_middleware(
     let has_bearer = !token.is_empty();
 
     if production {
-        let shared_ok = shared_token().map(|expected| token == expected).unwrap_or(false);
-        if !shared_ok {
-            if !jwt_configured() {
-                return json_error_response(StatusCode::SERVICE_UNAVAILABLE, "Production API authentication is unavailable; configure either DATAOS_API_TOKEN or DATAOS_JWT_SECRET (each with at least 32 UTF-8 bytes).");
-            }
-            if !has_bearer {
-                return json_error_response(StatusCode::UNAUTHORIZED, "A bearer token is required.");
-            }
-            match decode_token(&token) {
-                Ok(claims) => {
-                    match state.db.user_by_id(&claims.sub) {
-                        Ok(Some(found)) => user = Some(found),
-                        Ok(None) => return json_error_response(StatusCode::UNAUTHORIZED, "Unknown user."),
-                        Err(_) => return json_error_response(StatusCode::UNAUTHORIZED, "Unable to resolve the authenticated user."),
-                    }
-                }
-                Err(error) => return json_error_response(StatusCode::UNAUTHORIZED, &error),
-            }
+        // A shared API token authenticates an application, not an individual
+        // principal. Production data routes require a resolvable user identity.
+        if !jwt_configured() {
+            return json_error_response(StatusCode::SERVICE_UNAVAILABLE, "Production user authentication is unavailable; configure DATAOS_JWT_SECRET with at least 32 UTF-8 bytes.");
+        }
+        if !has_bearer {
+            return json_error_response(StatusCode::UNAUTHORIZED, "A user bearer token is required.");
+        }
+        match decode_token(&token) {
+            Ok(claims) => match state.db.user_by_id(&claims.sub) {
+                Ok(Some(found)) => user = Some(found),
+                Ok(None) => return json_error_response(StatusCode::UNAUTHORIZED, "Unknown user."),
+                Err(_) => return json_error_response(StatusCode::UNAUTHORIZED, "Unable to resolve the authenticated user."),
+            },
+            Err(error) => return json_error_response(StatusCode::UNAUTHORIZED, &error),
         }
     } else if jwt_configured() && has_bearer {
         match decode_token(&token) {
@@ -721,15 +718,43 @@ fn build_router(state: AppState) -> Router {
         .fallback(fallback_route)
 }
 
-async fn list_objects(State(state): State<AppState>, Query(params): Query<ListParams>) -> Result<Json<Value>, ApiError> {
+async fn list_objects(
+    State(state): State<AppState>,
+    Extension(CurrentUser(user)): Extension<CurrentUser>,
+    Query(params): Query<ListParams>,
+) -> Result<Json<Value>, ApiError> {
     let limit = clamp_i64(params.limit, 100, 1, 500);
     let offset = clamp_i64(params.offset, 0, 0, 1_000_000);
-    let objects = state.db.list_objects(params.object_type.as_deref(), params.source.as_deref(), limit, offset).map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    let total = state.db.count_objects(params.object_type.as_deref(), params.source.as_deref()).map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let (objects, total) = if let Some(user) = user {
+        if user.role == "admin" {
+            (
+                state.db.list_objects(params.object_type.as_deref(), params.source.as_deref(), limit, offset),
+                state.db.count_objects(params.object_type.as_deref(), params.source.as_deref()),
+            )
+        } else {
+            let all = state.db.list_objects_for_owner(&user.id, params.object_type.as_deref(), 10000, 0)
+                .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+            let filtered: Vec<Value> = all.into_iter().filter(|object| params.source.as_deref().map(|source| object.get("source").and_then(Value::as_str).unwrap_or("").contains(source)).unwrap_or(true)).collect();
+            let total = filtered.len() as i64;
+            let objects = filtered.into_iter().skip(offset as usize).take(limit as usize).collect();
+            (Ok(objects), Ok(total))
+        }
+    } else {
+        (
+            state.db.list_objects(params.object_type.as_deref(), params.source.as_deref(), limit, offset),
+            state.db.count_objects(params.object_type.as_deref(), params.source.as_deref()),
+        )
+    };
+    let objects = objects.map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let total = total.map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     ok_json(json!({"total": total, "objects": objects}))
 }
 
-async fn create_object(State(state): State<AppState>, Json(req): Json<ObjectCreateRequest>) -> Result<Json<Value>, ApiError> {
+async fn create_object(
+    State(state): State<AppState>,
+    Extension(CurrentUser(user)): Extension<CurrentUser>,
+    Json(req): Json<ObjectCreateRequest>,
+) -> Result<Json<Value>, ApiError> {
     let object = state.db.create_object(
         req.object_type.as_deref().unwrap_or("document"),
         req.schema_ref.as_deref().unwrap_or("generic.v1"),
@@ -738,33 +763,92 @@ async fn create_object(State(state): State<AppState>, Json(req): Json<ObjectCrea
         req.source.as_deref().unwrap_or("api://rust"),
         req.metadata.unwrap_or(json!({})),
     ).map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let object = if let Some(user) = user {
+        state.db.set_object_owner(object["id"].as_str().unwrap_or_default(), &user.id)
+            .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?
+            .ok_or_else(|| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "Created object disappeared before ownership was assigned."))?
+    } else { object };
     ok_json(object)
 }
 
-async fn get_object(State(state): State<AppState>, Path(object_id): Path<String>) -> Result<Json<Value>, ApiError> {
-    state.db.get_object(&object_id)
+async fn get_object(
+    State(state): State<AppState>,
+    Extension(CurrentUser(user)): Extension<CurrentUser>,
+    Path(object_id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let object = state.db.get_object(&object_id)
         .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?
-        .map(Json)
-        .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "Object not found"))
+        .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "Object not found"))?;
+    if let Some(user) = user {
+        let allowed = state.db.can_access_object(&object_id, &user.id, user.role == "admin")
+            .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        if !allowed { return Err(ApiError::new(StatusCode::NOT_FOUND, "Object not found")); }
+    }
+    Ok(Json(object))
 }
 
-async fn delete_object(State(state): State<AppState>, Path(object_id): Path<String>, Query(params): Query<DeleteParams>) -> Result<Json<Value>, ApiError> {
+async fn delete_object(
+    State(state): State<AppState>,
+    Extension(CurrentUser(user)): Extension<CurrentUser>,
+    Path(object_id): Path<String>,
+    Query(params): Query<DeleteParams>,
+) -> Result<Json<Value>, ApiError> {
+    if let Some(user) = user {
+        let allowed = state.db.can_access_object(&object_id, &user.id, user.role == "admin")
+            .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        if !allowed { return Err(ApiError::new(StatusCode::NOT_FOUND, "Object not found")); }
+    }
     let soft = params.soft.unwrap_or(true);
     let deleted = state.db.delete_object(&object_id, soft).map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     if !deleted { return Err(ApiError::new(StatusCode::NOT_FOUND, "Object not found or already deleted")); }
     ok_json(json!({"status": "deleted", "object_id": object_id, "soft": soft}))
 }
 
-async fn list_relationships(State(state): State<AppState>, Query(params): Query<RelationshipParams>) -> Result<Json<Value>, ApiError> {
+async fn list_relationships(
+    State(state): State<AppState>,
+    Extension(CurrentUser(user)): Extension<CurrentUser>,
+    Query(params): Query<RelationshipParams>,
+) -> Result<Json<Value>, ApiError> {
     let limit = clamp_i64(params.limit, 1000, 1, 1000);
     let offset = clamp_i64(params.offset, 0, 0, 1_000_000);
     let confidence = params.min_confidence.unwrap_or(0.0).clamp(0.0, 1.0);
-    let relationships = state.db.list_relationships(params.source_id.as_deref(), params.target_id.as_deref(), params.relation_type.as_deref(), confidence, limit, offset).map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    let total = state.db.count_relationships(params.source_id.as_deref(), params.target_id.as_deref(), params.relation_type.as_deref(), confidence).map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let mut relationships = state.db.list_relationships(params.source_id.as_deref(), params.target_id.as_deref(), params.relation_type.as_deref(), confidence, limit, offset)
+        .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let total = if let Some(user) = user {
+        if user.role == "admin" {
+            state.db.count_relationships(params.source_id.as_deref(), params.target_id.as_deref(), params.relation_type.as_deref(), confidence)
+                .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?
+        } else {
+            relationships.retain(|rel| {
+                let source = rel.get("source").and_then(Value::as_str).unwrap_or_default();
+                let target = rel.get("target").and_then(Value::as_str).unwrap_or_default();
+                state.db.can_access_object(source, &user.id, false).unwrap_or(false)
+                    && state.db.can_access_object(target, &user.id, false).unwrap_or(false)
+            });
+            relationships.len() as i64
+        }
+    } else {
+        state.db.count_relationships(params.source_id.as_deref(), params.target_id.as_deref(), params.relation_type.as_deref(), confidence)
+            .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?
+    };
     ok_json(json!({"total": total, "relationships": relationships}))
 }
 
-async fn create_relationship(State(state): State<AppState>, Json(req): Json<RelationshipCreateRequest>) -> Result<Json<Value>, ApiError> {
+async fn create_relationship(
+    State(state): State<AppState>,
+    Extension(CurrentUser(user)): Extension<CurrentUser>,
+    Json(req): Json<RelationshipCreateRequest>,
+) -> Result<Json<Value>, ApiError> {
+    if let Some(user) = user {
+        let admin = user.role == "admin";
+        for object_id in [&req.source_id, &req.target_id] {
+            let allowed = state.db.can_access_object(object_id, &user.id, admin)
+                .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+            if !allowed {
+                return Err(ApiError::new(StatusCode::NOT_FOUND, "One or more relationship objects were not found."));
+            }
+        }
+    }
     let rel = state.db.create_relationship(
         &req.source_id,
         &req.target_id,
