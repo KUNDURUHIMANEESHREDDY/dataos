@@ -12,7 +12,7 @@ import uuid
 import datetime
 import hmac
 import threading
-from typing import Dict, Any, List, Optional
+from typing import Annotated, Dict, Any, List, Optional
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Depends, Header, Request, Query as FastQuery
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -630,7 +630,7 @@ async def execute_workflow(req: WorkflowExecutionRequest):
 @app.get("/api/governance/duplicates", summary="Fuzzy Duplicate Detection (Rule #58)")
 async def detect_duplicates_api(
     object_id: Optional[str] = None,
-    min_similarity: float = FastQuery(default=0.75, gt=0.0, le=1.0),
+    min_similarity: Annotated[float, FastQuery(gt=0.0, le=1.0)] = 0.75,
 ):
     """Return duplicate candidates without mutating the graph from a GET request."""
     if object_id is not None:
