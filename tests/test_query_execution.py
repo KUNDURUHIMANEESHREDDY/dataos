@@ -69,6 +69,20 @@ class TestQueryExecution(unittest.TestCase):
                 )
                 self.assertFalse(result["success"])
 
+    def test_sql_engine_rejects_extension_and_file_functions(self):
+        """Untrusted SQL must not load extensions or access SQLite file helpers."""
+        forbidden_queries = (
+            "SELECT load_extension('untrusted-extension')",
+            "SELECT readfile('/etc/passwd')",
+            "SELECT writefile('/tmp/dataos-sql-test', 'x')",
+            "SELECT fts3_tokenizer('simple')",
+        )
+        for query in forbidden_queries:
+            with self.subTest(query=query):
+                result = self.sql_engine.execute_sql(query, table_objects=[self.dataset])
+                self.assertFalse(result["success"])
+                self.assertIn("not authorized", result["error"].lower())
+
     def test_sql_engine_rejects_multiple_statements(self):
         result = self.sql_engine.execute_sql(
             "SELECT 1; DROP TABLE employees",
