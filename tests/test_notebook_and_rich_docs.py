@@ -21,7 +21,8 @@ from engines.search.vector_index import PersistentVectorIndex, TFIDFVectorEmbedd
 class TestNotebookAndRichDocs(unittest.TestCase):
 
     def setUp(self):
-        self.temp_db = tempfile.mktemp(suffix=".db")
+        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as temp_db:
+            self.temp_db = temp_db.name
         self.storage = SQLiteStorage(db_path=self.temp_db)
         self.vector_index = PersistentVectorIndex(db_path=self.temp_db)
 

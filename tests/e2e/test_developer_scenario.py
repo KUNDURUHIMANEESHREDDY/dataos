@@ -23,7 +23,8 @@ from core.relation.model import RelationType
 class TestDeveloperScenario(unittest.TestCase):
 
     def setUp(self):
-        self.temp_db = tempfile.mktemp(suffix=".db")
+        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as temp_db:
+            self.temp_db = temp_db.name
         self.dataos = DataOS(db_path=self.temp_db)
 
     def test_developer_codebase_impact_journey(self):
