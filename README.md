@@ -6,7 +6,7 @@ graph**, and **first-class provenance** — every derived result traceable back 
 The design principle, stated in `context/ai-workflow-rules.md`: **AI is an operator over the graph, never an
 authority over it.**
 
-> **Backend status:** the Docker backend now targets the Rust/Axum implementation in `rust-backend/`, which implements storage, auth, objects/relationships, graph traversal, time-travel, lineage, profiling, quality, sharing tokens, vector search, sync conflict resolution, bounded workflows, agent dispatch, safe read-only SQL, and ingest. It is not yet feature-for-feature with the Python backend; unimplemented routes (Ask/RAG, Python compute, LLM agents) return HTTP 501. Python backend remains as a legacy reference until Rust parity is complete. Remaining production risks are per-object authorization, secrets/operations, TLS/reverse proxy, and live deployment testing.
+> **Backend status:** the Docker backend now targets the Rust/Axum implementation in `rust-backend/`, which now declares **every route** in the Python `backend/app.py` / `backend/knowledge_rag.py` surface: storage, auth, objects/relationships, graph traversal, time-travel, lineage, profiling, quality, sharing tokens, vector search, sync conflict resolution, bounded workflows, agent dispatch, the 4-stage research pipeline, scoped knowledge retrieval, safe read-only SQL, and ingest. Routes whose engine has no Rust equivalent (Ask/RAG, Python compute, LLM-backed agents, model-backed embeddings) return HTTP 501 with an explicit message rather than fabricating results. Python backend remains as a legacy reference. Remaining production risks are per-object authorization, secrets/operations, TLS/reverse proxy, and live deployment testing.
 
 ---
 

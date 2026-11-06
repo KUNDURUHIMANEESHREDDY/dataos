@@ -4,7 +4,10 @@
 //! Anything that cannot be implemented faithfully without the Python/LLM
 //! runtime is left to the router fallback (HTTP 501) instead of being faked.
 
+use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::OnceLock;
+use std::time::Instant;
 
 use axum::{
     Json,
@@ -723,6 +726,43 @@ pub(crate) async fn quality(
         Some(rules) if !rules.is_empty() => rules,
         _ => vec![json!({"type": "row_count_min", "min_rows": 1})],
     };
+    let checks = evaluate_quality_checks(&columns, &rows, rules)?;
+
+    let total_checks = checks.len();
+    let passed_checks = checks
+        .iter()
+        .filter(|entry| entry.get("passed").and_then(Value::as_bool).unwrap_or(false))
+        .count();
+    let failed_checks = total_checks - passed_checks;
+    let report = state
+        .db
+        .create_object(
+            "quality_report",
+            "quality_report.v1",
+            json!({
+                "target_object_id": object_id,
+                "overall_pass": failed_checks == 0,
+                "quality_score": round4(passed_checks as f64 / total_checks.max(1) as f64 * 100.0),
+                "total_checks": total_checks,
+                "passed_checks": passed_checks,
+                "failed_checks": failed_checks,
+                "evaluated_at": now_rfc3339()
+            }),
+            json!({"checks": checks}),
+            "dataos://engine/quality",
+            json!({}),
+        )
+        .map_err(internal)?;
+    Ok(Json(report))
+}
+
+/// Evaluate quality rules against tabular rows. Shared by `POST /api/quality/{id}`
+/// and stage 3 of the research pipeline.
+fn evaluate_quality_checks(
+    columns: &[String],
+    rows: &[Vec<Value>],
+    rules: Vec<Value>,
+) -> Result<Vec<Value>, ApiError> {
     let total_rows = rows.len();
     let column_index: HashMap<&str, usize> = columns
         .iter()
@@ -865,32 +905,692 @@ pub(crate) async fn quality(
         }
     }
 
-    let total_checks = checks.len();
-    let passed_checks = checks
+    Ok(checks)
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/knowledge/query — scoped evidence retrieval
+// ---------------------------------------------------------------------------
+
+const STOP_WORDS: &[&str] = &[
+    "about", "after", "again", "also", "and", "are", "been", "before", "between", "both", "but",
+    "can", "could", "does", "for", "from", "have", "into", "its", "more", "most", "not", "our",
+    "out", "over", "same", "should", "some", "such", "than", "that", "the", "their", "them",
+    "then", "there", "these", "they", "this", "those", "through", "under", "use", "using", "was",
+    "were", "what", "when", "where", "which", "while", "who", "why", "will", "with", "would",
+    "you", "your",
+];
+
+const TEXT_PROPERTY_KEYS: &[&str] = &[
+    "filename",
+    "name",
+    "title",
+    "description",
+    "summary",
+    "text",
+    "extracted_text",
+    "raw_text",
+    "content_text",
+    "raw_csv",
+];
+
+fn query_terms(query: &str) -> Vec<String> {
+    static TOKENS: OnceLock<regex::Regex> = OnceLock::new();
+    let pattern = TOKENS.get_or_init(|| regex::Regex::new(r"[a-zA-Z0-9_]{2,}").expect("valid token pattern"));
+    pattern
+        .find_iter(query)
+        .map(|found| found.as_str().to_lowercase())
+        .filter(|term| !STOP_WORDS.contains(&term.as_str()))
+        .collect()
+}
+
+fn rank_text(query: &str, text: &str) -> f64 {
+    let terms: HashSet<String> = query_terms(query).into_iter().collect();
+    if terms.is_empty() || text.is_empty() {
+        return 0.0;
+    }
+    let lowered = text.to_lowercase();
+    let matched: Vec<&String> = terms
         .iter()
-        .filter(|entry| entry.get("passed").and_then(Value::as_bool).unwrap_or(false))
-        .count();
-    let failed_checks = total_checks - passed_checks;
+        .filter(|term| lowered.contains(term.as_str()))
+        .collect();
+    if matched.is_empty() {
+        return 0.0;
+    }
+    let coverage = matched.len() as f64 / terms.len() as f64;
+    let frequency: usize = matched
+        .iter()
+        .map(|term| lowered.matches(term.as_str()).count().min(4))
+        .sum();
+    let freq_ratio = (frequency as f64 / (terms.len().max(1) * 2) as f64).min(1.0);
+    round4(0.8 * coverage + 0.2 * freq_ratio)
+}
+
+fn find_char(haystack: &[char], needle: &[char]) -> Option<usize> {
+    if needle.is_empty() || needle.len() > haystack.len() {
+        return None;
+    }
+    (0..=haystack.len() - needle.len()).find(|&index| &haystack[index..index + needle.len()] == needle)
+}
+
+fn extract_snippet(text: &str, query: &str, max_chars: usize) -> String {
+    let compact: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let chars: Vec<char> = compact.chars().collect();
+    if chars.len() <= max_chars {
+        return compact;
+    }
+    let lowered: Vec<char> = compact.to_lowercase().chars().collect();
+    let hits: Vec<usize> = query_terms(query)
+        .iter()
+        .filter_map(|term| find_char(&lowered, &term.chars().collect::<Vec<_>>()))
+        .collect();
+    if hits.is_empty() {
+        let truncated: String = chars.iter().take(max_chars).collect();
+        return format!("{}\u{2026}", truncated.trim_end());
+    }
+
+    let mut start = hits.into_iter().min().unwrap_or(0).saturating_sub(max_chars / 4);
+    if start > 0 {
+        start = match chars[start..].iter().position(|&c| c == ' ') {
+            Some(offset) => start + offset,
+            None => 0,
+        };
+    }
+    let mut end = chars.len().min(start + max_chars);
+    if end < chars.len() {
+        if let Some(space) = (start..end).rev().find(|&index| chars[index] == ' ') {
+            if space > start {
+                end = space;
+            }
+        }
+    }
+    let body: String = chars[start..end].iter().collect();
+    format!(
+        "{}{}{}",
+        if start > 0 { "\u{2026}" } else { "" },
+        body.trim(),
+        if end < chars.len() { "\u{2026}" } else { "" }
+    )
+}
+
+fn flatten_value(value: &Value, limit: usize) -> String {
+    let text = match value {
+        Value::String(text) => text.clone(),
+        other => serde_json::to_string(other).unwrap_or_default(),
+    };
+    text.chars().take(limit).collect()
+}
+
+/// Same property-key precedence as the Python `object_text`.
+fn knowledge_object_text(object: &Value) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(properties) = object.get("properties") {
+        for key in TEXT_PROPERTY_KEYS {
+            if let Some(value) = properties.get(*key) {
+                if !value.is_null() {
+                    let flat = flatten_value(value, 30_000);
+                    if !flat.is_empty() {
+                        parts.push(flat);
+                    }
+                }
+            }
+        }
+    }
+    if let Some(content) = object.get("content") {
+        let flat = flatten_value(content, 100_000);
+        if !flat.is_empty() {
+            parts.push(flat);
+        }
+    }
+    parts
+        .join("\n")
+        .trim()
+        .chars()
+        .take(120_000)
+        .collect::<String>()
+}
+
+fn display_name(object: &Value, fallback: &str) -> String {
+    object
+        .pointer("/properties/filename")
+        .or_else(|| object.pointer("/properties/name"))
+        .or_else(|| object.pointer("/properties/title"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_else(|| fallback.to_string())
+}
+
+fn resolve_related_files(
+    selected_ids: &[String],
+    relationships: &[Value],
+    max_related: usize,
+    min_confidence: f64,
+) -> Vec<Value> {
+    let selected: HashSet<&str> = selected_ids.iter().map(String::as_str).collect();
+    let mut candidates: HashMap<String, Value> = HashMap::new();
+
+    for relation in relationships {
+        let source = relation.get("source").and_then(Value::as_str);
+        let target = relation.get("target").and_then(Value::as_str);
+        let (Some(source), Some(target)) = (source, target) else {
+            continue;
+        };
+        let confidence = relation
+            .get("confidence")
+            .and_then(Value::as_f64)
+            .unwrap_or(1.0);
+        if confidence < min_confidence {
+            continue;
+        }
+        let neighbor = if selected.contains(source) && !selected.contains(target) {
+            Some(target)
+        } else if selected.contains(target) && !selected.contains(source) {
+            Some(source)
+        } else {
+            None
+        };
+        let Some(neighbor) = neighbor else { continue };
+        let connected_to = if selected.contains(source) { source } else { target };
+        let relationship_type = relation
+            .get("relation_type")
+            .or_else(|| relation.get("type"))
+            .and_then(Value::as_str)
+            .unwrap_or("related_to")
+            .to_string();
+
+        let candidate = json!({
+            "file_id": neighbor,
+            "confidence": confidence,
+            "relationship_type": relationship_type,
+            "connected_to": connected_to
+        });
+        let better = match candidates.get(neighbor) {
+            Some(existing) => {
+                confidence > existing.get("confidence").and_then(Value::as_f64).unwrap_or(0.0)
+            }
+            None => true,
+        };
+        if better {
+            candidates.insert(neighbor.to_string(), candidate);
+        }
+    }
+
+    let mut resolved: Vec<Value> = candidates.into_values().collect();
+    resolved.sort_by(|left, right| {
+        let left_conf = left.get("confidence").and_then(Value::as_f64).unwrap_or(0.0);
+        let right_conf = right.get("confidence").and_then(Value::as_f64).unwrap_or(0.0);
+        right_conf
+            .partial_cmp(&left_conf)
+            .unwrap_or(Ordering::Equal)
+            .then_with(|| {
+                left.get("file_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .cmp(right.get("file_id").and_then(Value::as_str).unwrap_or(""))
+            })
+    });
+    resolved.truncate(max_related);
+    resolved
+}
+
+#[derive(Deserialize)]
+pub struct KnowledgeQueryRequest {
+    query: String,
+    selected_file_ids: Vec<String>,
+    include_related: Option<bool>,
+    max_related_files: Option<i64>,
+    min_confidence: Option<f64>,
+}
+
+pub(crate) async fn knowledge_query(
+    State(state): State<AppState>,
+    Json(request): Json<KnowledgeQueryRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let unprocessable =
+        |message: &str| ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, message.to_string());
+    if request.query.is_empty() || request.query.len() > 4000 {
+        return Err(unprocessable("query must be between 1 and 4000 characters"));
+    }
+    if request.selected_file_ids.is_empty() || request.selected_file_ids.len() > 200 {
+        return Err(unprocessable(
+            "selected_file_ids must contain between 1 and 200 ids",
+        ));
+    }
+    let include_related = request.include_related.unwrap_or(true);
+    let max_related = clamp_i64(request.max_related_files, 10, 0, 50) as usize;
+    let min_confidence = request.min_confidence.unwrap_or(0.75).clamp(0.0, 1.0);
+
+    let mut selected_ids: Vec<String> = Vec::new();
+    let mut seen_ids: HashSet<String> = HashSet::new();
+    for file_id in &request.selected_file_ids {
+        if seen_ids.insert(file_id.clone()) {
+            selected_ids.push(file_id.clone());
+        }
+    }
+
+    let mut selected: HashMap<String, Value> = HashMap::new();
+    let mut missing: Vec<String> = Vec::new();
+    for file_id in &selected_ids {
+        match state.db.get_object(file_id).map_err(internal)? {
+            Some(object) => {
+                selected.insert(file_id.clone(), object);
+            }
+            None => missing.push(file_id.clone()),
+        }
+    }
+    if !missing.is_empty() {
+        return Err(ApiError::with_detail(
+            StatusCode::NOT_FOUND,
+            json!({
+                "message": "One or more selected files no longer exist.",
+                "missing_file_ids": missing
+            }),
+        ));
+    }
+
+    let mut relationships: Vec<Value> = Vec::new();
+    if include_related && max_related > 0 {
+        let mut seen_relationships: HashSet<String> = HashSet::new();
+        for file_id in &selected_ids {
+            let outgoing = state
+                .db
+                .list_relationships(Some(file_id), None, None, 0.0, 5000, 0)
+                .map_err(internal)?;
+            let incoming = state
+                .db
+                .list_relationships(None, Some(file_id), None, 0.0, 5000, 0)
+                .map_err(internal)?;
+            for relation in outgoing.into_iter().chain(incoming) {
+                let key = format!(
+                    "{}|{}|{}|{}",
+                    relation.get("id").and_then(Value::as_str).unwrap_or(""),
+                    relation.get("source").and_then(Value::as_str).unwrap_or(""),
+                    relation.get("target").and_then(Value::as_str).unwrap_or(""),
+                    relation
+                        .get("relation_type")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                );
+                if seen_relationships.insert(key) {
+                    relationships.push(relation);
+                }
+            }
+        }
+    }
+
+    let related = resolve_related_files(
+        &selected_ids,
+        &relationships,
+        if include_related { max_related } else { 0 },
+        min_confidence,
+    );
+
+    let mut related_objects: HashMap<String, Value> = HashMap::new();
+    for item in &related {
+        let file_id = item.get("file_id").and_then(Value::as_str).unwrap_or("");
+        if let Some(object) = state.db.get_object(file_id).map_err(internal)? {
+            related_objects.insert(file_id.to_string(), object);
+        }
+    }
+
+    // Python merges `{**selected, **related_objects}`: selected order first.
+    let mut eligible: Vec<(String, Value)> = Vec::new();
+    for file_id in &selected_ids {
+        if let Some(object) = selected.get(file_id) {
+            eligible.push((file_id.clone(), object.clone()));
+        }
+    }
+    for item in &related {
+        let file_id = item.get("file_id").and_then(Value::as_str).unwrap_or("");
+        if !selected.contains_key(file_id) {
+            if let Some(object) = related_objects.get(file_id) {
+                eligible.push((file_id.to_string(), object.clone()));
+            }
+        }
+    }
+
+    let mut evidence: Vec<Value> = Vec::new();
+    for (file_id, object) in &eligible {
+        let text = knowledge_object_text(object);
+        let score = rank_text(&request.query, &text);
+        if text.is_empty() || score <= 0.0 {
+            continue;
+        }
+        let is_selected = selected.contains_key(file_id);
+        let related_info = related
+            .iter()
+            .find(|item| item.get("file_id").and_then(Value::as_str) == Some(file_id.as_str()))
+            .cloned();
+        let inclusion_reason = match &related_info {
+            Some(info) if !is_selected => format!(
+                "{} ({:.2})",
+                info.get("relationship_type").and_then(Value::as_str).unwrap_or("related_to"),
+                info.get("confidence").and_then(Value::as_f64).unwrap_or(1.0)
+            ),
+            _ => "explicitly selected".to_string(),
+        };
+        evidence.push(json!({
+            "file_id": file_id,
+            "name": display_name(object, file_id),
+            "score": score,
+            "excerpt": extract_snippet(&text, &request.query, 720),
+            "selected": is_selected,
+            "inclusion_reason": inclusion_reason,
+            "relationship": related_info
+        }));
+    }
+    evidence.sort_by(|left, right| {
+        right
+            .get("score")
+            .and_then(Value::as_f64)
+            .unwrap_or(0.0)
+            .partial_cmp(&left.get("score").and_then(Value::as_f64).unwrap_or(0.0))
+            .unwrap_or(Ordering::Equal)
+            .then_with(|| {
+                left.get("selected")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+                    .cmp(&right.get("selected").and_then(Value::as_bool).unwrap_or(false))
+                    .reverse()
+            })
+            .then_with(|| {
+                left.get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_lowercase()
+                    .cmp(
+                        &right
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_lowercase(),
+                    )
+            })
+    });
+    evidence.truncate(12);
+
+    let related_response: Vec<Value> = related
+        .iter()
+        .filter(|item| {
+            let file_id = item.get("file_id").and_then(Value::as_str).unwrap_or("");
+            related_objects.contains_key(file_id)
+        })
+        .map(|item| {
+            let mut entry = item.clone();
+            let file_id = item.get("file_id").and_then(Value::as_str).unwrap_or("");
+            if let Some(object) = related_objects.get(file_id) {
+                entry["name"] = json!(display_name(object, file_id));
+            }
+            entry
+        })
+        .collect();
+
+    let eligible_ids: Vec<&str> = eligible.iter().map(|(id, _)| id.as_str()).collect();
+    let answer = if evidence.is_empty() {
+        "No matching text was found inside the selected files or their eligible related files. Try a more specific query or inspect the stored document content."
+            .to_string()
+    } else {
+        format!(
+            "Retrieved {} matching evidence passages from {} eligible files. Results are restricted to selected files and the configured one-hop related-file set.",
+            evidence.len(),
+            eligible.len()
+        )
+    };
+
+    Ok(Json(json!({
+        "query": request.query,
+        "mode": "scoped_evidence_retrieval",
+        "selected_file_ids": selected_ids,
+        "related_files": related_response,
+        "eligible_file_ids": eligible_ids,
+        "eligible_file_count": eligible.len(),
+        "evidence": evidence,
+        "answer": answer,
+        "generation_available": false,
+        "generation_note": "This endpoint currently performs scope-constrained evidence retrieval. Provider-backed answer synthesis is not wired into the current DataOS API, so it does not call the global /api/ask endpoint or claim an LLM-generated answer."
+    })))
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/agents/pipeline/research — 4-stage deterministic pipeline
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+pub struct ResearchPipelineRequest {
+    goal_prompt: String,
+    target_dataset_id: String,
+    analysis_sql_or_python: String,
+    quality_rules: Option<Vec<Value>>,
+}
+
+fn ms_since(start: Instant) -> f64 {
+    round4(start.elapsed().as_secs_f64() * 1_000.0)
+}
+
+/// Python-style repr, truncated, used by the deterministic report provider.
+fn py_repr(value: &Value) -> String {
+    match value {
+        Value::Null => "None".to_string(),
+        Value::Bool(true) => "True".to_string(),
+        Value::Bool(false) => "False".to_string(),
+        Value::Number(number) => number.to_string(),
+        Value::String(text) => format!("'{}'", text.replace('\\', "\\\\").replace('\'', "\\'")),
+        Value::Array(items) => format!(
+            "[{}]",
+            items.iter().map(py_repr).collect::<Vec<_>>().join(", ")
+        ),
+        Value::Object(map) => format!(
+            "{{{}}}",
+            map.iter()
+                .map(|(key, value)| format!("'{}': {}", key, py_repr(value)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
+}
+
+fn py_str_short(value: &Value) -> String {
+    py_repr(value).chars().take(60).collect()
+}
+
+pub(crate) async fn pipeline_research(
+    State(state): State<AppState>,
+    Json(request): Json<ResearchPipelineRequest>,
+) -> Result<Json<Value>, ApiError> {
+    if request.goal_prompt.trim().is_empty() {
+        return Err(ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "goal_prompt must be a non-empty string",
+        ));
+    }
+    if request.target_dataset_id.trim().is_empty() {
+        return Err(ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "target_dataset_id must be a non-empty string",
+        ));
+    }
+
+    let started = Instant::now();
+    let pipeline_id = format!(
+        "pipeline_{}",
+        &uuid::Uuid::new_v4().simple().to_string()[..8]
+    );
+    let mut stages: Vec<Value> = Vec::new();
+
+    // Stage 1 — research agent: search for contextual objects.
+    let stage_started = Instant::now();
+    let search_result = search_objects(&state.db, &request.goal_prompt, 5);
+    let found_objects = search_result
+        .get("total_matches")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    stages.push(json!({
+        "stage": 1,
+        "agent": "agent_research",
+        "action": "hybrid_search",
+        "found_objects_count": found_objects,
+        "duration_ms": ms_since(stage_started)
+    }));
+
+    // Stage 2 — analysis agent: verified computation. The Rust runtime has no
+    // Python sandbox, so only read-only SQL can be honoured here.
+    let analysis = request.analysis_sql_or_python.trim();
+    if !analysis.to_uppercase().starts_with("SELECT") {
+        return Err(ApiError::new(
+            StatusCode::NOT_IMPLEMENTED,
+            "Stage 2 of the research pipeline requires Python compute for non-SELECT analysis, which has not been migrated to Rust. Pass a read-only SELECT statement.",
+        ));
+    }
+    let stage_started = Instant::now();
+    let compute_result = sql_engine::execute_sql(&request.analysis_sql_or_python, &state.db);
+    let compute_success = compute_result
+        .get("success")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    stages.push(json!({
+        "stage": 2,
+        "agent": "agent_analysis",
+        "action": "verified_computation",
+        "success": compute_success,
+        "duration_ms": ms_since(stage_started)
+    }));
+
+    // Stage 3 — quality agent: contract evaluation.
+    let stage_started = Instant::now();
+    let target_object = state
+        .db
+        .get_object(&request.target_dataset_id)
+        .map_err(internal)?;
+    let rules = match request.quality_rules {
+        Some(rules) if !rules.is_empty() => rules,
+        _ => vec![json!({"type": "row_count_min", "min_rows": 1})],
+    };
+    let mut quality_pass = true;
+    if let Some(object) = &target_object {
+        if let Some((columns, rows)) = tabular(object) {
+            let checks = evaluate_quality_checks(&columns, &rows, rules)?;
+            let failed = checks
+                .iter()
+                .filter(|entry| !entry.get("passed").and_then(Value::as_bool).unwrap_or(false))
+                .count();
+            let total = checks.len();
+            quality_pass = failed == 0;
+            state
+                .db
+                .create_object(
+                    "quality_report",
+                    "quality_report.v1",
+                    json!({
+                        "target_object_id": request.target_dataset_id,
+                        "overall_pass": quality_pass,
+                        "quality_score": round4((total - failed) as f64 / total.max(1) as f64 * 100.0),
+                        "total_checks": total,
+                        "passed_checks": total - failed,
+                        "failed_checks": failed,
+                        "evaluated_at": now_rfc3339()
+                    }),
+                    json!({"checks": checks}),
+                    "dataos://engine/quality",
+                    json!({}),
+                )
+                .map_err(internal)?;
+        }
+    }
+    stages.push(json!({
+        "stage": 3,
+        "agent": "agent_quality",
+        "action": "contract_evaluation",
+        "quality_pass": quality_pass,
+        "duration_ms": ms_since(stage_started)
+    }));
+
+    // Stage 4 — report agent: deterministic grounded summary.
+    // Mirrors MockDeterministicProvider (the default provider in Python).
+    let stage_started = Instant::now();
+    let prompt = format!("Create verified executive summary for {}", request.goal_prompt);
+    let context_data = vec![
+        json!({"computation_output": compute_result}),
+        json!({"target_dataset": request.target_dataset_id}),
+        json!({"quality_pass": quality_pass}),
+    ];
+    let mut summary_lines: Vec<String> = Vec::new();
+    summary_lines.push(format!("Analysis for: '{}'", prompt.chars().take(50).collect::<String>()));
+    summary_lines.push(format!(
+        "Synthesized from {} grounded evidence items.",
+        context_data.len()
+    ));
+    for context in context_data.iter().take(3) {
+        summary_lines.push(format!("- Fact: {}", py_str_short(context)));
+    }
+    let summary = summary_lines.join("\n");
+    let prompt_tokens = prompt.split_whitespace().count() + 10;
+    let completion_tokens = summary.split_whitespace().count();
+
     let report = state
         .db
         .create_object(
-            "quality_report",
-            "quality_report.v1",
+            "report",
+            "report.v1",
             json!({
-                "target_object_id": object_id,
-                "overall_pass": failed_checks == 0,
-                "quality_score": round4(passed_checks as f64 / total_checks.max(1) as f64 * 100.0),
-                "total_checks": total_checks,
-                "passed_checks": passed_checks,
-                "failed_checks": failed_checks,
-                "evaluated_at": now_rfc3339()
+                "pipeline_id": pipeline_id,
+                "goal": request.goal_prompt,
+                "target_dataset_id": request.target_dataset_id,
+                "quality_pass": quality_pass,
+                "ai_model": "dataos_deterministic_v1",
+                "total_tokens": prompt_tokens + completion_tokens,
+                "cost_usd": 0.0
             }),
-            json!({"checks": checks}),
-            "dataos://engine/quality",
+            json!(summary),
+            &format!("dataos://pipeline/{pipeline_id}/report"),
             json!({}),
         )
         .map_err(internal)?;
-    Ok(Json(report))
+    let report_id = report
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+
+    state
+        .db
+        .create_relationship(
+            &report_id,
+            &request.target_dataset_id,
+            "derived_from",
+            1.0,
+            json!({"pipeline": pipeline_id}),
+        )
+        .map_err(internal)?;
+
+    stages.push(json!({
+        "stage": 4,
+        "agent": "agent_report",
+        "action": "grounded_report_synthesis",
+        "report_object_id": report_id,
+        "duration_ms": ms_since(stage_started)
+    }));
+
+    let total_duration_ms = round4(started.elapsed().as_secs_f64() * 1_000.0);
+    Ok(Json(json!({
+        "status": "completed",
+        "pipeline_id": pipeline_id,
+        "report_object_id": report_id,
+        "report_content": summary,
+        "total_duration_ms": total_duration_ms,
+        "trace": {
+            "pipeline_id": pipeline_id,
+            "goal": request.goal_prompt,
+            "stages": stages
+        },
+        "cost_summary": {
+            "session_started_at": now_rfc3339(),
+            "total_prompt_tokens": prompt_tokens,
+            "total_completion_tokens": completion_tokens,
+            "total_tokens": prompt_tokens + completion_tokens,
+            "total_cost_usd": 0.0,
+            "agent_breakdown": {}
+        }
+    })))
 }
 
 // ---------------------------------------------------------------------------

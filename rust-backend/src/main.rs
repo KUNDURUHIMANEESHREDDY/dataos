@@ -35,12 +35,17 @@ struct CurrentUser(Option<User>);
 #[derive(Debug)]
 struct ApiError {
     status: StatusCode,
-    detail: String,
+    detail: Value,
 }
 
 impl ApiError {
     fn new(status: StatusCode, detail: impl Into<String>) -> Self {
-        Self { status, detail: detail.into() }
+        Self { status, detail: Value::String(detail.into()) }
+    }
+
+    /// Structured `detail`, matching FastAPI's `HTTPException(detail={...})`.
+    fn with_detail(status: StatusCode, detail: Value) -> Self {
+        Self { status, detail }
     }
 }
 
@@ -638,7 +643,9 @@ fn build_router(state: AppState) -> Router {
         .route("/api/sharing/issue_token", post(parity::sharing_issue_token))
         .route("/api/sharing/verify_token", post(parity::sharing_verify_token))
         .route("/api/workflows/execute", post(parity::workflows_execute))
+        .route("/api/agents/pipeline/research", post(parity::pipeline_research))
         .route("/api/agents/execute", post(parity::agents_execute))
+        .route("/api/knowledge/query", post(parity::knowledge_query))
         .route("/api/search/", get(search))
         .route("/api/search", get(search))
         .route("/api/compute/sql", post(compute_sql))

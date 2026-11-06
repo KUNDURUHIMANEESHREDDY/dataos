@@ -647,6 +647,166 @@ async fn unmigrated_routes_answer_501_not_fake_data() {
     assert_eq!(status, StatusCode::FORBIDDEN);
 }
 
+#[tokio::test]
+async fn knowledge_query_returns_scoped_evidence() {
+    let (app, _db) = test_app();
+    let token = register(&app, "operator").await;
+
+    let (status, dataset) = call(
+        &app,
+        Method::POST,
+        "/api/objects/",
+        Some(json!({
+            "type": "dataset",
+            "properties": {"filename": "measurements.csv", "raw_csv": SAMPLE_CSV},
+            "content": {}
+        })),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let dataset_id = dataset["id"].as_str().unwrap().to_string();
+
+    let (status, document) = call(
+        &app,
+        Method::POST,
+        "/api/objects/",
+        Some(json!({
+            "type": "document",
+            "properties": {"filename": "notes.md"},
+            "content": {"body": "alpha measurements are recorded here"}
+        })),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let document_id = document["id"].as_str().unwrap().to_string();
+
+    let (status, _) = call(
+        &app,
+        Method::POST,
+        "/api/relationships",
+        Some(json!({
+            "source_id": document_id,
+            "target_id": dataset_id,
+            "relation_type": "references",
+            "confidence": 0.9
+        })),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, body) = call(
+        &app,
+        Method::POST,
+        "/api/knowledge/query",
+        Some(json!({
+            "query": "alpha measurements",
+            "selected_file_ids": [document_id],
+            "include_related": true
+        })),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "knowledge query failed: {body}");
+    assert_eq!(body["mode"], "scoped_evidence_retrieval");
+    assert_eq!(body["generation_available"], false);
+    assert_eq!(body["eligible_file_count"], 2);
+    assert_eq!(body["related_files"].as_array().unwrap().len(), 1);
+    assert_eq!(body["related_files"][0]["file_id"], dataset_id);
+    assert_eq!(body["related_files"][0]["relationship_type"], "references");
+
+    let evidence = body["evidence"].as_array().expect("evidence list");
+    assert!(!evidence.is_empty(), "expected evidence: {body}");
+    assert_eq!(evidence[0]["file_id"], document_id, "explicitly selected file must rank first");
+    assert_eq!(evidence[0]["selected"], true);
+    assert_eq!(evidence[0]["inclusion_reason"], "explicitly selected");
+    assert!(evidence[0]["score"].as_f64().unwrap_or(0.0) > 0.0);
+
+    // a missing selection must fail loudly rather than silently dropping it
+    let (status, body) = call(
+        &app,
+        Method::POST,
+        "/api/knowledge/query",
+        Some(json!({"query": "alpha", "selected_file_ids": ["no-such-file"]})),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["detail"]["missing_file_ids"][0], "no-such-file");
+}
+
+#[tokio::test]
+async fn research_pipeline_runs_four_deterministic_stages() {
+    let (app, _db) = test_app();
+    let token = register(&app, "operator").await;
+    let id = create_dataset(&app, &token, SAMPLE_CSV).await;
+    let table = format!("tbl_{}", &id[..8]);
+
+    let (status, body) = call(
+        &app,
+        Method::POST,
+        "/api/agents/pipeline/research",
+        Some(json!({
+            "goal_prompt": "summarise alpha scores",
+            "target_dataset_id": id,
+            "analysis_sql_or_python": format!("SELECT name, score FROM {table} ORDER BY score"),
+            "quality_rules": [{"type": "row_count_min", "min_rows": 1}]
+        })),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "pipeline failed: {body}");
+    assert_eq!(body["status"], "completed");
+    assert!(body["pipeline_id"].as_str().unwrap().starts_with("pipeline_"));
+
+    let stages = body["trace"]["stages"].as_array().expect("stage trace");
+    assert_eq!(stages.len(), 4, "expected all four stages: {body}");
+    assert_eq!(stages[0]["agent"], "agent_research");
+    assert_eq!(stages[1]["agent"], "agent_analysis");
+    assert_eq!(stages[1]["success"], true);
+    assert_eq!(stages[2]["agent"], "agent_quality");
+    assert_eq!(stages[2]["quality_pass"], true);
+    assert_eq!(stages[3]["action"], "grounded_report_synthesis");
+    assert_eq!(stages[3]["report_object_id"], body["report_object_id"]);
+    assert!(body["cost_summary"]["total_tokens"].as_u64().unwrap_or(0) > 0);
+    assert!(body["cost_summary"]["total_cost_usd"].as_f64().unwrap_or(1.0) == 0.0);
+
+    // the report must be a first-class object linked derived_from the dataset
+    let report_id = body["report_object_id"].as_str().unwrap();
+    let (status, report) = call(&app, Method::GET, &format!("/api/objects/{report_id}"), None, Some(&token)).await;
+    assert_eq!(status, StatusCode::OK, "report object missing: {report}");
+    assert_eq!(report["type"], "report");
+    assert_eq!(report["schema"], "report.v1");
+
+    let (status, relationships) = call(&app, Method::GET, "/api/relationships/", None, Some(&token)).await;
+    assert_eq!(status, StatusCode::OK);
+    let derived = relationships["relationships"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|rel| rel["relation_type"] == "derived_from")
+        .expect("derived_from link");
+    assert_eq!(derived["source"], report_id);
+    assert_eq!(derived["target"], id);
+
+    // non-SELECT analysis needs the Python sandbox, which Rust does not have
+    let (status, body) = call(
+        &app,
+        Method::POST,
+        "/api/agents/pipeline/research",
+        Some(json!({
+            "goal_prompt": "run python",
+            "target_dataset_id": id,
+            "analysis_sql_or_python": "print(1)"
+        })),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_IMPLEMENTED, "must not fake Python compute: {body}");
+}
+
 fn urlencode(value: &str) -> String {
     value
         .chars()

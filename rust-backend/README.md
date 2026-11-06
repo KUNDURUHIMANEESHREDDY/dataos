@@ -17,6 +17,8 @@ This is the default container backend for the production-hardening line. It is a
 - Sync conflict resolution (`/api/sync/resolve_conflict`)
 - Bounded built-in workflow execution (`/api/workflows/execute`) — `noop`/`set_variable`/`log` only, with cycle detection and payload limits
 - Agent dispatch (`/api/agents/execute`) — deterministic capabilities execute for real
+- 4-stage research pipeline (`/api/agents/pipeline/research`) — search, SQL analysis, quality contract, grounded report with `derived_from` linkage
+- Scoped evidence retrieval (`/api/knowledge/query`) — one-hop related files, ranked excerpts, `generation_available: false`
 - Notebook/document ingest (`/api/notebooks/ingest`, `/api/documents/extract_rich`)
 - Hybrid-ish text search by substring over serialized objects
 - Safe read-only SQL execution against registered tabular dataset objects
@@ -24,19 +26,18 @@ This is the default container backend for the production-hardening line. It is a
 - Exact-hash duplicate detection
 - JSON graph export, recommendations, federation-search local fallback
 - Capability authorization middleware with JWT auth
-- Contract test suite (`src/api_tests.rs`, 12 tests) covering the router end to end
+- Contract test suite (`src/api_tests.rs`, 14 tests) covering the router end to end
+- **Route parity:** every route declared in `backend/app.py` and `backend/knowledge_rag.py` exists in the Rust router
 
 ## Not implemented yet
 
-- Python sandbox / unified Python execution (returns 503/501 by policy)
-- Natural-language Ask/RAG intelligence
-- LLM-backed agent behaviours (`agent_research` reasoning, report generation)
+- Python sandbox / unified Python execution (returns 403 by policy; research-pipeline stage 2 returns 501 for non-SELECT analysis)
+- Natural-language Ask/RAG intelligence (`/api/ask`, `query_type: ask|natural_language`)
+- LLM-backed agent behaviours (`agent_research` reasoning, report generation) — the deterministic provider is used instead
 - Model-backed semantic embeddings — the vector index uses a documented lexical (hashed bag-of-words) method
-- `/api/agents/pipeline/research`
 - Blob storage, Postgres backend, and cloud storage parity
-- Full compatibility tests for every Python API route
 
-Routes not yet ported return HTTP 501 with an explicit message; they do not silently fabricate results.
+Routes whose backing engine has no Rust equivalent return HTTP 501 with an explicit message; they do not silently fabricate results.
 
 ## Run locally
 
