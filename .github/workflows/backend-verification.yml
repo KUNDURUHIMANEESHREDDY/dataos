@@ -232,30 +232,6 @@ jobs:
           test "$SBOM_RESULT" = "success"
           test "$CODEQL_RESULT" = "success"
 
-  backend-required:
-    name: Backend required
-    if: always()
-    needs: [backend, postgres-storage, security-required, workflow-lint]
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - name: Fail closed unless backend, PostgreSQL, security, and workflow verification passed
-        env:
-          BACKEND_RESULT: ${{ needs.backend.result }}
-          POSTGRES_RESULT: ${{ needs.postgres-storage.result }}
-          SECURITY_RESULT: ${{ needs.security-required.result }}
-          WORKFLOW_LINT_RESULT: ${{ needs.workflow-lint.result }}
-        run: |
-          set -euo pipefail
-          echo "backend: $BACKEND_RESULT"
-          echo "postgres-storage: $POSTGRES_RESULT"
-          echo "security-required: $SECURITY_RESULT"
-          echo "workflow-lint: $WORKFLOW_LINT_RESULT"
-          test "$BACKEND_RESULT" = "success"
-          test "$POSTGRES_RESULT" = "success"
-          test "$SECURITY_RESULT" = "success"
-          test "$WORKFLOW_LINT_RESULT" = "success"
-
       - name: Fail on open critical/high code-scanning alerts
         env:
           GH_TOKEN: ${{ github.token }}
@@ -310,5 +286,29 @@ jobs:
               exit 1
             fi
           fi
-          echo "Backend correctness and smoke tests passed."
+          echo "No open critical/high code-scanning alerts were found."
+  backend-required:
+    name: Backend required
+    if: always()
+    needs: [backend, postgres-storage, security-required, workflow-lint]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Fail closed unless backend, PostgreSQL, security, and workflow verification passed
+        env:
+          BACKEND_RESULT: ${{ needs.backend.result }}
+          POSTGRES_RESULT: ${{ needs.postgres-storage.result }}
+          SECURITY_RESULT: ${{ needs.security-required.result }}
+          WORKFLOW_LINT_RESULT: ${{ needs.workflow-lint.result }}
+        run: |
+          set -euo pipefail
+          echo "backend: $BACKEND_RESULT"
+          echo "postgres-storage: $POSTGRES_RESULT"
+          echo "security-required: $SECURITY_RESULT"
+          echo "workflow-lint: $WORKFLOW_LINT_RESULT"
+          test "$BACKEND_RESULT" = "success"
+          test "$POSTGRES_RESULT" = "success"
+          test "$SECURITY_RESULT" = "success"
+          test "$WORKFLOW_LINT_RESULT" = "success"
+
 
