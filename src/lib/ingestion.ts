@@ -1,5 +1,8 @@
+export const MAX_INGEST_FILE_BYTES = 5 * 1024 * 1024;
+
 export type IngestionFile = {
   filename: string;
+  size?: number;
   read: () => Promise<string>;
 };
 
@@ -16,9 +19,10 @@ export type IngestionOutcome =
       error: string;
     };
 
-function readCount(value: unknown): number {
-  const parsed = typeof value === "number" ? value : Number(value);
-  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : 0;
+function readCount(value: unknown): number | null {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0
+    ? value
+    : null;
 }
 
 /**
@@ -33,11 +37,24 @@ export async function ingestFiles(
   const outcomes: IngestionOutcome[] = [];
 
   for (const file of files) {
+    if (
+      file.size !== undefined &&
+      (!Number.isSafeInteger(file.size) || file.size < 0 || file.size > MAX_INGEST_FILE_BYTES)
+    ) {
+      outcomes.push({ filename: file.filename, ok: false, error: "file exceeds the 5 MiB limit" });
+      continue;
+    }
+
     let content: string;
     try {
       content = await file.read();
     } catch {
       outcomes.push({ filename: file.filename, ok: false, error: "unable to read file" });
+      continue;
+    }
+
+    if (new TextEncoder().encode(content).byteLength > MAX_INGEST_FILE_BYTES) {
+      outcomes.push({ filename: file.filename, ok: false, error: "file exceeds the 5 MiB limit" });
       continue;
     }
 
@@ -83,11 +100,24 @@ export async function ingestFiles(
     }
 
     const data = payload as Record<string, unknown>;
+    // Keep this aligned with UniversalIngestionPipeline.ingest()'s public
+    // response: created_objects_count and discovered_relations_count.
+    const objectsCreated = readCount(data.created_objects_count);
+    const relationsCreated = readCount(data.discovered_relations_count);
+    if (
+      data.status !== "ingested" ||
+      objectsCreated === null ||
+      relationsCreated === null
+    ) {
+      outcomes.push({ filename: file.filename, ok: false, error: "invalid ingestion response" });
+      continue;
+    }
+
     outcomes.push({
       filename: file.filename,
       ok: true,
-      objectsCreated: readCount(data.objects_created),
-      relationsCreated: readCount(data.relations_created),
+      objectsCreated,
+      relationsCreated,
     });
   }
 
