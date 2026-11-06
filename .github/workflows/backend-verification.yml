@@ -264,12 +264,18 @@ jobs:
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
         with:
           script: |
+            const pullRef = context.eventName === "pull_request"
+              ? `refs/pull/${context.payload.pull_request.number}/merge`
+              : null;
             const refs = context.eventName === "pull_request"
-              ? [
-                  `refs/heads/${context.payload.pull_request.base.ref}`,
-                  `refs/pull/${context.payload.pull_request.number}/merge`
-                ]
+              ? [`refs/heads/${context.payload.pull_request.base.ref}`, pullRef]
               : [context.ref];
+            // The PR merge ref represents the code that would be merged. Base-branch
+            // alerts are logged for context but must not block a remediation PR that fixes
+            // them; the merge ref itself remains a fail-closed release gate.
+            const blockingRefs = new Set(
+              context.eventName === "pull_request" ? [pullRef] : [context.ref]
+            );
             let blockingCount = 0;
             for (const ref of refs) {
               const alerts = await github.paginate(
@@ -285,20 +291,26 @@ jobs:
               const blocking = alerts.filter(({ rule }) =>
                 ["critical", "high"].includes(rule?.security_severity_level)
               );
-              core.info(`Open critical/high code-scanning alerts on ${ref}: ${blocking.length}`);
-              blockingCount += blocking.length;
+              const blocksRelease = blockingRefs.has(ref);
+              core.info(`Open critical/high code-scanning alerts on ${ref} (${blocksRelease ? "blocking" : "base diagnostic only"}): ${blocking.length}`);
+              if (blocksRelease) blockingCount += blocking.length;
               for (const alert of blocking) {
                 const location = alert.most_recent_instance?.location;
                 const where = location?.path
                   ? `${location.path}:${location.start_line ?? "?"}`
                   : "location unavailable";
-                core.error(`#${alert.number} ${alert.rule?.security_severity_level}: ${alert.rule?.id} on ${ref} at ${where}`);
+                const message = `#${alert.number} ${alert.rule?.security_severity_level}: ${alert.rule?.id} on ${ref} at ${where}`;
+                if (blocksRelease) {
+                  core.error(message);
+                } else {
+                  core.warning(`Base-branch diagnostic only: ${message}`);
+                }
               }
             }
             if (blockingCount > 0) {
-              core.setFailed("Open critical/high code-scanning alerts on the base or pull-request ref must be triaged and remediated before release.");
+              core.setFailed("Open critical/high code-scanning alerts remain on the code being released.");
             } else {
-              core.info("No open critical/high code-scanning alerts were found on the base or pull-request ref.");
+              core.info("No open critical/high code-scanning alerts remain on the PR merge ref or pushed branch. Base-branch alerts are diagnostic only for pull requests.");
             }
 
   backend-required:
