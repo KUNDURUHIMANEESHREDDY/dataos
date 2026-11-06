@@ -120,6 +120,36 @@ fn json_error_response(status: StatusCode, detail: &str) -> Response {
     (status, Json(json!({"detail": detail}))).into_response()
 }
 
+fn resource_id_for_path(path: &str) -> Option<&str> {
+    let segments: Vec<&str> = path.trim_matches('/').split('/').collect();
+    match segments.as_slice() {
+        ["api", "objects", id] if !id.is_empty() => Some(id),
+        ["api", "objects", id, "why" | "impact"] if !id.is_empty() => Some(id),
+        ["api", "graph", "neighbors" | "traverse", id] if !id.is_empty() => Some(id),
+        ["api", "time_travel", "object", id] if !id.is_empty() => Some(id),
+        ["api", "provenance", "lineage", id] if !id.is_empty() => Some(id),
+        ["api", "profiling" | "quality", id] if !id.is_empty() => Some(id),
+        ["api", "governance", "quota", id] if !id.is_empty() => Some(id),
+        ["api", "recommendations", "datasets" | "connections", id] if !id.is_empty() => Some(id),
+        _ => None,
+    }
+}
+
+fn is_global_data_route(path: &str) -> bool {
+    matches!(path,
+        "/api/catalog/health" |
+        "/api/graph/analytics" |
+        "/api/time_travel/graph" |
+        "/api/io/export" |
+        "/api/governance/duplicates" |
+        "/api/federation/search" |
+        "/api/search" |
+        "/api/search/" |
+        "/api/vectors/search" |
+        "/api/ask"
+    )
+}
+
 async fn security_middleware(
     State(state): State<AppState>,
     request: axum::extract::Request,
@@ -141,7 +171,7 @@ async fn security_middleware(
     let production = production_enabled();
     let has_bearer = !token.is_empty();
 
-    if production {
+    if production && !matches!(path.as_str(), "/api/auth/register" | "/api/auth/login") {
         // A shared API token authenticates an application, not an individual
         // principal. Production data routes require a resolvable user identity.
         if !jwt_configured() {
@@ -175,6 +205,15 @@ async fn security_middleware(
         if let Some(required) = capability_for(request.method(), &path) {
             if !role_capabilities(&current_user.role).contains(&required) {
                 return json_error_response(StatusCode::FORBIDDEN, &format!("Capability '{}' is not permitted for role '{}'.", required, current_user.role));
+            }
+        }
+        if current_user.role != "admin" && is_global_data_route(&path) {
+            return json_error_response(StatusCode::FORBIDDEN, "This aggregate or export endpoint is restricted until principal-scoped query support is enabled.");
+        }
+        if let Some(object_id) = resource_id_for_path(&path) {
+            let allowed = state.db.can_access_object(object_id, &current_user.id, current_user.role == "admin").unwrap_or(false);
+            if !allowed {
+                return json_error_response(StatusCode::NOT_FOUND, "Object not found.");
             }
         }
     }
