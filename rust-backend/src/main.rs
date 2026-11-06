@@ -61,14 +61,6 @@ fn production_enabled() -> bool {
     })
 }
 
-fn valid_secret(secret: &str) -> bool {
-    !secret.is_empty() && secret.len() >= 32 && secret.trim() == secret
-}
-
-fn shared_token() -> Option<String> {
-    env::var("DATAOS_API_TOKEN").ok().filter(|s| valid_secret(s))
-}
-
 fn capability_for(method: &Method, path: &str) -> Option<&'static str> {
     if method == Method::OPTIONS {
         return None;
@@ -226,7 +218,7 @@ async fn security_middleware(
                 return json_error_response(StatusCode::FORBIDDEN, &format!("Capability '{}' is not permitted for role '{}'.", required, current_user.role));
             }
         }
-        if current_user.role != "admin" && is_global_data_route(&path) {
+        if production && current_user.role != "admin" && is_global_data_route(&path) {
             return json_error_response(StatusCode::FORBIDDEN, "This aggregate or export endpoint is restricted until principal-scoped query support is enabled.");
         }
         if let Some(principal_id) = principal_id_for_path(&path) {
