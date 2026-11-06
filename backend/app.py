@@ -372,6 +372,7 @@ async def logout_user(response: Response):
         secure=_production_mode(),
         samesite="strict",
     )
+    response.status_code = 204
     response.headers["Cache-Control"] = "no-store"
     return response
 
