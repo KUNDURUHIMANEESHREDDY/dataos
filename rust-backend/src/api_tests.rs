@@ -764,8 +764,8 @@ async fn unmigrated_routes_answer_501_not_fake_data() {
 
 #[tokio::test]
 async fn knowledge_query_returns_scoped_evidence() {
-    let (app, _db) = test_app();
-    let token = register(&app, &_db, "operator").await;
+    let (app, db) = test_app();
+    let token = register(&app, &db, "operator").await;
 
     let (status, dataset) = call(
         &app,
@@ -812,6 +812,13 @@ async fn knowledge_query_returns_scoped_evidence() {
     .await;
     assert_eq!(status, StatusCode::OK);
 
+    // Simulate a legacy/admin-created edge to another tenant. Retrieval must
+    // not include the foreign object merely because the edge exists.
+    let bob = register(&app, &db, "operator").await;
+    let foreign_dataset = create_dataset(&app, &bob, "id,name\\n9,private\\n").await;
+    db.create_relationship(&document_id, &foreign_dataset, "references", 0.99, json!({}))
+        .expect("create legacy cross-tenant edge");
+
     let (status, body) = call(
         &app,
         Method::POST,
@@ -831,6 +838,7 @@ async fn knowledge_query_returns_scoped_evidence() {
     assert_eq!(body["related_files"].as_array().unwrap().len(), 1);
     assert_eq!(body["related_files"][0]["file_id"], dataset_id);
     assert_eq!(body["related_files"][0]["relationship_type"], "references");
+    assert!(!body.to_string().contains(&foreign_dataset), "foreign related object leaked: {body}");
 
     let evidence = body["evidence"].as_array().expect("evidence list");
     assert!(!evidence.is_empty(), "expected evidence: {body}");
@@ -850,6 +858,15 @@ async fn knowledge_query_returns_scoped_evidence() {
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(body["detail"]["missing_file_ids"][0], "no-such-file");
+
+    let (status, body) = call(
+        &app,
+        Method::POST,
+        "/api/knowledge/query",
+        Some(json!({"query": "private", "selected_file_ids": [foreign_dataset]})),
+        Some(&token),
+    ).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "foreign selected object was accepted: {body}");
 }
 
 #[tokio::test]
