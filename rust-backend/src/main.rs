@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use axum::{
     Json,
-    extract::{DefaultBodyLimit, Multipart, Path, Query, State},
+    extract::{DefaultBodyLimit, FromRequest, Multipart, Path, Query, Request, State},
     http::{Method, StatusCode, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -465,27 +465,82 @@ async fn analytics(State(state): State<AppState>, Query(params): Query<HashMap<S
     }
 }
 
-async fn universal_ingest(State(state): State<AppState>, multipart: Multipart) -> Result<Json<Value>, ApiError> {
-    ingest_into_storage(State(state), multipart, "").await
-}
+/// Form fields accepted by the ingest routes.
+///
+/// FastAPI declares these as `Form(...)`, and the Next.js UI posts
+/// `application/x-www-form-urlencoded`. Accepting only `multipart/form-data`
+/// silently broke drag-and-drop upload, so both encodings are supported here.
+struct FormFields(HashMap<String, String>);
 
-async fn ingest_text(State(state): State<AppState>, multipart: Multipart) -> Result<Json<Value>, ApiError> {
-    ingest_into_storage(State(state), multipart, "").await
-}
+impl<S> FromRequest<S> for FormFields
+where
+    S: Send + Sync,
+{
+    type Rejection = ApiError;
 
-async fn ingest_into_storage(State(state): State<AppState>, multipart: Multipart, _name: &str) -> Result<Json<Value>, ApiError> {
-    let mut fields = multipart;
-    let mut filename = "data_artifact".to_string();
-    let mut content = String::new();
-    while let Some(field) = fields.next_field().await.map_err(|e| ApiError::new(StatusCode::BAD_REQUEST, e.to_string()))? {
-        match field.name().unwrap_or("") {
-            "filename" => filename = field.text().await.map_err(|e| ApiError::new(StatusCode::BAD_REQUEST, e.to_string()))?,
-            "content" => content = field.text().await.map_err(|e| ApiError::new(StatusCode::BAD_REQUEST, e.to_string()))?,
-            "format_type" => { let _ = field.text().await; }
-            "discover_relations" => { let _ = field.text().await; }
-            _ => {}
+    async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
+        let content_type = req
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+
+        if content_type.starts_with("multipart/form-data") {
+            let mut multipart = Multipart::from_request(req, state)
+                .await
+                .map_err(|error| ApiError::new(StatusCode::BAD_REQUEST, error.to_string()))?;
+            let mut fields = HashMap::new();
+            while let Some(field) = multipart
+                .next_field()
+                .await
+                .map_err(|error| ApiError::new(StatusCode::BAD_REQUEST, error.to_string()))?
+            {
+                let Some(name) = field.name().map(str::to_string) else {
+                    continue;
+                };
+                let value = field
+                    .text()
+                    .await
+                    .map_err(|error| ApiError::new(StatusCode::BAD_REQUEST, error.to_string()))?;
+                fields.insert(name, value);
+            }
+            return Ok(Self(fields));
         }
+
+        if content_type.starts_with("application/x-www-form-urlencoded") {
+            let form = axum::extract::Form::<HashMap<String, String>>::from_request(req, state)
+                .await
+                .map_err(|error| ApiError::new(StatusCode::BAD_REQUEST, error.to_string()))?;
+            return Ok(Self(form.0));
+        }
+
+        Err(ApiError::new(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "content-type must be application/x-www-form-urlencoded or multipart/form-data",
+        ))
     }
+}
+
+async fn universal_ingest(
+    State(state): State<AppState>,
+    fields: FormFields,
+) -> Result<Json<Value>, ApiError> {
+    ingest_into_storage(state, fields, "")
+}
+
+async fn ingest_text(State(state): State<AppState>, fields: FormFields) -> Result<Json<Value>, ApiError> {
+    ingest_into_storage(state, fields, "")
+}
+
+fn ingest_into_storage(state: AppState, fields: FormFields, _name: &str) -> Result<Json<Value>, ApiError> {
+    let fields = fields.0;
+    let filename = fields
+        .get("filename")
+        .filter(|value| !value.trim().is_empty())
+        .cloned()
+        .unwrap_or_else(|| "data_artifact".to_string());
+    let content = fields.get("content").cloned().unwrap_or_default();
     if content.is_empty() { return Err(ApiError::new(StatusCode::BAD_REQUEST, "content is required")); }
     let lowered = filename.to_lowercase();
     let object_type = if lowered.ends_with(".csv") { "dataset" } else if lowered.ends_with(".json") { "dataset" } else if lowered.ends_with(".ipynb") { "notebook" } else { "document" };

@@ -807,6 +807,42 @@ async fn research_pipeline_runs_four_deterministic_stages() {
     assert_eq!(status, StatusCode::NOT_IMPLEMENTED, "must not fake Python compute: {body}");
 }
 
+#[tokio::test]
+async fn universal_ingest_accepts_form_encoded_body_from_frontend() {
+    // The Next.js DropZone/EmptyState components post
+    // `application/x-www-form-urlencoded`, which is what the FastAPI route
+    // accepts via `Form(...)`. The Rust route must accept the same encoding.
+    let (app, _db) = test_app();
+    let token = register(&app, "operator").await;
+
+    let request = Request::builder()
+        .method(Method::POST)
+        .uri("/api/ingest/universal")
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .body(Body::from(
+            "filename=demo.csv&content=id%2Cname%2Cscore%0A1%2Calpha%2C10&discover_relations=true",
+        ))
+        .expect("request");
+    let response = app.clone().oneshot(request).await.expect("router response");
+    let status = response.status();
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("body")
+        .to_bytes();
+    let body: Value = serde_json::from_slice(&bytes)
+        .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&bytes).to_string()));
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "form-encoded ingest must work from the browser UI: {body}"
+    );
+    assert_eq!(body["objects_created"], 1, "unexpected ingest result: {body}");
+    assert!(body["primary_object_id"].as_str().is_some(), "missing object id: {body}");
+}
+
 fn urlencode(value: &str) -> String {
     value
         .chars()

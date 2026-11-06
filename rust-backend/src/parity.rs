@@ -2399,48 +2399,31 @@ pub(crate) async fn agents_execute(
 
 pub(crate) async fn notebooks_ingest(
     State(state): State<AppState>,
-    multipart: axum::extract::Multipart,
+    fields: crate::FormFields,
 ) -> Result<Json<Value>, ApiError> {
-    ingest_with_default_filename(state, multipart, "analysis.ipynb", "notebook").await
+    ingest_with_default_filename(state, fields, "analysis.ipynb", "notebook")
 }
 
 pub(crate) async fn documents_extract_rich(
     State(state): State<AppState>,
-    multipart: axum::extract::Multipart,
+    fields: crate::FormFields,
 ) -> Result<Json<Value>, ApiError> {
-    ingest_with_default_filename(state, multipart, "paper.md", "document").await
+    ingest_with_default_filename(state, fields, "paper.md", "document")
 }
 
-async fn ingest_with_default_filename(
+fn ingest_with_default_filename(
     state: AppState,
-    multipart: axum::extract::Multipart,
+    fields: crate::FormFields,
     default_filename: &str,
     default_type: &str,
 ) -> Result<Json<Value>, ApiError> {
-    let mut fields = multipart;
-    let mut filename = default_filename.to_string();
-    let mut content = String::new();
-    while let Some(field) = fields
-        .next_field()
-        .await
-        .map_err(|error| ApiError::new(StatusCode::BAD_REQUEST, error.to_string()))?
-    {
-        match field.name().unwrap_or("") {
-            "filename" => {
-                filename = field
-                    .text()
-                    .await
-                    .map_err(|error| ApiError::new(StatusCode::BAD_REQUEST, error.to_string()))?
-            }
-            "content" => {
-                content = field
-                    .text()
-                    .await
-                    .map_err(|error| ApiError::new(StatusCode::BAD_REQUEST, error.to_string()))?
-            }
-            _ => {}
-        }
-    }
+    let fields = fields.0;
+    let mut filename = fields
+        .get("filename")
+        .cloned()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| default_filename.to_string());
+    let content = fields.get("content").cloned().unwrap_or_default();
     if content.is_empty() {
         return Err(ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, "content is required"));
     }
