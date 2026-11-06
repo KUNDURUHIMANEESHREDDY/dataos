@@ -192,13 +192,27 @@ async def list_objects(
 
 @app.post("/api/objects/", summary="Create DataOS Object")
 async def create_object(req: ObjectCreateRequest):
+    # These fields are written only by trusted ingestion/storage code. Accepting
+    # caller-supplied values would let API clients forge exact-duplicate hashes
+    # or attach arbitrary blob references to objects.
+    server_managed_metadata = {"blob", "content_hash"}
+    supplied_managed_fields = sorted(server_managed_metadata.intersection(req.metadata))
+    if supplied_managed_fields:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Object metadata fields are managed by DataOS: "
+                + ", ".join(supplied_managed_fields)
+            ),
+        )
+
     obj = DataObject(
         type=req.type,
         schema=req.schema_ref,
         properties=req.properties,
         content=req.content,
         source=req.source,
-        metadata=req.metadata
+        metadata=dict(req.metadata)
     )
     saved = dataos.storage.save_object(obj)
     return saved.to_dict()
