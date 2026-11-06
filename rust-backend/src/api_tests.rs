@@ -208,6 +208,30 @@ async fn object_ownership_isolation_blocks_cross_user_reads_writes_and_relations
     ).await;
     assert_eq!(status, StatusCode::NOT_FOUND, "cross-user relationship unexpectedly succeeded: {body}");
 
+    // Simulate legacy/admin-created cross-tenant edges. Object-scoped graph
+    // routes must not disclose the other endpoint even when an edge exists.
+    db.create_relationship(&alice_object, &bob_object, "derived_from", 1.0, json!({}))
+        .expect("create legacy outgoing edge");
+    db.create_relationship(&bob_object, &alice_object, "derived_from", 1.0, json!({}))
+        .expect("create legacy incoming edge");
+
+    for uri in [
+        format!("/api/graph/neighbors/{alice_object}"),
+        format!("/api/graph/traverse/{alice_object}?direction=both"),
+        format!("/api/provenance/lineage/{alice_object}"),
+        format!("/api/objects/{alice_object}/why"),
+        format!("/api/objects/{alice_object}/impact"),
+        format!("/api/recommendations/datasets/{alice_object}"),
+        format!("/api/recommendations/connections/{alice_object}"),
+    ] {
+        let (status, body) = call(&app, Method::GET, &uri, None, Some(&alice)).await;
+        assert_eq!(status, StatusCode::OK, "owner graph route failed at {uri}: {body}");
+        assert!(
+            !body.to_string().contains(&bob_object),
+            "cross-tenant object leaked through {uri}: {body}"
+        );
+    }
+
     // The owner retains normal access to their object.
     let (status, own_object) = call(&app, Method::GET, &format!("/api/objects/{alice_object}"), None, Some(&alice)).await;
     assert_eq!(status, StatusCode::OK);
@@ -896,6 +920,51 @@ async fn research_pipeline_runs_four_deterministic_stages() {
     )
     .await;
     assert_eq!(status, StatusCode::NOT_IMPLEMENTED, "must not fake Python compute: {body}");
+}
+
+#[tokio::test]
+async fn research_pipeline_cannot_read_or_report_another_users_dataset() {
+    let (app, db) = test_app();
+    let alice = register(&app, &db, "operator").await;
+    let bob = register(&app, &db, "operator").await;
+    let alice_dataset = create_dataset(&app, &alice, SAMPLE_CSV).await;
+    let bob_dataset = create_dataset(&app, &bob, "id,name,score\\n9,private,99\\n").await;
+    let alice_id = crate::auth::decode_token(&alice).expect("valid Alice JWT").sub;
+    let bob_table = format!("tbl_{}",&bob_dataset[..8]);
+    let alice_table = format!("tbl_{}",&alice_dataset[..8]);
+
+    let before = db.list_objects_for_owner(&alice_id, Some("report"), None, 100, 0)
+        .expect("list Alice reports").len();
+
+    let (status, body) = call(
+        &app,
+        Method::POST,
+        "/api/agents/pipeline/research",
+        Some(json!({
+            "goal_prompt": "summarise private scores",
+            "target_dataset_id": alice_dataset,
+            "analysis_sql_or_python": format!("SELECT name, score FROM {bob_table}")
+        })),
+        Some(&alice),
+    ).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "foreign table query unexpectedly succeeded: {body}");
+
+    let after = db.list_objects_for_owner(&alice_id, Some("report"), None, 100, 0)
+        .expect("list Alice reports").len();
+    assert_eq!(after, before, "failed analysis must not persist a report");
+
+    let (status, body) = call(
+        &app,
+        Method::POST,
+        "/api/agents/pipeline/research",
+        Some(json!({
+            "goal_prompt": "read foreign dataset",
+            "target_dataset_id": bob_dataset,
+            "analysis_sql_or_python": format!("SELECT name, score FROM {alice_table}")
+        })),
+        Some(&alice),
+    ).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "foreign target dataset was accepted: {body}");
 }
 
 #[tokio::test]
