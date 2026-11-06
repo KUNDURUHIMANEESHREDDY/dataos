@@ -106,12 +106,10 @@ class DataObject:
                 "input_sources": [self.source] if self.source else [],
                 "transformations": []
             }
-        # A persisted content hash is an invariant, not optional caller metadata.
-        # Recompute missing, blank, or non-string values before storage writes them
-        # into the NOT NULL object_versions.content_hash column.
-        cached_hash = self.metadata.get("content_hash")
-        if not isinstance(cached_hash, str) or not cached_hash.strip():
-            self.metadata["content_hash"] = self.compute_hash()
+        # The hash is derived from canonical object fields on every construction.
+        # Trusting a cached value can preserve a stale hash across version updates
+        # or let imported metadata influence exact-duplicate detection.
+        self.metadata["content_hash"] = self.compute_hash()
 
     def compute_hash(self) -> str:
         """Compute deterministic SHA-256 hash of object content and properties."""

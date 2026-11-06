@@ -62,9 +62,12 @@ class TestDataOSKernel(unittest.TestCase):
         self.assertEqual(v2.id, obj.id)
         self.assertEqual(v2.properties["word_count"], 150)
         self.assertEqual(len(v2.provenance["transformations"]), 1)
+        self.assertEqual(v2.metadata["content_hash"], v2.compute_hash())
+        self.assertNotEqual(v2.metadata["content_hash"], obj.metadata["content_hash"])
 
-    def test_empty_or_invalid_content_hash_metadata_is_recomputed_before_persistence(self):
-        for cached_hash in (None, "", "   ", 123):
+    def test_cached_content_hash_metadata_is_recomputed_before_persistence(self):
+        # Even a well-formed but caller-controlled digest is not authoritative.
+        for cached_hash in (None, "", "   ", 123, "0" * 64):
             with self.subTest(cached_hash=cached_hash):
                 obj = DataObject(
                     type="document",
