@@ -6,7 +6,7 @@ graph**, and **first-class provenance** — every derived result traceable back 
 The design principle, stated in `context/ai-workflow-rules.md`: **AI is an operator over the graph, never an
 authority over it.**
 
-> **Backend status:** the Docker backend now targets the Rust/Axum implementation in `rust-backend/`, which now declares **every route** in the Python `backend/app.py` / `backend/knowledge_rag.py` surface: storage, auth, objects/relationships, graph traversal, time-travel, lineage, profiling, quality, sharing tokens, vector search, sync conflict resolution, bounded workflows, agent dispatch, the 4-stage research pipeline, scoped knowledge retrieval, safe read-only SQL, and ingest. Routes whose engine has no Rust equivalent (Ask/RAG, Python compute, LLM-backed agents, model-backed embeddings) return HTTP 501 with an explicit message rather than fabricating results. Python backend remains as a legacy reference. Remaining production risks are per-object authorization, secrets/operations, TLS/reverse proxy, and live deployment testing.
+> **Verification status (PR branch):** the latest source-verification head `e8cd5bfc9adb7967213ac7ff06c5c1349dc68965` passed frontend workflow [#41066979558](https://github.com/KUNDURUHIMANEESHREDDY/dataos/actions/runs/41066979558) and backend/security workflow [#41066979353](https://github.com/KUNDURUHIMANEESHREDDY/dataos/actions/runs/41066979353). Frontend: 13 pagination/relationship tests, TypeScript, Next.js production build, `npm audit` with zero vulnerabilities, and CycloneDX SBOM. Backend/security: 720 tests passed, 1 skipped; 74/74 scenario invariants; live PostgreSQL migration/source-filter/soft-delete contract; workflow-integrity tests; Gitleaks; dependency audit; SBOM; CodeQL; and both required aggregates. These are pull-request checks, not deployed-production evidence. Remaining blockers include per-user/resource authorization, encryption-key lifecycle, backup/restore and rollback, deployed acceptance, and verified branch-protection enforcement. See [Current blockers](#current-blockers).
 
 ---
 
@@ -44,13 +44,15 @@ Remaining authorization work is still material:
 
 - Capability enforcement is wired at auth/admin boundaries but not consistently enforced on every data-modifying or high-risk handler.
 - Python compute is disabled by default in production unless `DATAOS_ALLOW_PYTHON_COMPUTE=true`; that opt-in does not prove the sandbox is safe.
-- Live PostgreSQL parity coverage exists via the CI service job, but should be expanded as routes are added.
+- The live PostgreSQL CI contract now covers additive migration, source filtering, and soft-delete visibility; the Dataspace relationship serializer mismatch is normalized and regression-tested on this PR branch. Broader cloud-adapter parity, backup/restore, and deployed acceptance remain open.
 
 Treat these as release blockers until the corresponding API and deployment tests exist.
 
 ## CI verification
 
-`.github/workflows/backend-verification.yml` runs the Python correctness suite, frontend production build, live PostgreSQL storage contract, secret scan, dependency audit, and a required aggregate job. The workflow is fail-closed: a skipped or failed required job fails the aggregate check.
+`.github/workflows/backend-verification.yml` verifies the Python correctness suite, scenario invariants, CLI health, live PostgreSQL contract, and backend/security gates. The `Backend required` aggregate fails closed when its required backend/security jobs fail, are cancelled, or are skipped.
+
+The PR branch also contains `.github/workflows/frontend-verification.yml`. It performs a clean `npm ci`, high-severity dependency audit, pagination/relationship contract tests, TypeScript validation, Next.js production build, and CycloneDX SBOM generation/upload. The current lockfile is reproducible with `npm ci`, and the latest exact-head audit reported zero vulnerabilities. These are separate required workflow aggregates; repository branch-protection settings have not been verified, so do not assume GitHub enforces both checks before merge.
 
 ---
 
@@ -181,8 +183,7 @@ all calls are same-origin.
 | `actions/` | `ActionsRegistry`, `ObjectAction` — dynamic per-type capabilities |
 | `usage/` | `UsageTracker` — consumption, popularity, hourly timeline |
 
-**6 of the 12 are not reachable from the kernel or the API.** `dataos_system.py` imports only 11 engine classes;
-`catalog`, `diff`, `usage`, `actions`, and `governance` are fully implemented and tested but never wired in.
+**Kernel wiring is not equivalent to API exposure.** `dataos_system.py` currently imports and instantiates the graph, search, compute, profiling, quality, provenance, and query engines, alongside discovery, lineage, grounding, embedding, federation, ingestion, and other subsystems. The `governance`, `diff`, `catalog`, `actions`, and `usage` packages are separate engine areas; their presence or importability does not establish that a supported HTTP route exposes them. Treat API reachability as a route/contract inventory rather than inferring it from the number of imported classes.
 
 ---
 
@@ -290,14 +291,18 @@ model.
 
 ---
 
-## Storage and contract issues
+## Storage and contract status
 
-`PostgresStorage` has drifted from `SQLiteStorage`: `delete_object()` lacks the `soft` kwarg and `list_objects()`
-lacks `source`. The backend passes both, so those routes raise `TypeError` under Postgres — while
-`tests/test_storage_backends.py` asserts backend parity **only against mock mode**, so the tests miss it.
+The live PostgreSQL CI integration test now creates a pre-soft-delete schema and verifies the additive
+`deleted_at` migration, source-filtered object counts/listing, and soft-delete visibility against a real
+PostgreSQL service. The ordinary dual-backend suite still uses PostgreSQL mock mode for broad contract
+coverage, so this does not establish full production parity for every storage method or cloud adapter.
+Backup/restore, failover, and rollback drills remain release blockers.
 
-The frontend reads `r.source_id` / `r.target_id` from relationship JSON, but `Relationship.to_dict()` emits
-`source` / `target`. Every graph edge renders as `undefined`.
+The backend relationship serializer emits canonical `source` and `target` fields. The Dataspace PR branch
+normalizes those fields into graph edges, retains `source_id` / `target_id` compatibility for older
+integrations, and rejects malformed endpoints. The frontend regression suite covers the canonical and
+legacy contracts; confidence is now constrained to the API's inclusive `0..1` range.
 
 CORS uses an explicit `DATAOS_CORS_ORIGINS` allowlist (defaulting to local frontend origins), rejects wildcard or malformed origins, and does not enable credentialed cross-origin requests. In production, `/api/*` routes require the configured shared bearer token; this is not per-user identity or resource-level authorization, which remains a high-priority production blocker.
 

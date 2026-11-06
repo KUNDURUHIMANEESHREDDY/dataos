@@ -1,8 +1,11 @@
 "use client";
 
 import { useEffect, useState, lazy, Suspense } from "react";
-import { useSpatialStore } from "@/hooks/useSpatialStore";
+import { useSpatialStore, type ObjectType } from "@/hooks/useSpatialStore";
 import { api } from "@/lib/api";
+import paginate from "@/lib/paginate.js";
+import { toGraphEdge } from "@/lib/relationship-edge.js";
+import { loadGraphCollections } from "@/lib/load-graph-collections.js";
 import { useKeyboard } from "@/hooks/useKeyboard";
 import TopBar from "@/components/layout/TopBar";
 import Sidebar from "@/components/layout/Sidebar";
@@ -15,6 +18,10 @@ import EmptyState from "@/components/canvas/EmptyState";
 import CommandPalette from "@/components/ai/CommandPalette";
 
 const SpatialCanvas3D = lazy(() => import("@/components/canvas/SpatialCanvas3D"));
+const { loadBoundedPages } = paginate;
+
+const MAX_GRAPH_OBJECTS = 10_000;
+const MAX_GRAPH_RELATIONSHIPS = 20_000;
 
 function Canvas3DFallback() {
   return (
@@ -27,16 +34,56 @@ function Canvas3DFallback() {
   );
 }
 
-async function loadAllObjects() {
-  const pageSize = 500;
-  const objects: any[] = [];
-  for (let offset = 0; ; offset += pageSize) {
-    const page = await api.listObjects({ limit: pageSize, offset });
-    const batch = Array.isArray(page.objects) ? page.objects : [];
-    objects.push(...batch);
-    if (batch.length < pageSize) break;
+async function loadAllObjects(signal: AbortSignal) {
+  const result = await loadBoundedPages<any>(
+    ({ limit, offset, signal: requestSignal }) => api.listObjects(
+      { limit, offset },
+      requestSignal ? { signal: requestSignal } : undefined,
+    ),
+    "objects",
+    500,
+    MAX_GRAPH_OBJECTS,
+    signal,
+  );
+  return { objects: result.items, total: result.total, truncated: result.truncated };
+}
+
+async function loadAllRelationships(signal: AbortSignal) {
+  // The API caps each relationship page at 1,000 rows. Fetch bounded pages
+  // rather than requesting 5,000 in one call or accumulating an unbounded graph.
+  const result = await loadBoundedPages<any>(
+    ({ limit, offset, signal: requestSignal }) => api.listRelationships(
+      { limit, offset },
+      requestSignal ? { signal: requestSignal } : undefined,
+    ),
+    "relationships",
+    1000,
+    MAX_GRAPH_RELATIONSHIPS,
+    signal,
+  );
+  return { relationships: result.items, total: result.total, truncated: result.truncated };
+}
+
+function buildGraphNotice(
+  objects: { objects: unknown[]; total: number | null; truncated: boolean },
+  relationships: { relationships: unknown[]; total: number | null; truncated: boolean },
+) {
+  const limits: string[] = [];
+  if (objects.truncated) {
+    const total = objects.total === null
+      ? "at least " + (objects.objects.length + 1).toLocaleString()
+      : objects.total.toLocaleString();
+    limits.push(objects.objects.length.toLocaleString() + " of " + total + " objects");
   }
-  return { objects, total: objects.length };
+  if (relationships.truncated) {
+    const total = relationships.total === null
+      ? "at least " + (relationships.relationships.length + 1).toLocaleString()
+      : relationships.total.toLocaleString();
+    limits.push(relationships.relationships.length.toLocaleString() + " of " + total + " relationships");
+  }
+  if (limits.length === 0) return null;
+  return "Graph view is bounded to " + limits.join(" and ")
+    + " to protect browser memory and rendering performance. All records remain in storage; use search to locate specific objects.";
 }
 
 export default function DataspacePage() {
@@ -45,18 +92,29 @@ export default function DataspacePage() {
   const viewMode = useSpatialStore((s) => s.viewMode);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [reloadKey, setReloadKey] = useState(0);
+  const [notice, setNotice] = useState<string | null>(null);
 
   useKeyboard();
 
   useEffect(() => {
-    async function load() {
-      try {
-        const [objsRes, relsRes] = await Promise.all([
-          loadAllObjects(),
-          api.listRelationships({ limit: 5000 }),
-        ]);
+    const controller = new AbortController();
+    let active = true;
 
-        const typeMap: Record<string, string> = {
+    async function load() {
+      setLoading(true);
+      setError(null);
+      setNotice(null);
+      try {
+        const [objsRes, relsRes] = await loadGraphCollections(
+          controller,
+          loadAllObjects,
+          loadAllRelationships,
+        );
+
+        if (!active) return;
+
+        const typeMap: Record<string, ObjectType> = {
           document: "dataset",
           dataset: "dataset",
           csv: "dataset",
@@ -74,24 +132,28 @@ export default function DataspacePage() {
           properties: o.properties || {},
         }));
 
-        const edges = (relsRes.relationships || []).map((r: any) => ({
-          id: r.id || `${r.source}-${r.target}`,
-          source: r.source,
-          target: r.target,
-          type: r.relation_type || "related_to",
-          confidence: r.confidence ?? 1.0,
-        }));
+        const edges = (relsRes.relationships || []).flatMap((relationship: any) => {
+          const edge = toGraphEdge(relationship);
+          return edge ? [edge] : [];
+        });
 
         setObjects(objects);
         setEdges(edges);
-      } catch (err: any) {
-        setError(err.message);
+        setNotice(buildGraphNotice(objsRes, relsRes));
+      } catch (err) {
+        if (!active) return;
+        setError(err instanceof Error ? err.message : "An unknown error occurred while loading the workspace.");
       } finally {
-        setLoading(false);
+        if (active) setLoading(false);
       }
     }
+
     load();
-  }, [setObjects, setEdges]);
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, [setObjects, setEdges, reloadKey]);
 
   return (
     <div className="h-screen flex flex-col overflow-hidden">
@@ -100,7 +162,7 @@ export default function DataspacePage() {
         <Sidebar />
         <main className="flex-1 flex flex-col min-w-0 relative">
           {loading && (
-            <div className="absolute inset-0 flex items-center justify-center z-10">
+            <div className="absolute inset-0 flex items-center justify-center z-10" role="status" aria-live="polite">
               <div className="glass rounded-xl px-6 py-4 flex items-center gap-3 animate-fade-in">
                 <div className="w-5 h-5 border-2 border-[var(--color-dataset)] border-t-transparent rounded-full animate-spin" />
                 <span className="text-sm text-[var(--color-text-secondary)]">Loading workspace...</span>
@@ -109,18 +171,34 @@ export default function DataspacePage() {
           )}
 
           {error && (
-            <div className="absolute inset-0 flex items-center justify-center z-10">
-              <div className="glass rounded-xl px-6 py-4 max-w-md animate-fade-in">
+            <div className="absolute inset-0 flex items-center justify-center z-10" role="alert">
+              <div className="glass rounded-xl px-6 py-5 max-w-md animate-fade-in">
                 <div className="text-sm font-medium text-red-500 mb-1">Connection Error</div>
                 <div className="text-xs text-[var(--color-text-secondary)]">{error}</div>
                 <div className="text-[10px] text-[var(--color-text-tertiary)] mt-2">
                   Make sure the DataOS backend is running: python -m uvicorn backend.app:app --reload
                 </div>
+                <button
+                  type="button"
+                  onClick={() => setReloadKey((current) => current + 1)}
+                  className="mt-4 inline-flex items-center justify-center rounded-lg px-4 py-2 text-xs font-semibold bg-[var(--color-entity)] text-white transition-opacity hover:opacity-90 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--color-entity)]"
+                >
+                  Try again
+                </button>
               </div>
             </div>
           )}
 
           <div className="flex-1 relative overflow-hidden">
+            {notice && (
+              <div
+                className="absolute top-3 left-3 right-3 z-20 mx-auto max-w-3xl glass rounded-lg px-4 py-3 text-xs text-[var(--color-text-secondary)] shadow-lg"
+                role="status"
+                aria-live="polite"
+              >
+                {notice}
+              </div>
+            )}
             {viewMode === "2d" ? <SpatialCanvas /> : (
               <Suspense fallback={<Canvas3DFallback />}>
                 <SpatialCanvas3D />

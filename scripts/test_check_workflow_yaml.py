@@ -60,6 +60,7 @@ def _valid_workflow():
         }
     )
     return {
+        "on": {"pull_request": None},
         "jobs": {
             "security-required": security,
             "backend-required": _aggregate(backend_needs),
@@ -68,6 +69,21 @@ def _valid_workflow():
 
 
 class WorkflowYamlGateTests(unittest.TestCase):
+    def test_pull_request_trigger_is_required(self):
+        workflow = _valid_workflow()
+        del workflow["on"]["pull_request"]
+        self.assertFalse(validate_gate_contract(Path("workflow.yml"), workflow))
+
+    def test_pull_request_branch_filter_is_rejected(self):
+        workflow = _valid_workflow()
+        workflow["on"]["pull_request"] = {"branches": ["main"]}
+        self.assertFalse(validate_gate_contract(Path("workflow.yml"), workflow))
+
+    def test_pull_request_branches_ignore_filter_is_rejected(self):
+        workflow = _valid_workflow()
+        workflow["on"]["pull_request"] = {"branches-ignore": ["release/**"]}
+        self.assertFalse(validate_gate_contract(Path("workflow.yml"), workflow))
+
     def test_duplicate_mapping_key_is_rejected(self):
         source = "jobs:\n  backend: {}\n  backend: {}\n"
         with self.assertRaises(yaml.constructor.ConstructorError):
@@ -166,6 +182,32 @@ class WorkflowYamlGateTests(unittest.TestCase):
         workflow["jobs"]["security-required"]["steps"][0]["run"] = (
             "if false; then\n" + expected_guard + "\nfi"
         )
+        self.assertFalse(validate_gate_contract(Path("workflow.yml"), workflow))
+
+
+    def test_aggregate_guard_cannot_ignore_failure_with_step_continue_on_error(self):
+        workflow = _valid_workflow()
+        workflow["jobs"]["security-required"]["steps"][0]["continue-on-error"] = True
+        self.assertFalse(validate_gate_contract(Path("workflow.yml"), workflow))
+
+    def test_aggregate_job_cannot_ignore_failure_with_continue_on_error(self):
+        workflow = _valid_workflow()
+        workflow["jobs"]["backend-required"]["continue-on-error"] = True
+        self.assertFalse(validate_gate_contract(Path("workflow.yml"), workflow))
+
+    def test_aggregate_guard_cannot_be_conditionally_skipped(self):
+        workflow = _valid_workflow()
+        workflow["jobs"]["backend-required"]["steps"][0]["if"] = "false"
+        self.assertFalse(validate_gate_contract(Path("workflow.yml"), workflow))
+
+    def test_critical_alert_gate_cannot_ignore_failure_with_continue_on_error(self):
+        workflow = _valid_workflow()
+        workflow["jobs"]["security-required"]["steps"][-1]["continue-on-error"] = True
+        self.assertFalse(validate_gate_contract(Path("workflow.yml"), workflow))
+
+    def test_critical_alert_gate_cannot_be_conditionally_skipped(self):
+        workflow = _valid_workflow()
+        workflow["jobs"]["security-required"]["steps"][-1]["if"] = "false"
         self.assertFalse(validate_gate_contract(Path("workflow.yml"), workflow))
 
 
