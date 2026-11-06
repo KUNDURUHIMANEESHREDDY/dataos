@@ -137,6 +137,42 @@ class WorkflowYamlGateTests(unittest.TestCase):
         ]
         self.assertFalse(validate_gate_contract(Path("workflow.yml"), workflow))
 
+    def test_github_script_alert_gate_is_accepted_without_exported_token(self):
+        workflow = _valid_workflow()
+        step = workflow["jobs"]["security-required"]["steps"][-1]
+        step.pop("env", None)
+        step.pop("run", None)
+        step["uses"] = "actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b"
+        step["with"] = {"script": """
+const ref = context.eventName === "pull_request"
+  ? `refs/pull/${context.payload.pull_request.number}/merge`
+  : context.ref;
+const alerts = await github.paginate(
+  github.rest.codeScanning.listAlertsForRepo,
+  { owner: context.repo.owner, repo: context.repo.repo, state: "open", ref, per_page: 100 }
+);
+const blocking = alerts.filter(({ rule }) => ["critical", "high"].includes(rule?.security_severity_level));
+if (blocking.length > 0) core.setFailed("Open critical/high alerts must be fixed.");
+"""}
+        self.assertTrue(validate_gate_contract(Path("workflow.yml"), workflow))
+
+    def test_github_script_alert_gate_must_fail_closed(self):
+        workflow = _valid_workflow()
+        step = workflow["jobs"]["security-required"]["steps"][-1]
+        step.pop("env", None)
+        step.pop("run", None)
+        step["uses"] = "actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b"
+        step["with"] = {"script": """
+github.rest.codeScanning.listAlertsForRepo;
+github.paginate(
+  github.rest.codeScanning.listAlertsForRepo,
+  { state: "open", ref }
+);
+const blocking = alerts.filter(({ rule }) => ["critical", "high"].includes(rule?.security_severity_level));
+core.info("alerts found");
+"""}
+        self.assertFalse(validate_gate_contract(Path("workflow.yml"), workflow))
+
     def test_alert_gate_without_failing_on_nonzero_alerts_fails(self):
         workflow = _valid_workflow()
         alert_step = workflow["jobs"]["security-required"]["steps"][-1]
