@@ -127,7 +127,6 @@ def has_critical_high_alert_gate(job: dict) -> bool:
     )
     for step in job.get("steps", []):
         if not isinstance(step, dict) or not is_enforced_step(job, step):
-        if not isinstance(step, dict):
             continue
         if step.get("name") != "Fail on open critical/high code-scanning alerts":
             continue
