@@ -275,7 +275,7 @@ jobs:
               exit 1
             fi
             echo "No open critical/high alerts associated with this PR merge ref."
-          else
+          elif [[ "$GITHUB_REF_NAME" == "main" || "$GITHUB_REF_NAME" == "production-hardening" ]]; then
             alerts="$(fetch_alerts "ref=refs/heads/${GITHUB_REF_NAME}")"
             count="$(count_lines "$alerts")"
             echo "Open critical/high code-scanning alerts on ${GITHUB_REF_NAME}: $count"
@@ -284,6 +284,8 @@ jobs:
               echo "::error::Found $count open critical/high code-scanning alert(s); remediate before release."
               exit 1
             fi
+          else
+            echo "Feature-branch pushes are checked against the PR merge ref; default-branch alert baseline is enforced on main and production-hardening."
           fi
 
   backend-required:
