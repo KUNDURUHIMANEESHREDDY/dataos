@@ -66,6 +66,17 @@ def test_lineage_rejects_unbounded_depth_before_traversal(monkeypatch, max_depth
         run(api.get_lineage("root", direction="upstream", max_depth=max_depth))
     assert exc.value.status_code == 422
 
+@pytest.mark.parametrize("max_depth", [True, 1.5, "2"])
+def test_lineage_rejects_non_integer_depth_before_traversal(monkeypatch, max_depth):
+    def unexpected(*args, **kwargs):
+        pytest.fail("lineage traversal must not run for a non-integer depth")
+
+    monkeypatch.setattr(api.dataos.lineage, "trace_upstream_lineage", unexpected)
+    monkeypatch.setattr(api.dataos.lineage, "trace_downstream_impact", unexpected)
+    with pytest.raises(HTTPException) as exc:
+        run(api.get_lineage("root", direction="upstream", max_depth=max_depth))
+    assert exc.value.status_code == 422
+
 
 def test_lineage_accepts_only_supported_directions_with_bounded_depth(monkeypatch):
     monkeypatch.setattr(
@@ -487,7 +498,7 @@ def test_lineage_route_publishes_bounded_query_contract():
     assert by_name["direction"]["schema"]["enum"] == ["upstream", "downstream"]
     assert by_name["direction"]["schema"]["default"] == "upstream"
     assert by_name["max_depth"]["schema"]["minimum"] == 1
-    assert by_name["max_depth"]["schema"]["maximum"] == 10
+    assert by_name["max_depth"]["schema"]["maximum"] == 32
     assert by_name["max_depth"]["schema"]["default"] == 10
 
 
