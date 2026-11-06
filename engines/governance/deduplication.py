@@ -10,6 +10,7 @@ Implements:
 from __future__ import annotations
 import hashlib
 import heapq
+import math
 import re
 import datetime
 import uuid
@@ -106,6 +107,14 @@ class DuplicateDetectionEngine:
         optional graph-link side effects. return_metadata adds the exact match count
         so API callers can signal truncation without retaining every result in memory.
         """
+        if (
+            isinstance(min_similarity, bool)
+            or not isinstance(min_similarity, (int, float))
+            or not math.isfinite(min_similarity)
+            or not 0.0 < min_similarity <= 1.0
+        ):
+            raise ValueError("min_similarity must be a finite number greater than 0.0 and at most 1.0")
+
         if max_results is not None and (
             isinstance(max_results, bool) or not isinstance(max_results, int) or max_results < 1
         ):
