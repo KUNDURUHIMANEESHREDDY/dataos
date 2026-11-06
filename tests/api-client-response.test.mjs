@@ -97,3 +97,26 @@ test("rejects malformed JSON success responses with a stable error", async (t) =
     message: "API 200: invalid or empty JSON response",
   });
 });
+
+
+test("merges caller headers without dropping the default JSON content type", async (t) => {
+  let requestHeaders;
+  withFetch(t, async (_input, init) => {
+    requestHeaders = new Headers(init?.headers);
+    return new Response("[]", {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  });
+
+  await api.listObjects(undefined, {
+    headers: new Headers([
+      ["authorization", "Bearer test-token"],
+      ["x-request-id", "request-123"],
+    ]),
+  });
+
+  assert.equal(requestHeaders.get("content-type"), "application/json");
+  assert.equal(requestHeaders.get("authorization"), "Bearer test-token");
+  assert.equal(requestHeaders.get("x-request-id"), "request-123");
+});
