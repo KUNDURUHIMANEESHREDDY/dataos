@@ -487,7 +487,7 @@ def test_lineage_route_publishes_bounded_query_contract():
     assert by_name["direction"]["schema"]["enum"] == ["upstream", "downstream"]
     assert by_name["direction"]["schema"]["default"] == "upstream"
     assert by_name["max_depth"]["schema"]["minimum"] == 1
-    assert by_name["max_depth"]["schema"]["maximum"] == 10
+    assert by_name["max_depth"]["schema"]["maximum"] == 32
     assert by_name["max_depth"]["schema"]["default"] == 10
 
 

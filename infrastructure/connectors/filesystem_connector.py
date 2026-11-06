@@ -28,25 +28,63 @@ class FilesystemConnector(BaseConnector):
 
     def __init__(self, name: str, config: Dict[str, Any]):
         super().__init__(name, config)
-        self.root_path = config.get("root_path", ".")
+        self.root_path = Path(config.get("root_path", ".")).expanduser().resolve()
         self.glob_pattern = config.get("glob_pattern", "**/*")
         self.max_depth = config.get("max_depth", 10)
         self.include_hidden = config.get("include_hidden", False)
         self.file_types = config.get("file_types", [])
         self.encoding = config.get("encoding", "utf-8")
 
+    def _resolve_path(self, resource_id: str, expected_type: str) -> Path:
+        """Resolve a relative resource beneath the configured root, rejecting escapes and symlinks."""
+        if not isinstance(resource_id, str) or not resource_id:
+            raise ValueError("Resource path must be a non-empty relative path.")
+        relative = Path(resource_id)
+        if relative.is_absolute() or any(part == ".." for part in relative.parts):
+            raise ValueError("Resource path must stay within the configured filesystem root.")
+
+        root = Path(self.root_path).expanduser().resolve(strict=True)
+        current = root
+        for part in relative.parts:
+            if part in ("", "."):
+                continue
+            current = current / part
+            if current.is_symlink():
+                raise ValueError("Symbolic links are not allowed in filesystem resource paths.")
+
+        try:
+            resolved = (root / relative).resolve(strict=True)
+            resolved.relative_to(root)
+        except FileNotFoundError as exc:
+            raise FileNotFoundError("Filesystem resource not found.") from exc
+        except ValueError as exc:
+            raise ValueError("Resource path resolves outside the configured filesystem root.") from exc
+
+        if expected_type == "file" and not resolved.is_file():
+            raise FileNotFoundError("Filesystem resource is not a regular file.")
+        if expected_type == "directory" and not resolved.is_dir():
+            raise FileNotFoundError("Filesystem resource is not a directory.")
+        return resolved
+
     def test_connection(self) -> bool:
         """Verify the root path exists and is readable."""
-        return os.path.isdir(self.root_path) and os.access(self.root_path, os.R_OK)
+        return self.root_path.is_dir() and os.access(self.root_path, os.R_OK)
 
     def list_resources(self) -> List[Dict[str, Any]]:
-        """List all files and directories under root_path matching the glob pattern."""
+        """List regular files/directories under the root without following symlinks."""
         resources = []
-        root = Path(self.root_path)
+        root = Path(self.root_path).expanduser().resolve()
         if not root.is_dir():
             return resources
 
         for item in root.glob(self.glob_pattern):
+            try:
+                if item.is_symlink():
+                    continue
+                resolved = item.resolve(strict=True)
+                resolved.relative_to(root)
+            except (OSError, ValueError):
+                continue
             if not self.include_hidden and item.name.startswith("."):
                 continue
             if len(item.parts) - len(root.parts) > self.max_depth:
@@ -54,46 +92,35 @@ class FilesystemConnector(BaseConnector):
             if self.file_types and item.suffix.lower() not in self.file_types:
                 continue
 
-            stat = item.stat()
+            stat = resolved.stat()
             resources.append({
-                "id": str(item.relative_to(root)),
-                "type": "directory" if item.is_dir() else "file",
-                "name": item.name,
-                "path": str(item),
-                "size": stat.st_size if item.is_file() else 0,
-                "extension": item.suffix.lower(),
+                "id": str(resolved.relative_to(root)),
+                "type": "directory" if resolved.is_dir() else "file",
+                "name": resolved.name,
+                "path": str(resolved),
+                "size": stat.st_size if resolved.is_file() else 0,
+                "extension": resolved.suffix.lower(),
                 "modified": stat.st_mtime,
             })
 
         return resources
 
     def read_resource(self, resource_id: str) -> Dict[str, Any]:
-        """
-        Read a file's content and metadata.
-        resource_id is the relative path from root_path.
-        """
-        file_path = Path(self.root_path) / resource_id
-        if not file_path.is_file():
-            raise FileNotFoundError(f"File not found: {file_path}")
-
+        """Read a regular file after enforcing root containment."""
+        file_path = self._resolve_path(resource_id, "file")
         stat = file_path.stat()
         content = None
         is_binary = False
 
-        # Try text read first, fallback to binary
         try:
             content = file_path.read_text(encoding=self.encoding)
         except (UnicodeDecodeError, ValueError):
             is_binary = True
-            content = None
 
-        content_hash = None
         if content is not None:
-            content_hash = hashlib.sha256(str(content).encode()).hexdigest()[:16]
+            content_hash = hashlib.sha256(content.encode()).hexdigest()[:16]
         else:
-            # Hash the raw bytes
-            raw = file_path.read_bytes()
-            content_hash = hashlib.sha256(raw).hexdigest()[:16]
+            content_hash = hashlib.sha256(file_path.read_bytes()).hexdigest()[:16]
 
         return {
             "resource_id": resource_id,
@@ -159,22 +186,30 @@ class FilesystemConnector(BaseConnector):
         )
 
     def read_directory(self, sub_path: str = ".", limit: int = 100) -> List[Dict[str, Any]]:
-        """Read all files in a subdirectory."""
-        dir_path = Path(self.root_path) / sub_path
-        if not dir_path.is_dir():
-            return []
+        """Read a bounded directory listing beneath the configured root."""
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 1000:
+            raise ValueError("limit must be between 1 and 1000.")
+        dir_path = self._resolve_path(sub_path, "directory")
+        root = Path(self.root_path).expanduser().resolve()
         results = []
         for item in sorted(dir_path.iterdir()):
             if len(results) >= limit:
                 break
-            if not self.include_hidden and item.name.startswith("."):
+            if item.is_symlink():
                 continue
-            stat = item.stat()
+            try:
+                resolved = item.resolve(strict=True)
+                resolved.relative_to(root)
+            except (OSError, ValueError):
+                continue
+            if not self.include_hidden and resolved.name.startswith("."):
+                continue
+            stat = resolved.stat()
             results.append({
-                "name": item.name,
-                "path": str(item.relative_to(Path(self.root_path))),
-                "type": "directory" if item.is_dir() else "file",
-                "size": stat.st_size if item.is_file() else 0,
+                "name": resolved.name,
+                "path": str(resolved.relative_to(root)),
+                "type": "directory" if resolved.is_dir() else "file",
+                "size": stat.st_size if resolved.is_file() else 0,
             })
         return results
 

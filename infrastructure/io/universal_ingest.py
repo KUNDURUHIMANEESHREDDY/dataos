@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import json
 from typing import Dict, Any, List, Optional
+from pathlib import Path
 from core.object.model import DataObject, ObjectType
 from infrastructure.storage.base import StorageBackend
 from infrastructure.storage.blob_store import FileBlobStorage
@@ -23,11 +24,21 @@ from intelligence.media import MediaProcessor as MediaTranscriptParser
 class UniversalIngestionPipeline:
     """Universal multi-format data ingestion pipeline."""
 
-    def __init__(self, storage: StorageBackend, blob_store: Optional[FileBlobStorage] = None, db_path: str = "dataos.db"):
+    def __init__(
+        self,
+        storage: StorageBackend,
+        blob_store: Optional[FileBlobStorage] = None,
+        db_path: str = "dataos.db",
+        allowed_file_root: Optional[str] = None,
+    ):
         self.storage = storage
         self.blob_store = blob_store or FileBlobStorage()
         self.discovery = RelationshipDiscoveryEngine(storage)
         self.vector_index = PersistentVectorIndex(db_path=db_path)
+        root_value = allowed_file_root or os.environ.get("DATAOS_INGEST_ROOT")
+        self.allowed_file_root = Path(root_value).expanduser().resolve() if root_value else None
+        if self.allowed_file_root is not None and not self.allowed_file_root.is_dir():
+            raise ValueError("DATAOS_INGEST_ROOT must point to an existing directory.")
 
     def ingest(
         self,
@@ -36,17 +47,37 @@ class UniversalIngestionPipeline:
         discover_relations: bool = True
     ) -> Dict[str, Any]:
         """
-        Unified ingestion entry point for any file format.
+        Ingest text/bytes content or an explicitly scoped local file.
+
+        Strings are always treated as content, never as filesystem paths.
+        PathLike inputs must be a basename inside DATAOS_INGEST_ROOT (or the
+        explicit allowed_file_root constructor argument).
         """
-        # Determine filename and content
-        if isinstance(file_path_or_content, str) and os.path.exists(file_path_or_content):
-            file_path = file_path_or_content
-            fn = filename or os.path.basename(file_path)
-            with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
-                content_str = f.read()
+        if isinstance(file_path_or_content, os.PathLike):
+            if self.allowed_file_root is None:
+                raise ValueError(
+                    "Path-based ingestion is disabled; configure DATAOS_INGEST_ROOT "
+                    "or pass file contents with filename."
+                )
+            raw_path = os.fspath(file_path_or_content)
+            if not isinstance(raw_path, str) or not raw_path or raw_path != os.path.basename(raw_path):
+                raise ValueError("Local ingestion accepts only a filename within DATAOS_INGEST_ROOT.")
+            resolved_path = (self.allowed_file_root / raw_path).resolve(strict=True)
+            if resolved_path.parent != self.allowed_file_root or not resolved_path.is_file():
+                raise ValueError("Local ingestion path must resolve to a regular file directly under DATAOS_INGEST_ROOT.")
+            fn = filename or resolved_path.name
+            raw_content = resolved_path.read_bytes()
         else:
             fn = filename or "unnamed_artifact"
-            content_str = str(file_path_or_content)
+            raw_content = file_path_or_content if isinstance(file_path_or_content, bytes) else str(file_path_or_content)
+
+        if isinstance(raw_content, bytes):
+            try:
+                content_str = raw_content.decode("utf-8")
+            except UnicodeDecodeError:
+                content_str = raw_content.decode("latin-1")
+        else:
+            content_str = raw_content
 
         ext = os.path.splitext(fn)[1].lower()
         extracted_tables = []

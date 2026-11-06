@@ -20,7 +20,8 @@ from infrastructure.storage.blob_store import FileBlobStorage
 class TestDataOSKernel(unittest.TestCase):
 
     def setUp(self):
-        self.temp_db = tempfile.mktemp(suffix=".db")
+        fd, self.temp_db = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
         self.temp_blob_dir = tempfile.mkdtemp()
         self.storage = SQLiteStorage(db_path=self.temp_db)
         self.blob_store = FileBlobStorage(root_dir=self.temp_blob_dir)

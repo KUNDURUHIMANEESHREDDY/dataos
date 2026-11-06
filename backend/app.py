@@ -17,7 +17,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from starlette.concurrency import run_in_threadpool
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 
 from dataos_system import DataOS
 from core.object.model import DataObject, ObjectType
@@ -32,7 +32,7 @@ from core.permissions.auth import (
 )
 from backend.knowledge_rag import create_knowledge_router
 from backend.cors_config import cors_middleware_options
-from backend.authorization import CapabilityMiddleware
+from backend.authorization import CapabilityMiddleware, get_user_store
 from backend.workflow_api import WorkflowRequestError, execute_safe_workflow
 from runtime.workflows.workflow_engine import WorkflowEngine
 
@@ -179,6 +179,58 @@ app.add_middleware(CapabilityMiddleware)
 app.include_router(create_knowledge_router(dataos))
 
 
+async def get_current_user(
+    authorization: Optional[str] = Header(default=None),
+) -> Optional[User]:
+    """Resolve an optional per-user JWT; shared deployment tokens are not user identities."""
+    if not jwt_configured():
+        return None
+
+    scheme, separator, supplied = (authorization or "").partition(" ")
+    if not separator or scheme.lower() != "bearer" or not supplied.strip():
+        return None
+
+    try:
+        claims = decode_jwt(supplied.strip())
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid bearer token.",
+            headers={"WWW-Authenticate": "Bearer"},
+        ) from exc
+
+    store = await run_in_threadpool(get_user_store)
+    user = await run_in_threadpool(store.get_by_id, str(claims.get("sub", "")))
+    if user is None:
+        raise HTTPException(
+            status_code=401,
+            detail="Unknown user.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return user
+
+
+def require_capability(capability: str):
+    """Build a FastAPI dependency that enforces a capability for the JWT user."""
+    async def dependency(
+        current_user: Optional[User] = Depends(get_current_user),
+    ) -> User:
+        if current_user is None:
+            raise HTTPException(
+                status_code=401,
+                detail="A bearer token is required.",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        if not current_user.has_capability(capability):
+            raise HTTPException(
+                status_code=403,
+                detail=f"Capability '{capability}' is not permitted for role '{current_user.role}'.",
+            )
+        return current_user
+
+    return dependency
+
+
 # =============================================================================
 # REQUEST / RESPONSE MODELS
 # =============================================================================
@@ -233,6 +285,20 @@ class WorkflowExecutionRequest(BaseModel):
     context: Dict[str, Any] = Field(default_factory=dict)
 
 
+class RegisterRequest(BaseModel):
+    # Public self-registration never accepts a caller-selected role.
+    model_config = ConfigDict(extra="forbid")
+    username: str = Field(min_length=1, max_length=128)
+    email: str = Field(min_length=3, max_length=320)
+    password: str = Field(min_length=8, max_length=1024)
+
+
+class LoginRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    login: str = Field(min_length=1, max_length=320)
+    password: str = Field(min_length=1, max_length=1024)
+
+
 # =============================================================================
 # AUTH ROUTES
 # =============================================================================
@@ -245,7 +311,8 @@ async def register_user(req: RegisterRequest):
             detail="User auth is disabled until DATAOS_JWT_SECRET is configured.",
         )
     try:
-        user = user_store.register(req.username, req.email, req.password, role=req.role)
+        store = await run_in_threadpool(get_user_store)
+        user = await run_in_threadpool(store.register, req.username, req.email, req.password)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return user.to_dict()
@@ -258,7 +325,8 @@ async def login_user(req: LoginRequest):
             status_code=503,
             detail="User auth is disabled until DATAOS_JWT_SECRET is configured.",
         )
-    user = user_store.authenticate(req.login, req.password)
+    store = await run_in_threadpool(get_user_store)
+    user = await run_in_threadpool(store.authenticate, req.login, req.password)
     if user is None:
         raise HTTPException(
             status_code=401,
@@ -282,7 +350,9 @@ async def list_users(current_user: Optional[User] = Depends(get_current_user)):
         raise HTTPException(status_code=503, detail="User auth is not configured.")
     if current_user.role != "admin":
         raise HTTPException(status_code=403, detail="Admin role required.")
-    return {"total": len(user_store.list_users()), "users": user_store.list_users()}
+    store = await run_in_threadpool(get_user_store)
+    users = await run_in_threadpool(store.list_users)
+    return {"total": len(users), "users": users}
 
 
 # =============================================================================
@@ -651,8 +721,14 @@ async def evaluate_quality(object_id: str, req: QualityEvaluateRequest):
 async def get_lineage(
     object_id: str,
     direction: Literal["upstream", "downstream"] = FastQuery(default="upstream"),
-    max_depth: int = FastQuery(default=10, ge=1, le=10),
+    max_depth: int = FastQuery(default=10, ge=1, le=32),
 ):
+    # Direct Python callers bypass FastAPI's request validation, so keep the
+    # same contract at the engine boundary as well.
+    if direction not in {"upstream", "downstream"}:
+        raise HTTPException(status_code=400, detail="direction must be upstream or downstream")
+    if isinstance(max_depth, bool) or not isinstance(max_depth, int) or not 1 <= max_depth <= 32:
+        raise HTTPException(status_code=422, detail="max_depth must be between 1 and 32")
     if direction == "upstream":
         return dataos.lineage.trace_upstream_lineage(object_id, max_depth=max_depth)
     return dataos.lineage.trace_downstream_impact(object_id, max_depth=max_depth)

@@ -41,6 +41,11 @@ def _get_user_store() -> UserStore:
     return _user_store
 
 
+def get_user_store() -> UserStore:
+    """Return the process-wide user store shared by routes and middleware."""
+    return _get_user_store()
+
+
 def _matches(path: str, prefix: str) -> bool:
     normalized = prefix if prefix.endswith("/") else prefix + "/"
     return path == prefix.rstrip("/") or path == prefix or path.startswith(normalized)
