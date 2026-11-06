@@ -11,6 +11,8 @@ from __future__ import annotations
 import hashlib
 import heapq
 import re
+import datetime
+import uuid
 from typing import Dict, Any, List, Set, Tuple, Optional, Union
 from core.object.model import DataObject
 from core.relation.model import Relationship, RelationType
@@ -214,15 +216,47 @@ class DuplicateDetectionEngine:
                             heapq.heapreplace(result_heap, candidate)
                         sequence += 1
 
-                    # Auto-link candidate duplicates in the graph (Rule #58)
+                    # Similarity edges are symmetric. Reuse an existing edge in either
+                    # direction, and use a deterministic ID for new edges so concurrent
+                    # scans converge on one row instead of inserting duplicate links.
                     if auto_link_graph:
-                        self.storage.save_relationship(Relationship(
-                            source=obj_a.id,
-                            target=obj_b.id,
-                            relation_type=RelationType.SIMILAR_TO.value,
-                            confidence=sim_score,
-                            metadata={"method": method, "is_exact": is_exact}
-                        ))
+                        relation_type = RelationType.SIMILAR_TO.value
+                        existing = self.storage.list_relationships(
+                            source_id=obj_a.id,
+                            target_id=obj_b.id,
+                            relation_type=relation_type,
+                            limit=1,
+                        )
+                        if not existing:
+                            existing = self.storage.list_relationships(
+                                source_id=obj_b.id,
+                                target_id=obj_a.id,
+                                relation_type=relation_type,
+                                limit=1,
+                            )
+
+                        if existing:
+                            relationship = existing[0]
+                            relationship.confidence = sim_score
+                            relationship.metadata = {"method": method, "is_exact": is_exact}
+                            relationship.updated_at = datetime.datetime.now(
+                                datetime.timezone.utc
+                            ).isoformat()
+                        else:
+                            pair_key = "\\0".join(sorted((obj_a.id, obj_b.id)))
+                            relationship_id = str(uuid.uuid5(
+                                uuid.NAMESPACE_URL,
+                                f"dataos://similar-to/{pair_key}",
+                            ))
+                            relationship = Relationship(
+                                id=relationship_id,
+                                source=obj_a.id,
+                                target=obj_b.id,
+                                relation_type=relation_type,
+                                confidence=sim_score,
+                                metadata={"method": method, "is_exact": is_exact},
+                            )
+                        self.storage.save_relationship(relationship)
 
         if max_results is not None:
             results = [
