@@ -199,7 +199,8 @@ async def get_current_user(
             headers={"WWW-Authenticate": "Bearer"},
         ) from exc
 
-    user = get_user_store().get_by_id(str(claims.get("sub", "")))
+    store = await run_in_threadpool(get_user_store)
+    user = await run_in_threadpool(store.get_by_id, str(claims.get("sub", "")))
     if user is None:
         raise HTTPException(
             status_code=401,
@@ -310,7 +311,8 @@ async def register_user(req: RegisterRequest):
             detail="User auth is disabled until DATAOS_JWT_SECRET is configured.",
         )
     try:
-        user = get_user_store().register(req.username, req.email, req.password)
+        store = await run_in_threadpool(get_user_store)
+        user = await run_in_threadpool(store.register, req.username, req.email, req.password)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return user.to_dict()
@@ -323,7 +325,8 @@ async def login_user(req: LoginRequest):
             status_code=503,
             detail="User auth is disabled until DATAOS_JWT_SECRET is configured.",
         )
-    user = get_user_store().authenticate(req.login, req.password)
+    store = await run_in_threadpool(get_user_store)
+    user = await run_in_threadpool(store.authenticate, req.login, req.password)
     if user is None:
         raise HTTPException(
             status_code=401,
@@ -347,7 +350,8 @@ async def list_users(current_user: Optional[User] = Depends(get_current_user)):
         raise HTTPException(status_code=503, detail="User auth is not configured.")
     if current_user.role != "admin":
         raise HTTPException(status_code=403, detail="Admin role required.")
-    users = get_user_store().list_users()
+    store = await run_in_threadpool(get_user_store)
+    users = await run_in_threadpool(store.list_users)
     return {"total": len(users), "users": users}
 
 
