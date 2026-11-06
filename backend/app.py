@@ -11,7 +11,7 @@ import uuid
 import datetime
 import hmac
 import threading
-from typing import Dict, Any, List, Literal, Optional
+from typing import Annotated, Dict, Any, List, Literal, Optional
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Depends, Header, Request, Response, Query as FastQuery
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -83,7 +83,10 @@ def _production_mode() -> bool:
     )
 
 
-def require_production_api_token(request: Request, authorization: Optional[str] = Header(default=None)) -> None:
+def require_production_api_token(
+    request: Request,
+    authorization: Annotated[Optional[str], Header()] = None,
+) -> None:
     """Require an application bearer or per-user JWT for protected production API routes.
 
     Login and registration must remain reachable before a browser has a session.
@@ -194,7 +197,7 @@ app.include_router(create_knowledge_router(dataos))
 
 async def get_current_user(
     request: Request,
-    authorization: Optional[str] = Header(default=None),
+    authorization: Annotated[Optional[str], Header()] = None,
 ) -> Optional[User]:
     """Resolve a per-user JWT from an HttpOnly session cookie or Bearer header."""
     if not jwt_configured():
