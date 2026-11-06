@@ -383,3 +383,28 @@ def test_non_api_health_path_remains_available_without_api_token(monkeypatch):
         any(dependency.call is api.require_production_api_token for dependency in route.dependant.dependencies)
         for route in api_routes
     )
+
+
+
+def test_catalog_summary_route_returns_engine_contract(monkeypatch):
+    expected = {
+        "total_objects": 3,
+        "sampled_objects": 3,
+        "total_relationships": 2,
+        "sampled_relationships": 2,
+        "metrics_scope": "complete",
+        "is_partial": False,
+    }
+    monkeypatch.setattr(api.catalog_engine, "get_catalog_summary", lambda: expected)
+    assert run(api.get_catalog_summary()) == expected
+
+
+def test_catalog_summary_route_hides_storage_failure_details(monkeypatch):
+    def unavailable():
+        raise RuntimeError("database password must not leak")
+
+    monkeypatch.setattr(api.catalog_engine, "get_catalog_summary", unavailable)
+    with pytest.raises(HTTPException) as exc:
+        run(api.get_catalog_summary())
+    assert exc.value.status_code == 503
+    assert exc.value.detail == "DataOS catalog summary is unavailable"
