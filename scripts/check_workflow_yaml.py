@@ -125,12 +125,34 @@ def has_critical_high_alert_gate(job: dict) -> bool:
         'if [[ "$count" != "0" ]]',
         "exit 1",
     )
+    github_script_fragments = (
+        "github.rest.codeScanning.listAlertsForRepo",
+        "github.paginate(",
+        'state: "open"',
+        "ref,",
+        '["critical", "high"]',
+        "blocking.length > 0",
+        "core.setFailed(",
+    )
     for step in job.get("steps", []):
         if not isinstance(step, dict) or not is_enforced_step(job, step):
-        if not isinstance(step, dict):
             continue
         if step.get("name") != "Fail on open critical/high code-scanning alerts":
             continue
+
+        # Prefer the GitHub Script integration: it uses the action's scoped
+        # token rather than exporting a bearer token into the shell environment.
+        uses = step.get("uses")
+        with_config = step.get("with")
+        script = with_config.get("script") if isinstance(with_config, dict) else None
+        if (
+            isinstance(uses, str)
+            and uses.startswith("actions/github-script@")
+            and isinstance(script, str)
+            and all(fragment in script for fragment in github_script_fragments)
+        ):
+            return True
+
         env = step.get("env")
         run = step.get("run")
         if not isinstance(env, dict) or not isinstance(run, str):
