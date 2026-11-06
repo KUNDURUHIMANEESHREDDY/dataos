@@ -1,8 +1,9 @@
 "use client";
 
 import { useEffect, useState, lazy, Suspense } from "react";
-import { useSpatialStore } from "@/hooks/useSpatialStore";
+import { useSpatialStore, type ObjectType } from "@/hooks/useSpatialStore";
 import { api } from "@/lib/api";
+import paginate from "@/lib/paginate.js";
 import { useKeyboard } from "@/hooks/useKeyboard";
 import TopBar from "@/components/layout/TopBar";
 import Sidebar from "@/components/layout/Sidebar";
@@ -15,6 +16,7 @@ import EmptyState from "@/components/canvas/EmptyState";
 import CommandPalette from "@/components/ai/CommandPalette";
 
 const SpatialCanvas3D = lazy(() => import("@/components/canvas/SpatialCanvas3D"));
+const { loadAllPages } = paginate;
 
 function Canvas3DFallback() {
   return (
@@ -28,15 +30,23 @@ function Canvas3DFallback() {
 }
 
 async function loadAllObjects() {
-  const pageSize = 500;
-  const objects: any[] = [];
-  for (let offset = 0; ; offset += pageSize) {
-    const page = await api.listObjects({ limit: pageSize, offset });
-    const batch = Array.isArray(page.objects) ? page.objects : [];
-    objects.push(...batch);
-    if (batch.length < pageSize) break;
-  }
+  const objects = await loadAllPages<any>(
+    ({ limit, offset }) => api.listObjects({ limit, offset }),
+    "objects",
+    500,
+  );
   return { objects, total: objects.length };
+}
+
+async function loadAllRelationships() {
+  // The API caps each relationship page at 1,000 rows. Fetch every page rather
+  // than requesting 5,000 in one call (which FastAPI rejects with HTTP 422).
+  const relationships = await loadAllPages<any>(
+    ({ limit, offset }) => api.listRelationships({ limit, offset }),
+    "relationships",
+    1000,
+  );
+  return { relationships, total: relationships.length };
 }
 
 export default function DataspacePage() {
@@ -45,18 +55,21 @@ export default function DataspacePage() {
   const viewMode = useSpatialStore((s) => s.viewMode);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [reloadKey, setReloadKey] = useState(0);
 
   useKeyboard();
 
   useEffect(() => {
     async function load() {
+      setLoading(true);
+      setError(null);
       try {
         const [objsRes, relsRes] = await Promise.all([
           loadAllObjects(),
-          api.listRelationships({ limit: 5000 }),
+          loadAllRelationships(),
         ]);
 
-        const typeMap: Record<string, string> = {
+        const typeMap: Record<string, ObjectType> = {
           document: "dataset",
           dataset: "dataset",
           csv: "dataset",
@@ -84,14 +97,14 @@ export default function DataspacePage() {
 
         setObjects(objects);
         setEdges(edges);
-      } catch (err: any) {
-        setError(err.message);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "An unknown error occurred while loading the workspace.");
       } finally {
         setLoading(false);
       }
     }
     load();
-  }, [setObjects, setEdges]);
+  }, [setObjects, setEdges, reloadKey]);
 
   return (
     <div className="h-screen flex flex-col overflow-hidden">
@@ -100,7 +113,7 @@ export default function DataspacePage() {
         <Sidebar />
         <main className="flex-1 flex flex-col min-w-0 relative">
           {loading && (
-            <div className="absolute inset-0 flex items-center justify-center z-10">
+            <div className="absolute inset-0 flex items-center justify-center z-10" role="status" aria-live="polite">
               <div className="glass rounded-xl px-6 py-4 flex items-center gap-3 animate-fade-in">
                 <div className="w-5 h-5 border-2 border-[var(--color-dataset)] border-t-transparent rounded-full animate-spin" />
                 <span className="text-sm text-[var(--color-text-secondary)]">Loading workspace...</span>
@@ -109,13 +122,20 @@ export default function DataspacePage() {
           )}
 
           {error && (
-            <div className="absolute inset-0 flex items-center justify-center z-10">
-              <div className="glass rounded-xl px-6 py-4 max-w-md animate-fade-in">
+            <div className="absolute inset-0 flex items-center justify-center z-10" role="alert">
+              <div className="glass rounded-xl px-6 py-5 max-w-md animate-fade-in">
                 <div className="text-sm font-medium text-red-500 mb-1">Connection Error</div>
                 <div className="text-xs text-[var(--color-text-secondary)]">{error}</div>
                 <div className="text-[10px] text-[var(--color-text-tertiary)] mt-2">
                   Make sure the DataOS backend is running: python -m uvicorn backend.app:app --reload
                 </div>
+                <button
+                  type="button"
+                  onClick={() => setReloadKey((current) => current + 1)}
+                  className="mt-4 inline-flex items-center justify-center rounded-lg px-4 py-2 text-xs font-semibold bg-[var(--color-entity)] text-white transition-opacity hover:opacity-90 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--color-entity)]"
+                >
+                  Try again
+                </button>
               </div>
             </div>
           )}
