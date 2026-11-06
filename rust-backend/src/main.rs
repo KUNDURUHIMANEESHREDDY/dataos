@@ -835,6 +835,10 @@ async fn create_object(
     Extension(CurrentUser(user)): Extension<CurrentUser>,
     Json(req): Json<ObjectCreateRequest>,
 ) -> Result<Json<Value>, ApiError> {
+    let metadata = req.metadata.unwrap_or(json!({}));
+    if !metadata.is_object() {
+        return Err(ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, "metadata must be a JSON object."));
+    }
     let object = if let Some(user) = user {
         state.db.create_object_for_owner(
             req.object_type.as_deref().unwrap_or("document"),
@@ -842,7 +846,7 @@ async fn create_object(
             req.properties.unwrap_or(json!({})),
             req.content.unwrap_or(json!({})),
             req.source.as_deref().unwrap_or("api://rust"),
-            req.metadata.unwrap_or(json!({})),
+            metadata,
             &user.id,
         )
     } else {
@@ -852,7 +856,7 @@ async fn create_object(
             req.properties.unwrap_or(json!({})),
             req.content.unwrap_or(json!({})),
             req.source.as_deref().unwrap_or("api://rust"),
-            req.metadata.unwrap_or(json!({})),
+            metadata,
         )
     }.map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     ok_json(object)
