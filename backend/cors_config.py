@@ -1,5 +1,6 @@
 """Strict CORS origin configuration for the DataOS API."""
 
+import ipaddress
 from urllib.parse import urlsplit
 
 DEFAULT_DEV_ORIGINS = (
@@ -37,9 +38,17 @@ def parse_cors_origins(raw: str | None) -> list[str]:
         except ValueError as exc:
             raise ValueError(f"Invalid CORS origin: {candidate!r}") from exc
 
+        scheme = parsed.scheme.lower()
+        hostname = (parsed.hostname or "").lower().rstrip(".")
+        try:
+            is_loopback_ip = ipaddress.ip_address(hostname).is_loopback
+        except ValueError:
+            is_loopback_ip = False
+        is_loopback_host = is_loopback_ip or hostname == "localhost" or hostname.endswith(".localhost")
+
         if (
-            parsed.scheme.lower() not in {"http", "https"}
-            or not parsed.hostname
+            scheme not in {"http", "https"}
+            or not hostname
             or parsed.username is not None
             or parsed.password is not None
             or parsed.path not in {"", "/"}
@@ -49,8 +58,12 @@ def parse_cors_origins(raw: str | None) -> list[str]:
             raise ValueError(
                 f"Invalid CORS origin {candidate!r}; provide only scheme and host, with an optional port"
             )
+        if scheme == "http" and not is_loopback_host:
+            raise ValueError(
+                f"Remote CORS origin {candidate!r} must use HTTPS; HTTP is allowed only for loopback development"
+            )
 
-        origin = f"{parsed.scheme.lower()}://{parsed.netloc.lower()}"
+        origin = f"{scheme}://{parsed.netloc.lower()}"
         if origin not in origins:
             origins.append(origin)
 
