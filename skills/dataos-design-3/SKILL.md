@@ -30,7 +30,7 @@ A notebook-first interface where data exploration happens in documents, not dash
 │  ○   │                                                  │
 │      │  ──────────────────────────────────────────────  │
 │  ○   │  ▸ [Code Cell] Ingest data                      │
-│      │    dataos.ingest("sales_q4.csv")                │
+│      │    dataos.ingest_file("sales_q4.csv")                │
 │  ◉   │    ✓ 2,400 rows ingested (0.3s)                 │
 │      │                                                  │
 │  ○   │  ──────────────────────────────────────────────  │
