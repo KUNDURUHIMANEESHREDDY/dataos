@@ -382,6 +382,25 @@ async fn explicit_read_acl_scopes_list_search_sql_and_never_grants_write() {
     assert_eq!(query["success"], true, "reader SQL query failed: {query}");
     assert_eq!(query["row_count"], 2);
 
+    let (status, agent_search) = call(
+        &app,
+        Method::POST,
+        "/api/agents/execute",
+        Some(json!({"agent_id":"agent_research","capability":"search","params":{"query":"alpha"}})),
+        Some(&reader),
+    ).await;
+    assert_eq!(status, StatusCode::OK, "agent search failed: {agent_search}");
+    assert!(agent_search["result"]["results"].as_array().expect("agent search results").iter().any(|item| item["id"] == shared_id));
+
+    let (status, agent_read) = call(
+        &app,
+        Method::POST,
+        "/api/agents/execute",
+        Some(json!({"agent_id":"agent_research","capability":"read_object","params":{"object_id":shared_id}})),
+        Some(&reader),
+    ).await;
+    assert_eq!(status, StatusCode::OK, "agent read should honor explicit ACL: {agent_read}");
+
     let public_id = create_dataset(&app, &owner, SAMPLE_CSV).await;
     let mut public = db.get_object(&public_id).expect("read public object").expect("public object exists");
     public["permissions"] = json!({
@@ -412,6 +431,20 @@ async fn explicit_read_acl_scopes_list_search_sql_and_never_grants_write() {
     let admin = register(&app, &db, "admin").await;
     let (status, admin_read) = call(&app, Method::GET, &format!("/api/objects/{write_only_id}"), None, Some(&admin)).await;
     assert_eq!(status, StatusCode::OK, "explicit administrator bypass should remain available: {admin_read}");
+
+    let (status, export) = call(
+        &app,
+        Method::POST,
+        "/api/agents/execute",
+        Some(json!({"agent_id":"agent_research","capability":"export_data"})),
+        Some(&reader),
+    ).await;
+    assert_eq!(status, StatusCode::OK, "scoped agent export failed: {export}");
+    let exported_ids: Vec<&str> = export["result"]["objects"].as_array().expect("export objects")
+        .iter().filter_map(|object| object["id"].as_str()).collect();
+    assert!(exported_ids.contains(&shared_id.as_str()));
+    assert!(!exported_ids.contains(&write_only_id.as_str()), "write-only object leaked through agent export");
+
 }
 
 #[tokio::test]
