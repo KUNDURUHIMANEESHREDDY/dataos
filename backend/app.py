@@ -201,7 +201,18 @@ app.add_middleware(
 app.add_middleware(CapabilityMiddleware)
 
 
-app.include_router(create_knowledge_router(dataos))
+app.include_router(
+    create_knowledge_router(
+        dataos,
+        get_current_user=get_current_user,
+        requires_identity=lambda user: requires_per_user_identity(
+            user,
+            production_mode=_production_mode(),
+            jwt_auth_configured=jwt_configured(),
+        ),
+        can_read_object=can_read_object,
+    )
+)
 
 
 async def get_current_user(
