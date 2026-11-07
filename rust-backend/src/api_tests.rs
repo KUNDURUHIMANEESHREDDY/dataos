@@ -623,8 +623,8 @@ async fn sql_executes_over_registered_dataset() {
 async fn sql_does_not_silently_choose_between_duplicate_dataset_aliases() {
     let (app, db) = test_app();
     let token = register(&app, &db, "operator").await;
-    let first_id = create_dataset(&app, &token, "id,name,score\\n1,first,10\\n").await;
-    let second_id = create_dataset(&app, &token, "id,name,score\\n2,second,20\\n").await;
+    let first_id = create_dataset(&app, &token, "id,name,score\n1,first,10\n").await;
+    let second_id = create_dataset(&app, &token, "id,name,score\n2,second,20\n").await;
     let first_table = format!("tbl_{}", &first_id[..8]);
     let second_table = format!("tbl_{}", &second_id[..8]);
 
