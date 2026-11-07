@@ -3,7 +3,8 @@ from __future__ import annotations
 import json
 import re
 from typing import Any, Dict, Iterable, List, Optional, Sequence
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
+from fastapi.params import Depends as DependsParam
 from pydantic import BaseModel, Field
 
 TOKEN_RE = re.compile(r"[a-zA-Z0-9_]{2,}")
@@ -82,17 +83,52 @@ def resolve_related_files(selected_ids: Sequence[str], relationships: Iterable[A
         if neighbor not in candidates or confidence > candidates[neighbor]["confidence"]: candidates[neighbor] = candidate
     return sorted(candidates.values(), key=lambda x: (-x["confidence"], x["file_id"]))[:max_related_files]
 
-def create_knowledge_router(dataos: Any) -> APIRouter:
+def create_knowledge_router(
+    dataos: Any,
+    *,
+    get_current_user: Any = None,
+    requires_identity: Any = None,
+    can_read_object: Any = None,
+) -> APIRouter:
     router = APIRouter(tags=["Knowledge Graph RAG"])
+
+    async def anonymous_user() -> None:
+        return None
+
+    user_dependency = get_current_user or anonymous_user
+
     @router.post("/api/knowledge/query", summary="Retrieve evidence from selected and related files")
-    async def query_knowledge(req: KnowledgeQueryRequest) -> Dict[str, Any]:
+    async def query_knowledge(
+        req: KnowledgeQueryRequest,
+        current_user: Any = Depends(user_dependency),
+    ) -> Dict[str, Any]:
+        # Direct unit calls bypass FastAPI dependency resolution. Treat an
+        # unresolved dependency marker as anonymous, then apply the same
+        # production/JWT identity guard used by the object and SQL routes.
+        if isinstance(current_user, DependsParam):
+            current_user = None
+        if requires_identity is not None and requires_identity(current_user):
+            raise HTTPException(
+                status_code=401,
+                detail="A per-user session is required for knowledge retrieval.",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        if current_user is not None and can_read_object is None:
+            raise HTTPException(status_code=503, detail="Knowledge resource authorization is unavailable.")
         selected_ids = list(dict.fromkeys(req.selected_file_ids))
         selected: Dict[str, Any] = {}
         missing = []
         for file_id in selected_ids:
             obj = dataos.storage.get_object(file_id)
-            if obj is None: missing.append(file_id)
-            else: selected[file_id] = obj
+            if obj is None or (
+                current_user is not None
+                and can_read_object is not None
+                and not can_read_object(current_user, obj)
+            ):
+                # Do not disclose whether an inaccessible object exists.
+                missing.append(file_id)
+            else:
+                selected[file_id] = obj
         if missing:
             raise HTTPException(status_code=404, detail={"message":"One or more selected files no longer exist.","missing_file_ids":missing})
         relationships: List[Any] = []
@@ -107,8 +143,22 @@ def create_knowledge_router(dataos: Any) -> APIRouter:
                         key = (rel.get("id"), rel.get("source_id") or rel.get("source"), rel.get("target_id") or rel.get("target"), rel.get("relation_type") or rel.get("type"))
                         if key not in seen: seen.add(key); relationships.append(rel)
         related = resolve_related_files(selected_ids, relationships, req.max_related_files if req.include_related else 0, req.min_confidence)
-        related_objects = {item["file_id"]: dataos.storage.get_object(item["file_id"]) for item in related}
-        related_objects = {k:v for k,v in related_objects.items() if v is not None}
+        related_objects = {
+            item["file_id"]: dataos.storage.get_object(item["file_id"])
+            for item in related
+        }
+        related_objects = {
+            key: obj
+            for key, obj in related_objects.items()
+            if obj is not None
+            and (
+                current_user is None
+                or can_read_object is None
+                or can_read_object(current_user, obj)
+            )
+        }
+        # Related objects are optional context: silently omit inaccessible
+        # neighbors rather than returning their names, IDs, or excerpts.
         eligible = {**selected, **related_objects}
         evidence = []
         for file_id, obj in eligible.items():

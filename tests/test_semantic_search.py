@@ -9,6 +9,7 @@ from engines.search.vector_index import (
     PersistentVectorIndex, TFIDFVectorEmbeddingModel,
     SentenceTransformerEmbeddingModel, BaseEmbeddingModel,
 )
+from engines.search.search_engine import HybridSearchEngine
 from core.object.model import DataObject
 
 
@@ -67,6 +68,16 @@ class TestPersistentVectorIndex(unittest.TestCase):
         results = self.index.search_similar("test")
         self.assertEqual(len(results), 0)
 
+    def test_large_object_allowlist_is_chunked_for_sqlite(self):
+        self.index.index_object(DataObject(id="v1", type="document", content="project data"))
+        allowed = ["v1"] + [f"other-{index}" for index in range(1200)]
+        results = self.index.search_similar("project", object_ids=allowed)
+        self.assertEqual([item["object_id"] for item in results], ["v1"])
+
+    def test_empty_object_allowlist_returns_no_vector_results(self):
+        self.index.index_object(DataObject(id="private", type="document", content="project secret"))
+        self.assertEqual(self.index.search_similar("project", object_ids=[]), [])
+
     def test_search_with_filter_ids(self):
         self.index.index_object(DataObject(id="v1", type="document", content="data science"))
         self.index.index_object(DataObject(id="v2", type="document", content="data engineering"))
@@ -124,6 +135,28 @@ class TestPersistentVectorIndex(unittest.TestCase):
         text = self.index._extract_object_text(obj)
         self.assertIn("dataset", text)
         self.assertIn("data.csv", text)
+
+
+class TestHybridSearchObjectFiltering(unittest.TestCase):
+    def test_explicit_allowlist_filters_search_results(self):
+        class Storage:
+            def __init__(self):
+                self.objects = [
+                    DataObject(id="visible", type="document", content="project launch plan"),
+                    DataObject(id="private", type="document", content="project secret plan"),
+                ]
+
+            def list_objects(self, limit=5000):
+                return self.objects[:limit]
+
+            def list_relationships(self, **kwargs):
+                return []
+
+        engine = HybridSearchEngine(Storage())
+        results = engine.search("project plan", object_ids=["visible"])
+        self.assertTrue(results)
+        self.assertEqual({item["object_id"] for item in results}, {"visible"})
+        self.assertEqual(engine.search("project plan", object_ids=[]), [])
 
 
 class TestBaseEmbeddingModel(unittest.TestCase):
