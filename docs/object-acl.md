@@ -17,7 +17,7 @@ The Rust/Axum backend stores the complete permission document on each object. Th
 - Object GET and object listing apply read ACLs before returning content or pagination totals.
 - Text search uses the authenticated principal's readable-object set.
 - SQL dataset registration uses the authenticated principal's readable-object set.
-- Object-addressed graph/lineage checks and relationship visibility use read access.
+- Object-addressed graph/lineage checks and relationship visibility use read access. Relationship lists now apply indexed endpoint ACL predicates in SQL before pagination and counting, rather than loading a large global page and issuing per-row authorization queries.
 - Relationship creation and object deletion require write access in addition to role capabilities.
 
 The ACL index has indexes for principal/permission/object lookup and object/permission/principal lookup. Existing permission arrays are backfilled once by additive schema migration version 1. Object records are not rewritten by the backfill. Subsequent object writes replace the object's index rows atomically with the object and version update.
