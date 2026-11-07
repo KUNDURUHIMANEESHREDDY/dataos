@@ -1302,7 +1302,9 @@ async def ingest_text(
         form = await request.form(
             max_files=0,
             max_fields=3,
-            max_part_size=MAX_TEXT_INGEST_BYTES,
+            # URL-encoded parsers count field names and separators in the
+            # parser budget; the exact content-byte limit is checked below.
+            max_part_size=MAX_TEXT_INGEST_BYTES + 16 * 1024,
         )
     except MultiPartException as exc:
         status_code = 400 if str(exc).startswith("Too many fields") else 413
