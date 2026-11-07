@@ -99,3 +99,17 @@ def test_sql_requires_identity_when_production_or_jwt_auth_is_enabled():
         production_mode=True,
         jwt_auth_configured=True,
     )
+
+
+def test_new_objects_default_to_private_permissions_for_the_authenticated_owner():
+    from backend.sql_authorization import user_owned_object_permissions
+
+    permissions = user_owned_object_permissions(
+        SimpleNamespace(id="alice", role="analyst")
+    )
+
+    assert permissions == {
+        "owner": "alice",
+        "read": ["alice"],
+        "write": ["alice"],
+    }
