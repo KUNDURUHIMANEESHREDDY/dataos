@@ -102,9 +102,15 @@ def test_graph_analytics_uses_supported_namespace(monkeypatch):
 
 
 def test_compute_routes_call_real_kernel_methods(monkeypatch):
-    monkeypatch.setattr(api.dataos, "sql", lambda query: {"sql": query})
+    monkeypatch.setattr(api.dataos, "sql", lambda query: {
+        "success": True, "rows": [{"sql": query}], "columns": ["sql"],
+        "row_count": 1, "execution_time_ms": 0, "provenance": {},
+    })
     monkeypatch.setattr(api.dataos, "python", lambda code, input_object_ids=None: {"code": code, "inputs": input_object_ids})
-    assert run(api.compute_sql(api.SQLQueryRequest(query="SELECT 1"), current_user=None)) == {"sql": "SELECT 1"}
+    assert run(api.compute_sql(api.SQLQueryRequest(query="SELECT 1"), current_user=None)) == {
+        "success": True, "rows": [{"sql": "SELECT 1"}], "columns": ["sql"],
+        "row_count": 1, "execution_time_ms": 0, "provenance": {},
+    }
     assert run(api.compute_python(api.PythonComputeRequest(code="print(1)", input_object_ids=["obj-1"]))) == {
         "code": "print(1)", "inputs": ["obj-1"]
     }
@@ -151,7 +157,10 @@ def test_compute_sql_scopes_execution_to_readable_datasets(monkeypatch):
 
     result = run(api.compute_sql(api.SQLQueryRequest(query="SELECT 1"), current_user=user))
 
-    assert result == {"success": True, "rows": []}
+    assert result == {
+        "success": True, "rows": [], "columns": [], "row_count": 0,
+        "execution_time_ms": 0, "provenance": {},
+    }
     assert captured == {
         "query": "SELECT 1",
         "table_objects": [dataset],
@@ -220,10 +229,14 @@ def test_python_compute_requires_explicit_production_opt_in(monkeypatch):
 
 
 def test_unified_query_auto_dispatches_sql_and_natural_language(monkeypatch):
-    monkeypatch.setattr(api.dataos, "sql", lambda query: {"kind": "sql", "query": query})
+    monkeypatch.setattr(api.dataos, "sql", lambda query: {
+        "success": True, "rows": [{"query": query}], "columns": ["query"],
+        "row_count": 1, "execution_time_ms": 0, "provenance": {},
+    })
     monkeypatch.setattr(api.dataos, "ask", lambda query: {"kind": "ask", "query": query})
     assert run(api.query_unified(api.UnifiedQueryRequest(query="SELECT 1"), current_user=None)) == {
-        "kind": "sql", "query": "SELECT 1"
+        "success": True, "rows": [{"query": "SELECT 1"}], "columns": ["query"],
+        "row_count": 1, "execution_time_ms": 0, "provenance": {},
     }
     assert run(api.query_unified(api.UnifiedQueryRequest(query="Why is this dataset empty?"), current_user=None)) == {
         "kind": "ask", "query": "Why is this dataset empty?"
