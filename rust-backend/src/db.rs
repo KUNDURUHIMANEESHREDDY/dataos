@@ -356,7 +356,7 @@ impl Db {
         let conn = self.conn.lock().map_err(|_| "database lock poisoned".to_string())?;
         let mut sql = format!(
             "{} WHERE deleted_at IS NULL AND (
-                json_extract(CASE WHEN json_valid(permissions) THEN permissions ELSE '{}' END, '$.owner') = ?
+                json_extract(CASE WHEN json_valid(permissions) THEN permissions ELSE '{{}}' END, '$.owner') = ?
                 OR EXISTS (
                     SELECT 1 FROM object_acl_grants AS g
                     WHERE g.object_id = objects.id
