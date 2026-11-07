@@ -635,6 +635,27 @@ async def compute_python(req: PythonComputeRequest):
     return res
 
 
+def _safe_sql_response(result: Any) -> Any:
+    """Remove internal exception details before returning SQL failures to clients."""
+    if not isinstance(result, dict) or result.get("success") is not False:
+        return result
+
+    sanitized = dict(result)
+    safe_message = "SQL query could not be executed."
+    sanitized["error"] = safe_message
+    for key in ("exception", "traceback", "stack_trace", "stacktrace"):
+        sanitized.pop(key, None)
+
+    provenance = sanitized.get("provenance")
+    if isinstance(provenance, dict):
+        provenance = dict(provenance)
+        provenance["error"] = safe_message
+        for key in ("exception", "traceback", "stack_trace", "stacktrace"):
+            provenance.pop(key, None)
+        sanitized["provenance"] = provenance
+    return sanitized
+
+
 @app.post("/api/query/", summary="Unified Query Execution")
 async def query_unified(req: UnifiedQueryRequest, current_user: Optional[User] = Depends(get_current_user)):
     current_user = _resolved_current_user(current_user)
@@ -674,14 +695,14 @@ async def query_unified(req: UnifiedQueryRequest, current_user: Optional[User] =
         if current_user is None:
             # Preserve unauthenticated local development only when per-user
             # authentication has not been configured.
-            return dataos.sql(req.query)
+            return _safe_sql_response(dataos.sql(req.query))
 
         readable_datasets = datasets_readable_by_user(dataos.storage, current_user)
-        return dataos.sql_engine.execute_sql(
+        return _safe_sql_response(dataos.sql_engine.execute_sql(
             req.query,
             table_objects=readable_datasets,
             agent_or_user=f"user:{current_user.id}",
-        )
+        ))
     if query_type == "python":
         require_python_compute_enabled()
         return dataos.python(req.query)
