@@ -73,3 +73,39 @@ def test_ingest_text_forwards_authenticated_owner_acl(monkeypatch):
             "write": ["alice"],
         },
     }
+
+
+@pytest.mark.parametrize(
+    ("handler", "kwargs", "expected_filename", "expected_discovery"),
+    [
+        ("ingest_notebook_api", {"filename": "private.ipynb", "content": "{}"}, "private.ipynb", True),
+        ("extract_rich_document_api", {"filename": "private.md", "content": "# Private"}, "private.md", True),
+        ("universal_ingest_api", {"filename": "private.json", "content": "{}", "discover_relations": False}, "private.json", False),
+    ],
+)
+def test_all_ingestion_routes_forward_creator_acl(
+    monkeypatch, handler, kwargs, expected_filename, expected_discovery
+):
+    captured = {}
+
+    def ingest(content, filename, discover_relations, permissions=None):
+        captured.update(
+            content=content,
+            filename=filename,
+            discover_relations=discover_relations,
+            permissions=permissions,
+        )
+        return {"status": "ingested"}
+
+    monkeypatch.setattr(api.dataos, "ingest", ingest)
+    route = getattr(api, handler)
+    result = asyncio.run(route(**kwargs, current_user=SimpleNamespace(id="alice")))
+
+    assert result == {"status": "ingested"}
+    assert captured["filename"] == expected_filename
+    assert captured["discover_relations"] is expected_discovery
+    assert captured["permissions"] == {
+        "owner": "alice",
+        "read": ["alice"],
+        "write": ["alice"],
+    }
