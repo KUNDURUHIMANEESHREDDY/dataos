@@ -647,16 +647,45 @@ async def graph_analytics(algorithm: str = "pagerank"):
 # =============================================================================
 
 @app.post("/api/compute/sql", summary="Execute SQL Query")
-async def compute_sql(req: SQLQueryRequest):
-    res = dataos.sql(req.query)
-    return res
+async def compute_sql(
+    req: SQLQueryRequest,
+    current_user: Optional[User] = Depends(get_current_user),
+):
+    current_user = _resolved_current_user(current_user)
+    _request_object_permissions(current_user)
+    if current_user is None:
+        return _safe_sql_response(dataos.sql(req.query))
+
+    readable_datasets = datasets_readable_by_user(dataos.storage, current_user)
+    return _safe_sql_response(dataos.sql_engine.execute_sql(
+        req.query,
+        table_objects=readable_datasets,
+        agent_or_user=f"user:{current_user.id}",
+    ))
 
 
 @app.post("/api/compute/python", summary="Execute Python Sandbox")
-async def compute_python(req: PythonComputeRequest):
+async def compute_python(
+    req: PythonComputeRequest,
+    current_user: Optional[User] = Depends(get_current_user),
+):
     require_python_compute_enabled()
-    res = dataos.python(req.code, input_object_ids=req.input_object_ids)
-    return res
+    current_user = _resolved_current_user(current_user)
+    _request_object_permissions(current_user)
+    if current_user is None:
+        return dataos.python(
+            req.code,
+            input_object_ids=req.input_object_ids,
+            agent_or_user=req.agent_or_user,
+        )
+
+    allowed_ids = set(_readable_object_ids(current_user) or [])
+    scoped_ids = [object_id for object_id in req.input_object_ids if object_id in allowed_ids]
+    return dataos.python(
+        req.code,
+        input_object_ids=scoped_ids,
+        agent_or_user=f"user:{current_user.id}",
+    )
 
 
 def _safe_sql_response(result: Any) -> Any:
