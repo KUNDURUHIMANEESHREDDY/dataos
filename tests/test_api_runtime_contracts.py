@@ -260,7 +260,7 @@ def test_ingest_text_does_not_use_client_filename_as_temp_path(monkeypatch):
         called.update(content=content, filename=filename, discover_relations=discover_relations)
         return {"status": "ingested"}
     monkeypatch.setattr(api.dataos, "ingest", ingest)
-    result = run(api.ingest_text(filename="../../outside.md", content="safe text"))
+    result = run(api.ingest_text(filename="../../outside.md", content="safe text", current_user=None))
     assert result == {"status": "ingested"}
     assert called == {"content": "safe text", "filename": "outside.md", "discover_relations": True}
 
