@@ -150,6 +150,58 @@ def test_unresolved_fastapi_dependency_fails_closed_in_production(monkeypatch):
 
 
 
+
+def test_direct_sql_endpoint_uses_user_readable_datasets(monkeypatch):
+    import asyncio
+    import importlib
+
+    api = importlib.import_module("backend.app")
+    user = SimpleNamespace(id="alice", role="analyst")
+    dataset = SimpleNamespace(id="owned-dataset")
+    captured = {}
+    monkeypatch.setattr(api, "datasets_readable_by_user", lambda storage, principal: [dataset])
+    monkeypatch.setattr(
+        api.dataos.sql_engine,
+        "execute_sql",
+        lambda query, **kwargs: captured.update(query=query, **kwargs) or {"success": True},
+    )
+
+    result = asyncio.run(
+        api.compute_sql(api.SQLQueryRequest(query="SELECT * FROM sales"), current_user=user)
+    )
+
+    assert result == {"success": True}
+    assert captured["table_objects"] == [dataset]
+    assert captured["agent_or_user"] == "user:alice"
+
+
+def test_direct_python_endpoint_intersects_requested_ids_with_user_acl(monkeypatch):
+    import asyncio
+    import importlib
+
+    api = importlib.import_module("backend.app")
+    user = SimpleNamespace(id="alice", role="analyst")
+    captured = {}
+    monkeypatch.setattr(api, "require_python_compute_enabled", lambda: None)
+    monkeypatch.setattr(api, "_readable_object_ids", lambda principal: ["owned", "shared"])
+    monkeypatch.setattr(
+        api.dataos,
+        "python",
+        lambda code, **kwargs: captured.update(code=code, **kwargs) or {"success": True},
+    )
+
+    result = asyncio.run(
+        api.compute_python(
+            api.PythonComputeRequest(code="result = 1", input_object_ids=["owned", "private"]),
+            current_user=user,
+        )
+    )
+
+    assert result == {"success": True}
+    assert captured["input_object_ids"] == ["owned"]
+    assert captured["agent_or_user"] == "user:alice"
+
+
 def test_authenticated_search_uses_only_readable_object_ids(monkeypatch):
     import asyncio
     import importlib
