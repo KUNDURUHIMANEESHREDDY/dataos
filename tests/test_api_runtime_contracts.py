@@ -509,3 +509,43 @@ def test_lineage_route_dispatches_only_the_two_supported_directions(monkeypatch)
     assert upstream == {"direction": "upstream", "object_id": "root", "max_depth": 4}
     assert downstream == {"direction": "downstream", "object_id": "root", "max_depth": 2}
     assert calls == [("upstream", "root", 4), ("downstream", "root", 2)]
+
+@pytest.mark.parametrize(
+    ("managed_key", "managed_value"),
+    [
+        ("content_hash", "0" * 64),
+        ("blob", {"sha256": "0" * 64, "path": "/untrusted/client/path"}),
+    ],
+)
+def test_object_creation_rejects_client_supplied_storage_metadata(
+    monkeypatch, managed_key, managed_value
+):
+    def unexpected_save(_obj):
+        pytest.fail("server-managed metadata must be rejected before persistence")
+
+    monkeypatch.setattr(api.dataos.storage, "save_object", unexpected_save)
+    request = api.ObjectCreateRequest(metadata={managed_key: managed_value})
+
+    with pytest.raises(HTTPException) as exc:
+        run(api.create_object(request, current_user=None))
+
+    assert exc.value.status_code == 422
+    assert "managed by DataOS" in exc.value.detail
+    assert managed_key in exc.value.detail
+
+
+def test_object_creation_preserves_ordinary_client_metadata(monkeypatch):
+    saved = {}
+
+    def capture_object(obj):
+        saved["object"] = obj
+        return obj
+
+    monkeypatch.setattr(api.dataos.storage, "save_object", capture_object)
+    result = run(api.create_object(
+        api.ObjectCreateRequest(metadata={"source_note": "uploaded through API"}),
+        current_user=None,
+    ))
+
+    assert result["metadata"]["source_note"] == "uploaded through API"
+    assert saved["object"].metadata["source_note"] == "uploaded through API"
