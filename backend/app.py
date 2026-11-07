@@ -451,6 +451,19 @@ def _request_object_permissions(current_user: Optional[User]) -> Optional[Dict[s
     return user_owned_object_permissions(current_user) if current_user is not None else None
 
 
+def _readable_object_ids(current_user: Optional[User]) -> Optional[List[str]]:
+    """Return the bounded set of object IDs visible to this principal."""
+    current_user = _resolved_current_user(current_user)
+    if current_user is None:
+        return None
+    visible, _ = list_objects_readable_by_user(
+        dataos.storage,
+        current_user,
+        limit=5000,
+    )
+    return [obj.id for obj in visible]
+
+
 def _ensure_object_access(current_user: Optional[User], obj: DataObject, *, write: bool = False) -> None:
     current_user = _resolved_current_user(current_user)
     _request_object_permissions(current_user)
@@ -718,12 +731,18 @@ async def query_unified(req: UnifiedQueryRequest, current_user: Optional[User] =
         require_python_compute_enabled()
         return dataos.python(req.query)
     if query_type in {"ask", "natural_language"}:
+        if current_user is not None:
+            raise HTTPException(
+                status_code=501,
+                detail="User-scoped natural-language retrieval is not available yet.",
+            )
         return dataos.ask(req.query)
     if query_type == "search":
         results = dataos.search_engine.search(
             query=req.query,
             context_object_id=req.context_object_id,
             limit=20,
+            object_ids=_readable_object_ids(current_user),
         )
         return {"query": req.query, "total_matches": len(results), "results": results}
     raise HTTPException(
@@ -741,13 +760,17 @@ async def hybrid_search(
     q: str = FastQuery(..., description="Search query string"),
     object_type: Optional[str] = None,
     context_id: Optional[str] = None,
-    limit: int = FastQuery(default=20, ge=1, le=100)
+    limit: int = FastQuery(default=20, ge=1, le=100),
+    current_user: Optional[User] = Depends(get_current_user),
 ):
+    current_user = _resolved_current_user(current_user)
+    _request_object_permissions(current_user)
     results = dataos.search_engine.search(
         query=q,
         object_type=object_type,
         context_object_id=context_id,
         limit=limit,
+        object_ids=_readable_object_ids(current_user),
     )
     return {"query": q, "total_matches": len(results), "results": results}
 
@@ -756,8 +779,15 @@ async def hybrid_search(
 async def search_vectors(
     q: str = FastQuery(..., description="Semantic query string"),
     top_k: int = FastQuery(default=10, ge=1, le=100),
+    current_user: Optional[User] = Depends(get_current_user),
 ):
-    results = dataos.search_vector(query_text=q, top_k=top_k)
+    current_user = _resolved_current_user(current_user)
+    _request_object_permissions(current_user)
+    results = dataos.vector_index.search_similar(
+        query_text=q,
+        top_k=top_k,
+        object_ids=_readable_object_ids(current_user),
+    )
     return {"query": q, "total_matches": len(results), "results": results}
 
 
@@ -1131,9 +1161,18 @@ class AskDataOSRequest(BaseModel):
 
 
 @app.post("/api/ask", summary="Ask DataOS Grounded System Query")
-async def ask_dataos_api(req: AskDataOSRequest):
-    res = dataos.ask(req.query)
-    return res
+async def ask_dataos_api(
+    req: AskDataOSRequest,
+    current_user: Optional[User] = Depends(get_current_user),
+):
+    current_user = _resolved_current_user(current_user)
+    _request_object_permissions(current_user)
+    if current_user is not None:
+        raise HTTPException(
+            status_code=501,
+            detail="User-scoped natural-language retrieval is not available yet.",
+        )
+    return dataos.ask(req.query)
 
 
 @app.post("/api/ingest/universal", summary="Universal Multi-Format Ingestion")
