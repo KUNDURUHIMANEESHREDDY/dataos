@@ -1399,3 +1399,45 @@ fn principal_scoped_research_routes_are_not_admin_only_aggregates() {
         "global export must remain admin-only"
     );
 }
+
+#[tokio::test]
+async fn sql_does_not_register_datasets_unreadable_by_principal() {
+    let (app, db) = test_app();
+    let owner = register(&app, &db, "operator").await;
+    let reader = register(&app, &db, "analyst").await;
+
+    // The dataset is private to its creator. Knowing its deterministic table
+    // alias must not let another principal query its contents.
+    let private_id = create_dataset(&app, &owner, SAMPLE_CSV).await;
+    let private_table = format!("tbl_{}", &private_id[..8]);
+    let query = format!("SELECT name FROM {private_table} ORDER BY name");
+
+    let (status, body) = call(
+        &app,
+        Method::POST,
+        "/api/compute/sql",
+        Some(json!({"query": query})),
+        Some(&reader),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "SQL endpoint contract changed: {body}");
+    assert_eq!(
+        body["success"],
+        false,
+        "a principal must not query a dataset outside its read ACL: {body}"
+    );
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap_or("")
+            .to_ascii_lowercase()
+            .contains("no such table"),
+        "unreadable datasets must not be registered in the query schema: {body}"
+    );
+    assert!(
+        !body.to_string().contains("alpha"),
+        "private dataset content leaked through SQL: {body}"
+    );
+}
+
