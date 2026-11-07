@@ -145,8 +145,6 @@ fn is_global_data_route(path: &str) -> bool {
         "/api/federation/search" |
         "/api/vectors/search" |
         "/api/ask" |
-        "/api/query" |
-        "/api/query/" |
         "/api/agents/execute" |
         "/api/workflows/execute" |
         "/api/vectors/recompute" |
