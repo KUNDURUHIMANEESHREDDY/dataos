@@ -61,6 +61,14 @@ _DENIED_SQLITE_ACTIONS = frozenset(
 logger = logging.getLogger(__name__)
 
 
+class SQLExecutionError(ValueError):
+    """A safe, caller-visible SQL validation failure with a stable error code."""
+
+    def __init__(self, message: str, code: str):
+        super().__init__(message)
+        self.code = code
+
+
 class SQLExecutionEngine:
     """Execute bounded, read-only SQL against registered DataOS objects."""
 
@@ -116,8 +124,9 @@ class SQLExecutionEngine:
             if not isinstance(sql_query, str) or not sql_query.strip():
                 raise ValueError("SQL query must be a non-empty string")
             if len(sql_query.encode("utf-8")) > self.MAX_QUERY_BYTES:
-                raise ValueError(
-                    f"SQL query exceeds the {self.MAX_QUERY_BYTES}-byte limit"
+                raise SQLExecutionError(
+                    f"SQL query exceeds the {self.MAX_QUERY_BYTES}-byte limit.",
+                    "SQL_QUERY_TOO_LARGE",
                 )
 
             if table_objects is None:
@@ -185,8 +194,9 @@ class SQLExecutionEngine:
 
             rows = cursor.fetchmany(self.MAX_RESULT_ROWS + 1)
             if len(rows) > self.MAX_RESULT_ROWS:
-                raise ValueError(
-                    f"SQL query result exceeds the {self.MAX_RESULT_ROWS}-row limit"
+                raise SQLExecutionError(
+                    f"SQL query result exceeds the {self.MAX_RESULT_ROWS}-row limit.",
+                    "SQL_RESULT_LIMIT_EXCEEDED",
                 )
 
             columns = [column[0] for column in cursor.description]
@@ -224,7 +234,12 @@ class SQLExecutionEngine:
             # Keep SQLite diagnostics server-side; never return exception text
             # that may reveal schema, paths, SQL fragments, or internal state.
             logger.warning("SQL execution failed (%s)", type(exc).__name__)
-            safe_error = "SQL query could not be executed."
+            if isinstance(exc, SQLExecutionError):
+                safe_error = str(exc)
+                error_code = exc.code
+            else:
+                safe_error = "SQL query could not be executed."
+                error_code = "SQL_EXECUTION_FAILED"
             return {
                 "success": False,
                 "query": sql_query,
@@ -239,7 +254,7 @@ class SQLExecutionEngine:
                     "error": safe_error,
                     "executed_at": now,
                 },
-                "error_code": "SQL_EXECUTION_FAILED",
+                "error_code": error_code,
                 "error": safe_error,
             }
         finally:

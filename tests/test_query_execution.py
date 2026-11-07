@@ -96,6 +96,7 @@ class TestQueryExecution(unittest.TestCase):
         query = "SELECT 1 -- " + ("x" * SQLExecutionEngine.MAX_QUERY_BYTES)
         result = self.sql_engine.execute_sql(query, table_objects=[])
         self.assertFalse(result["success"])
+        self.assertEqual(result["error_code"], "SQL_QUERY_TOO_LARGE")
         self.assertIn("byte limit", result["error"])
 
     def test_sql_engine_rejects_oversized_result(self):
@@ -106,6 +107,7 @@ class TestQueryExecution(unittest.TestCase):
         )
         result = self.sql_engine.execute_sql(query, table_objects=[])
         self.assertFalse(result["success"])
+        self.assertEqual(result["error_code"], "SQL_RESULT_LIMIT_EXCEEDED")
         self.assertIn("row limit", result["error"])
 
     def test_sql_engine_enforces_execution_deadline(self):
