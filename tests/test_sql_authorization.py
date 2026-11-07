@@ -2,6 +2,8 @@
 
 from types import SimpleNamespace
 
+import pytest
+
 from backend.sql_authorization import (
     can_read_object,
     can_write_object,
