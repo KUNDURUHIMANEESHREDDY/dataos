@@ -336,6 +336,150 @@ async fn object_ownership_isolation_blocks_cross_user_reads_writes_and_relations
     assert_eq!(own_object["id"], alice_object);
 }
 
+
+#[tokio::test]
+async fn explicit_read_acl_scopes_list_search_sql_and_never_grants_write() {
+    let (app, db) = test_app();
+    let reader = register(&app, &db, "analyst").await;
+    let owner = register(&app, &db, "operator").await;
+    let reader_id = crate::auth::decode_token(&reader).expect("valid reader JWT").sub;
+    let owner_id = crate::auth::decode_token(&owner).expect("valid owner JWT").sub;
+
+    let shared_id = create_dataset(&app, &owner, SAMPLE_CSV).await;
+    let mut shared = db.get_object(&shared_id).expect("read shared object").expect("shared object exists");
+    shared["permissions"] = json!({
+        "owner": owner_id,
+        "read": [owner_id, reader_id],
+        "write": [owner_id]
+    });
+    db.save_object(&shared).expect("persist reader grant and ACL index");
+
+    assert!(db.can_read_object(&shared_id, &reader_id, false).expect("read ACL query"));
+    assert!(!db.can_write_object(&shared_id, &reader_id, false).expect("write ACL query"));
+
+    let (status, body) = call(&app, Method::GET, &format!("/api/objects/{shared_id}"), None, Some(&reader)).await;
+    assert_eq!(status, StatusCode::OK, "explicit reader could not fetch object: {body}");
+    assert_eq!(body["id"], shared_id);
+
+    let (status, listed) = call(&app, Method::GET, "/api/objects/?object_type=dataset", None, Some(&reader)).await;
+    assert_eq!(status, StatusCode::OK, "explicit reader list failed: {listed}");
+    assert_eq!(listed["total"], 1);
+    assert_eq!(listed["objects"][0]["id"], shared_id);
+
+    let (status, searched) = call(&app, Method::GET, "/api/search/?q=alpha", None, Some(&reader)).await;
+    assert_eq!(status, StatusCode::OK, "principal-scoped search failed: {searched}");
+    assert!(searched["results"].as_array().expect("search results").iter().any(|item| item["id"] == shared_id));
+
+    let table = format!("tbl_{}", &shared_id[..8]);
+    let (status, query) = call(
+        &app,
+        Method::POST,
+        "/api/compute/sql",
+        Some(json!({"query": format!("SELECT name FROM {table} ORDER BY name")})),
+        Some(&reader),
+    ).await;
+    assert_eq!(status, StatusCode::OK, "reader SQL request failed: {query}");
+    assert_eq!(query["success"], true, "reader SQL query failed: {query}");
+    assert_eq!(query["row_count"], 2);
+
+    let (status, agent_search) = call(
+        &app,
+        Method::POST,
+        "/api/agents/execute",
+        Some(json!({"agent_id":"agent_research","capability":"search","params":{"query":"alpha"}})),
+        Some(&reader),
+    ).await;
+    assert_eq!(status, StatusCode::OK, "agent search failed: {agent_search}");
+    assert!(agent_search["result"]["results"].as_array().expect("agent search results").iter().any(|item| item["id"] == shared_id));
+
+    let (status, agent_read) = call(
+        &app,
+        Method::POST,
+        "/api/agents/execute",
+        Some(json!({"agent_id":"agent_research","capability":"read_object","params":{"object_id":shared_id}})),
+        Some(&reader),
+    ).await;
+    assert_eq!(status, StatusCode::OK, "agent read should honor explicit ACL: {agent_read}");
+
+    let public_id = create_dataset(&app, &owner, SAMPLE_CSV).await;
+    let mut public = db.get_object(&public_id).expect("read public object").expect("public object exists");
+    public["permissions"] = json!({
+        "owner": owner_id,
+        "read": ["*"],
+        "write": [owner_id]
+    });
+    db.save_object(&public).expect("persist public read grant");
+    assert!(db.can_read_object(&public_id, &reader_id, false).expect("public read ACL"));
+    assert!(!db.can_write_object(&public_id, &reader_id, false).expect("public write ACL"));
+
+    let (status, public_get) = call(&app, Method::GET, &format!("/api/objects/{public_id}"), None, Some(&reader)).await;
+    assert_eq!(status, StatusCode::OK, "public wildcard did not grant read: {public_get}");
+
+    let write_only_id = create_dataset(&app, &owner, SAMPLE_CSV).await;
+    let mut write_only = db.get_object(&write_only_id).expect("read write-only object").expect("write-only object exists");
+    write_only["permissions"] = json!({
+        "owner": owner_id,
+        "read": [owner_id],
+        "write": [owner_id, reader_id]
+    });
+    db.save_object(&write_only).expect("persist write-only grant");
+    assert!(db.can_write_object(&write_only_id, &reader_id, false).expect("explicit write grant"));
+    assert!(!db.can_read_object(&write_only_id, &reader_id, false).expect("write must not imply read"));
+    let (status, hidden) = call(&app, Method::GET, &format!("/api/objects/{write_only_id}"), None, Some(&reader)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "write-only principal received object content: {hidden}");
+    // Relationship listing must filter both endpoints in SQL before pagination.
+    let (status, _) = call(
+        &app,
+        Method::POST,
+        "/api/relationships",
+        Some(json!({"source_id": shared_id, "target_id": public_id, "relation_type": "visible_to_reader", "confidence": 0.9})),
+        Some(&owner),
+    ).await;
+    assert_eq!(status, StatusCode::OK, "owner could not create visible relationship");
+
+    let (status, _) = call(
+        &app,
+        Method::POST,
+        "/api/relationships",
+        Some(json!({"source_id": shared_id, "target_id": write_only_id, "relation_type": "must_be_hidden", "confidence": 0.9})),
+        Some(&owner),
+    ).await;
+    assert_eq!(status, StatusCode::OK, "owner could not create private relationship");
+
+    let (status, visible_relationships) = call(
+        &app,
+        Method::GET,
+        "/api/relationships/?limit=10&offset=0",
+        None,
+        Some(&reader),
+    ).await;
+    assert_eq!(status, StatusCode::OK, "reader relationship list failed: {visible_relationships}");
+    assert_eq!(visible_relationships["total"], 1, "relationship with an unreadable endpoint leaked into count");
+    let visible = visible_relationships["relationships"].as_array().expect("relationship list");
+    assert_eq!(visible.len(), 1);
+    assert_eq!(visible[0]["source"], shared_id);
+    assert_eq!(visible[0]["target"], public_id);
+
+
+    let admin = register(&app, &db, "admin").await;
+    let (status, admin_read) = call(&app, Method::GET, &format!("/api/objects/{write_only_id}"), None, Some(&admin)).await;
+    assert_eq!(status, StatusCode::OK, "explicit administrator bypass should remain available: {admin_read}");
+
+    let (status, export) = call(
+        &app,
+        Method::POST,
+        "/api/agents/execute",
+        Some(json!({"agent_id":"agent_research","capability":"export_data"})),
+        Some(&reader),
+    ).await;
+    assert_eq!(status, StatusCode::OK, "scoped agent export failed: {export}");
+    let exported_ids: Vec<&str> = export["result"]["objects"].as_array().expect("export objects")
+        .iter().filter_map(|object| object["id"].as_str()).collect();
+    assert!(exported_ids.contains(&shared_id.as_str()));
+    assert!(!exported_ids.contains(&write_only_id.as_str()), "write-only object leaked through agent export");
+
+}
+
 #[tokio::test]
 async fn public_registration_cannot_assign_privileged_role() {
     let (app, _db) = test_app();
@@ -1247,8 +1391,8 @@ fn principal_scoped_research_routes_are_not_admin_only_aggregates() {
         "the research pipeline registers and queries only the caller's datasets"
     );
     assert!(
-        crate::is_global_data_route("/api/compute/sql"),
-        "unscoped SQL must remain admin-only until its query contract is principal-scoped"
+        !crate::is_global_data_route("/api/compute/sql"),
+        "SQL is principal-scoped: compute_sql registers only datasets readable by the authenticated principal"
     );
     assert!(
         crate::is_global_data_route("/api/io/export"),

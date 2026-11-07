@@ -237,7 +237,7 @@ fn execute_sql_scoped(query: &str, db: &Db, owner_id: Option<&str>) -> Value {
 fn execute_sql_inner(query: &str, db: &Db, owner_id: Option<&str>) -> Result<Value, String> {
     let start = std::time::Instant::now();
     let datasets = if let Some(owner_id) = owner_id {
-        db.list_objects_for_owner(owner_id, Some("dataset"), None, 100, 0)?
+        db.list_objects_readable(owner_id, Some("dataset"), None, 100, 0)?
     } else {
         db.list_objects(Some("dataset"), None, 100, 0)?
     };

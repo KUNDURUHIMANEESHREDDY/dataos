@@ -143,13 +143,8 @@ fn is_global_data_route(path: &str) -> bool {
         "/api/io/export" |
         "/api/governance/duplicates" |
         "/api/federation/search" |
-        "/api/search" |
-        "/api/search/" |
         "/api/vectors/search" |
         "/api/ask" |
-        "/api/compute/sql" |
-        "/api/query" |
-        "/api/query/" |
         "/api/agents/execute" |
         "/api/workflows/execute" |
         "/api/vectors/recompute" |
@@ -246,7 +241,11 @@ async fn security_middleware(
             }
         }
         if let Some(object_id) = resource_id_for_path(&path) {
-            let allowed = state.db.can_access_object(object_id, &current_user.id, current_user.role == "admin").unwrap_or(false);
+            let allowed = if request.method() == Method::GET || request.method() == Method::HEAD {
+                state.db.can_read_object(object_id, &current_user.id, current_user.role == "admin")
+            } else {
+                state.db.can_write_object(object_id, &current_user.id, current_user.role == "admin")
+            }.unwrap_or(false);
             if !allowed {
                 return json_error_response(StatusCode::NOT_FOUND, "Object not found.");
             }
@@ -417,8 +416,16 @@ async fn auth_users(State(state): State<AppState>, Extension(CurrentUser(user)):
     ok_json(json!({"total": users.len(), "users": users}))
 }
 
-async fn compute_sql(State(state): State<AppState>, Json(req): Json<QueryRequest>) -> Json<Value> {
-    Json(sql_engine::execute_sql(&req.query, &state.db))
+async fn compute_sql(
+    State(state): State<AppState>,
+    Extension(CurrentUser(user)): Extension<CurrentUser>,
+    Json(req): Json<QueryRequest>,
+) -> Json<Value> {
+    let result = match user.filter(|user| user.role != "admin") {
+        Some(user) => sql_engine::execute_sql_for_owner(&req.query, &state.db, &user.id),
+        None => sql_engine::execute_sql(&req.query, &state.db),
+    };
+    Json(result)
 }
 
 async fn compute_python() -> (StatusCode, Json<Value>) {
@@ -449,7 +456,7 @@ async fn unified_query(State(state): State<AppState>, Extension(CurrentUser(user
         "ask" | "natural_language" | "search" => Some("search"),
         _ => None,
     };
-    if let Some(user) = user {
+    if let Some(user) = user.as_ref() {
         if let Some(required) = required {
             if !role_capabilities(&user.role).contains(&required) {
                 return Err(ApiError::new(StatusCode::FORBIDDEN, format!("Capability '{}' is not permitted for role '{}'.", required, user.role)));
@@ -458,17 +465,23 @@ async fn unified_query(State(state): State<AppState>, Extension(CurrentUser(user
     }
 
     match resolved.as_str() {
-        "sql" => Ok(Json(sql_engine::execute_sql(&req.query, &state.db))),
+        "sql" => Ok(Json(match user.as_ref().filter(|user| user.role != "admin") {
+            Some(user) => sql_engine::execute_sql_for_owner(&req.query, &state.db, &user.id),
+            None => sql_engine::execute_sql(&req.query, &state.db),
+        })),
         "python" => Err(ApiError::new(StatusCode::FORBIDDEN, "Python compute is not available in the Rust backend until an equivalent sandbox is implemented and reviewed.")),
-        "search" => Ok(Json(search_objects(&state.db, &req.query, 20))),
+        "search" => Ok(Json(search_objects(&state.db, &req.query, 20, user.as_ref()))),
         "ask" | "natural_language" => Err(ApiError::new(StatusCode::NOT_IMPLEMENTED, "The natural-language Ask engine has not been migrated to the Rust backend yet.")),
         _ => Err(ApiError::new(StatusCode::BAD_REQUEST, "Unsupported query_type. Use auto, sql, python, ask, or search.")),
     }
 }
 
-fn search_objects(db: &Db, query: &str, limit: i64) -> Value {
+fn search_objects(db: &Db, query: &str, limit: i64, user: Option<&User>) -> Value {
     let query = query.trim().to_lowercase();
-    let objects = db.list_objects(None, None, 1000, 0).unwrap_or_default();
+    let objects = match user.filter(|user| user.role != "admin") {
+        Some(user) => db.list_objects_readable(&user.id, None, None, 1000, 0).unwrap_or_default(),
+        None => db.list_objects(None, None, 1000, 0).unwrap_or_default(),
+    };
     let mut matches = Vec::new();
     for object in objects {
         let haystack = serde_json::to_string(&object).unwrap_or_default().to_lowercase();
@@ -489,10 +502,14 @@ fn search_objects(db: &Db, query: &str, limit: i64) -> Value {
     json!({"query": query, "total_matches": matches.len(), "results": matches})
 }
 
-async fn search(State(state): State<AppState>, Query(params): Query<HashMap<String, String>>) -> Result<Json<Value>, ApiError> {
+async fn search(
+    State(state): State<AppState>,
+    Extension(CurrentUser(user)): Extension<CurrentUser>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<Json<Value>, ApiError> {
     let query = params.get("q").cloned().unwrap_or_default();
     let limit = clamp_i64(params.get("limit").and_then(|v| v.parse().ok()), 20, 1, 100);
-    ok_json(search_objects(&state.db, &query, limit))
+    ok_json(search_objects(&state.db, &query, limit, user.as_ref()))
 }
 
 fn type_counts(objects: &[Value]) -> HashMap<String, i64> {
@@ -722,9 +739,13 @@ async fn quota(Path(principal_id): Path<String>) -> Json<Value> {
     }))
 }
 
-async fn federation_search(State(state): State<AppState>, Query(params): Query<FederationQuery>) -> Result<Json<Value>, ApiError> {
+async fn federation_search(
+    State(state): State<AppState>,
+    Extension(CurrentUser(user)): Extension<CurrentUser>,
+    Query(params): Query<FederationQuery>,
+) -> Result<Json<Value>, ApiError> {
     let top_k = clamp_i64(params.top_k, 10, 1, 100);
-    let local = search_objects(&state.db, &params.q, top_k);
+    let local = search_objects(&state.db, &params.q, top_k, user.as_ref());
     if let Some(results) = local.get("results").cloned() {
         return ok_json(json!({
             "query": params.q,
@@ -857,8 +878,8 @@ async fn list_objects(
             )
         } else {
             (
-                state.db.list_objects_for_owner(&user.id, params.object_type.as_deref(), params.source.as_deref(), limit, offset),
-                state.db.count_objects_for_owner(&user.id, params.object_type.as_deref(), params.source.as_deref()),
+                state.db.list_objects_readable(&user.id, params.object_type.as_deref(), params.source.as_deref(), limit, offset),
+                state.db.count_objects_readable(&user.id, params.object_type.as_deref(), params.source.as_deref()),
             )
         }
     } else {
@@ -913,7 +934,7 @@ async fn get_object(
         .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?
         .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "Object not found"))?;
     if let Some(user) = user {
-        let allowed = state.db.can_access_object(&object_id, &user.id, user.role == "admin")
+        let allowed = state.db.can_read_object(&object_id, &user.id, user.role == "admin")
             .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
         if !allowed { return Err(ApiError::new(StatusCode::NOT_FOUND, "Object not found")); }
     }
@@ -927,7 +948,7 @@ async fn delete_object(
     Query(params): Query<DeleteParams>,
 ) -> Result<Json<Value>, ApiError> {
     if let Some(user) = user {
-        let allowed = state.db.can_access_object(&object_id, &user.id, user.role == "admin")
+        let allowed = state.db.can_write_object(&object_id, &user.id, user.role == "admin")
             .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
         if !allowed { return Err(ApiError::new(StatusCode::NOT_FOUND, "Object not found")); }
     }
@@ -945,31 +966,41 @@ async fn list_relationships(
     let limit = clamp_i64(params.limit, 1000, 1, 1000);
     let offset = clamp_i64(params.offset, 0, 0, 1_000_000);
     let confidence = params.min_confidence.unwrap_or(0.0).clamp(0.0, 1.0);
-    let mut relationships = if user.as_ref().map(|u| u.role == "admin").unwrap_or(true) {
-        state.db.list_relationships(params.source_id.as_deref(), params.target_id.as_deref(), params.relation_type.as_deref(), confidence, limit, offset)
-            .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?
-    } else {
-        state.db.list_relationships(params.source_id.as_deref(), params.target_id.as_deref(), params.relation_type.as_deref(), confidence, 50000, 0)
-            .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?
-    };
-    let total = if let Some(user) = user {
-        if user.role == "admin" {
-            state.db.count_relationships(params.source_id.as_deref(), params.target_id.as_deref(), params.relation_type.as_deref(), confidence)
-                .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?
-        } else {
-            relationships.retain(|rel| {
-                let source = rel.get("source").and_then(Value::as_str).unwrap_or_default();
-                let target = rel.get("target").and_then(Value::as_str).unwrap_or_default();
-                state.db.can_access_object(source, &user.id, false).unwrap_or(false)
-                    && state.db.can_access_object(target, &user.id, false).unwrap_or(false)
-            });
-            let total = relationships.len() as i64;
-            relationships = relationships.into_iter().skip(offset as usize).take(limit as usize).collect();
-            total
-        }
-    } else {
-        state.db.count_relationships(params.source_id.as_deref(), params.target_id.as_deref(), params.relation_type.as_deref(), confidence)
-            .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?
+    let (relationships, total) = match user.as_ref().filter(|principal| principal.role != "admin") {
+        Some(principal) => (
+            state.db.list_relationships_readable(
+                &principal.id,
+                params.source_id.as_deref(),
+                params.target_id.as_deref(),
+                params.relation_type.as_deref(),
+                confidence,
+                limit,
+                offset,
+            ).map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?,
+            state.db.count_relationships_readable(
+                &principal.id,
+                params.source_id.as_deref(),
+                params.target_id.as_deref(),
+                params.relation_type.as_deref(),
+                confidence,
+            ).map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?,
+        ),
+        _ => (
+            state.db.list_relationships(
+                params.source_id.as_deref(),
+                params.target_id.as_deref(),
+                params.relation_type.as_deref(),
+                confidence,
+                limit,
+                offset,
+            ).map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?,
+            state.db.count_relationships(
+                params.source_id.as_deref(),
+                params.target_id.as_deref(),
+                params.relation_type.as_deref(),
+                confidence,
+            ).map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?,
+        ),
     };
     ok_json(json!({"total": total, "relationships": relationships}))
 }
@@ -982,7 +1013,7 @@ async fn create_relationship(
     if let Some(user) = user {
         let admin = user.role == "admin";
         for object_id in [&req.source_id, &req.target_id] {
-            let allowed = state.db.can_access_object(object_id, &user.id, admin)
+            let allowed = state.db.can_write_object(object_id, &user.id, admin)
                 .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
             if !allowed {
                 return Err(ApiError::new(StatusCode::NOT_FOUND, "One or more relationship objects were not found."));

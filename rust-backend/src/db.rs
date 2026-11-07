@@ -109,7 +109,7 @@ impl Db {
     }
 
     fn init_schema(&self) -> Result<(), String> {
-        let conn = self.conn.lock().map_err(|_| "database lock poisoned".to_string())?;
+        let mut conn = self.conn.lock().map_err(|_| "database lock poisoned".to_string())?;
         conn.execute_batch(
             r#"
             CREATE TABLE IF NOT EXISTS objects (
@@ -134,6 +134,23 @@ impl Db {
             CREATE INDEX IF NOT EXISTS idx_objects_type ON objects(type);
             CREATE INDEX IF NOT EXISTS idx_objects_source ON objects(source);
             CREATE INDEX IF NOT EXISTS idx_objects_deleted_at ON objects(deleted_at);
+            CREATE INDEX IF NOT EXISTS idx_objects_owner_id
+                ON objects(json_extract(CASE WHEN json_valid(permissions) THEN permissions ELSE '{}' END, '$.owner'))
+                WHERE deleted_at IS NULL;
+            CREATE TABLE IF NOT EXISTS object_acl_grants (
+                object_id TEXT NOT NULL,
+                principal_id TEXT NOT NULL,
+                permission TEXT NOT NULL CHECK(permission IN ('read', 'write')),
+                PRIMARY KEY (object_id, principal_id, permission)
+            );
+            CREATE INDEX IF NOT EXISTS idx_object_acl_principal_permission
+                ON object_acl_grants(principal_id, permission, object_id);
+            CREATE INDEX IF NOT EXISTS idx_object_acl_object_permission
+                ON object_acl_grants(object_id, permission, principal_id);
+            CREATE TABLE IF NOT EXISTS dataos_schema_migrations (
+                version INTEGER PRIMARY KEY,
+                applied_at TEXT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS relationships (
                 id TEXT PRIMARY KEY,
                 source_id TEXT NOT NULL,
@@ -172,7 +189,48 @@ impl Db {
             );
             "#,
         )
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+
+        // Version 1 is an additive ACL index migration. The JSON permissions
+        // field remains authoritative; this table indexes its explicit grants.
+        let migrated: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM dataos_schema_migrations WHERE version = 1)",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        if !migrated {
+            let tx = conn.transaction().map_err(|e| e.to_string())?;
+            tx.execute_batch(
+                r#"
+                INSERT OR IGNORE INTO object_acl_grants (object_id, principal_id, permission)
+                SELECT o.id, read_grant.value, 'read'
+                FROM objects AS o,
+                     json_each(CASE WHEN json_valid(o.permissions) THEN o.permissions ELSE '{}' END, '$.read') AS read_grant
+                WHERE json_type(CASE WHEN json_valid(o.permissions) THEN o.permissions ELSE '{}' END, '$.read') = 'array'
+                  AND read_grant.type = 'text'
+                  AND length(read_grant.value) > 0;
+
+                INSERT OR IGNORE INTO object_acl_grants (object_id, principal_id, permission)
+                SELECT o.id, write_grant.value, 'write'
+                FROM objects AS o,
+                     json_each(CASE WHEN json_valid(o.permissions) THEN o.permissions ELSE '{}' END, '$.write') AS write_grant
+                WHERE json_type(CASE WHEN json_valid(o.permissions) THEN o.permissions ELSE '{}' END, '$.write') = 'array'
+                  AND write_grant.type = 'text'
+                  AND length(write_grant.value) > 0
+                  AND write_grant.value <> '*';
+                "#,
+            )
+            .map_err(|e| e.to_string())?;
+            tx.execute(
+                "INSERT INTO dataos_schema_migrations (version, applied_at) VALUES (?, ?)",
+                params![1, now()],
+            )
+            .map_err(|e| e.to_string())?;
+            tx.commit().map_err(|e| e.to_string())?;
+        }
+        Ok(())
     }
 
     pub fn health_check(&self) -> Result<(), String> {
@@ -224,10 +282,151 @@ impl Db {
         conn.query_row(&format!("{} WHERE id = ? AND deleted_at IS NULL", object_select_sql()), [id], object_from_row).optional().map_err(|e| e.to_string())
     }
 
+    /// Check object read access using owner, explicit reader grants, or public read.
+    pub fn can_read_object(&self, id: &str, principal_id: &str, is_admin: bool) -> Result<bool, String> {
+        if is_admin {
+            return Ok(self.get_object(id)?.is_some());
+        }
+        let conn = self.conn.lock().map_err(|_| "database lock poisoned".to_string())?;
+        let allowed: Option<i64> = conn
+            .query_row(
+                "SELECT 1 FROM objects AS o
+                 WHERE o.id = ? AND o.deleted_at IS NULL
+                   AND (
+                     json_extract(CASE WHEN json_valid(o.permissions) THEN o.permissions ELSE '{}' END, '$.owner') = ?
+                     OR EXISTS (
+                       SELECT 1 FROM object_acl_grants AS g
+                       WHERE g.object_id = o.id
+                         AND g.permission = 'read'
+                         AND g.principal_id IN (?, '*')
+                     )
+                   )
+                 LIMIT 1",
+                params![id, principal_id, principal_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
+        Ok(allowed.is_some())
+    }
+
+    /// Check object write access. A read grant never implies write access.
+    pub fn can_write_object(&self, id: &str, principal_id: &str, is_admin: bool) -> Result<bool, String> {
+        if is_admin {
+            return Ok(self.get_object(id)?.is_some());
+        }
+        let conn = self.conn.lock().map_err(|_| "database lock poisoned".to_string())?;
+        let allowed: Option<i64> = conn
+            .query_row(
+                "SELECT 1 FROM objects AS o
+                 WHERE o.id = ? AND o.deleted_at IS NULL
+                   AND (
+                     json_extract(CASE WHEN json_valid(o.permissions) THEN o.permissions ELSE '{}' END, '$.owner') = ?
+                     OR EXISTS (
+                       SELECT 1 FROM object_acl_grants AS g
+                       WHERE g.object_id = o.id
+                         AND g.permission = 'write'
+                         AND g.principal_id = ?
+                     )
+                   )
+                 LIMIT 1",
+                params![id, principal_id, principal_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
+        Ok(allowed.is_some())
+    }
+
+    /// Backwards-compatible read check for graph/agent callers.
     pub fn can_access_object(&self, id: &str, principal_id: &str, is_admin: bool) -> Result<bool, String> {
-        if is_admin { return Ok(self.get_object(id)?.is_some()); }
-        let Some(object) = self.get_object(id)? else { return Ok(false); };
-        Ok(object.pointer("/permissions/owner").and_then(Value::as_str) == Some(principal_id))
+        self.can_read_object(id, principal_id, is_admin)
+    }
+
+    /// List objects readable by a principal. Owner and ACL-grant predicates use
+    /// dedicated indexes; filtering happens before pagination and counting.
+    pub fn list_objects_readable(
+        &self,
+        principal_id: &str,
+        object_type: Option<&str>,
+        source: Option<&str>,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<Value>, String> {
+        let conn = self.conn.lock().map_err(|_| "database lock poisoned".to_string())?;
+        let mut sql = format!(
+            "{} WHERE deleted_at IS NULL AND (
+                json_extract(CASE WHEN json_valid(permissions) THEN permissions ELSE '{{}}' END, '$.owner') = ?
+                OR EXISTS (
+                    SELECT 1 FROM object_acl_grants AS g
+                    WHERE g.object_id = objects.id
+                      AND g.permission = 'read'
+                      AND g.principal_id IN (?, '*')
+                )
+            )",
+            object_select_sql()
+        );
+        let mut values: Vec<Value> = vec![
+            Value::String(principal_id.to_string()),
+            Value::String(principal_id.to_string()),
+        ];
+        if let Some(kind) = object_type {
+            sql.push_str(" AND type = ?");
+            values.push(Value::String(kind.to_string()));
+        }
+        if let Some(src) = source {
+            sql.push_str(" AND source LIKE ?");
+            values.push(Value::String(format!("%{}%", src)));
+        }
+        sql.push_str(" ORDER BY updated_at DESC, id ASC LIMIT ? OFFSET ?");
+        values.push(Value::from(limit));
+        values.push(Value::from(offset));
+        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+        let mut rows = stmt
+            .query(rusqlite::params_from_iter(values.iter().map(param_value).map(|v| v.unwrap_or(rusqlite::types::Value::Null))))
+            .map_err(|e| e.to_string())?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+            out.push(object_from_row(row).map_err(|e| e.to_string())?);
+        }
+        Ok(out)
+    }
+
+    /// Count readable objects using the same predicate as list pagination.
+    pub fn count_objects_readable(
+        &self,
+        principal_id: &str,
+        object_type: Option<&str>,
+        source: Option<&str>,
+    ) -> Result<i64, String> {
+        let conn = self.conn.lock().map_err(|_| "database lock poisoned".to_string())?;
+        let mut sql = "SELECT COUNT(*) FROM objects WHERE deleted_at IS NULL AND (
+            json_extract(CASE WHEN json_valid(permissions) THEN permissions ELSE '{}' END, '$.owner') = ?
+            OR EXISTS (
+                SELECT 1 FROM object_acl_grants AS g
+                WHERE g.object_id = objects.id
+                  AND g.permission = 'read'
+                  AND g.principal_id IN (?, '*')
+            )
+        )".to_string();
+        let mut values: Vec<Value> = vec![
+            Value::String(principal_id.to_string()),
+            Value::String(principal_id.to_string()),
+        ];
+        if let Some(kind) = object_type {
+            sql.push_str(" AND type = ?");
+            values.push(Value::String(kind.to_string()));
+        }
+        if let Some(src) = source {
+            sql.push_str(" AND source LIKE ?");
+            values.push(Value::String(format!("%{}%", src)));
+        }
+        conn.query_row(
+            &sql,
+            rusqlite::params_from_iter(values.iter().map(param_value).map(|v| v.unwrap_or(rusqlite::types::Value::Null))),
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())
     }
 
     pub fn list_objects_for_owner(
@@ -325,8 +524,9 @@ impl Db {
 
     pub fn save_object(&self, object: &Value) -> Result<(), String> {
         let id = object["id"].as_str().ok_or_else(|| "object id missing".to_string())?.to_string();
-        let conn = self.conn.lock().map_err(|_| "database lock poisoned".to_string())?;
-        conn.execute(
+        let mut conn = self.conn.lock().map_err(|_| "database lock poisoned".to_string())?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        tx.execute(
             "INSERT INTO objects (
                 id, type, schema_ref, properties, content, relations, provenance, permissions,
                 created_at, updated_at, deleted_at, valid_from, valid_to, version, source, metadata, indexes
@@ -357,11 +557,11 @@ impl Db {
                 json_text(&object["indexes"])
             ],
         ).map_err(|e| e.to_string())?;
-        conn.execute(
+        tx.execute(
             "INSERT INTO object_versions (object_id, version, data_snapshot, content_hash, created_at, created_by, change_summary)
              VALUES (?, ?, ?, ?, ?, ?, ?)",
             params![
-                id,
+                id.clone(),
                 object["version"].as_i64().unwrap_or(1),
                 json_text(object),
                 object.pointer("/metadata/content_hash").and_then(Value::as_str).unwrap_or_default(),
@@ -370,16 +570,46 @@ impl Db {
                 "Rust service save"
             ],
         ).map_err(|e| e.to_string())?;
+
+        // Keep the normalized ACL index transactionally consistent with the
+        // authoritative permissions JSON. Invalid/non-array grants fail closed.
+        tx.execute("DELETE FROM object_acl_grants WHERE object_id = ?", [id.as_str()])
+            .map_err(|e| e.to_string())?;
+        if let Some(permissions) = object.get("permissions") {
+            for (permission, allow_public) in [("read", true), ("write", false)] {
+                if let Some(grants) = permissions.get(permission).and_then(Value::as_array) {
+                    for principal in grants.iter().filter_map(Value::as_str) {
+                        if principal.is_empty() || (!allow_public && principal == "*") {
+                            continue;
+                        }
+                        tx.execute(
+                            "INSERT OR IGNORE INTO object_acl_grants (object_id, principal_id, permission) VALUES (?, ?, ?)",
+                            params![id.as_str(), principal, permission],
+                        )
+                        .map_err(|e| e.to_string())?;
+                    }
+                }
+            }
+        }
+        tx.commit().map_err(|e| e.to_string())?;
         Ok(())
     }
 
     pub fn delete_object(&self, id: &str, soft: bool) -> Result<bool, String> {
-        let conn = self.conn.lock().map_err(|_| "database lock poisoned".to_string())?;
-        if soft {
-            conn.execute("UPDATE objects SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL", params![now(), id])
+        let mut conn = self.conn.lock().map_err(|_| "database lock poisoned".to_string())?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        let changed = if soft {
+            tx.execute("UPDATE objects SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL", params![now(), id])
         } else {
-            conn.execute("DELETE FROM objects WHERE id = ?", [id])
-        }.map(|n| n > 0).map_err(|e| e.to_string())
+            tx.execute("DELETE FROM objects WHERE id = ?", [id])
+        }
+        .map_err(|e| e.to_string())?;
+        if !soft {
+            tx.execute("DELETE FROM object_acl_grants WHERE object_id = ?", [id])
+                .map_err(|e| e.to_string())?;
+        }
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(changed > 0)
     }
 
     pub fn list_relationships(&self, source_id: Option<&str>, target_id: Option<&str>, relation_type: Option<&str>, min_confidence: f64, limit: i64, offset: i64) -> Result<Vec<Value>, String> {
@@ -409,6 +639,154 @@ impl Db {
         if let Some(target) = target_id { sql.push_str(" AND target_id = ?"); values.push(Value::String(target.to_string())); }
         if let Some(kind) = relation_type { sql.push_str(" AND relation_type = ?"); values.push(Value::String(kind.to_string())); }
         conn.query_row(&sql, rusqlite::params_from_iter(values.iter().map(param_value).map(|v| v.unwrap_or(rusqlite::types::Value::Null))), |row| row.get(0)).map_err(|e| e.to_string())
+    }
+
+    /// List relationships only when both endpoint objects are readable by a principal.
+    /// ACL predicates are evaluated in SQL before pagination, avoiding the prior
+    /// bounded 50k fetch plus per-row authorization queries.
+    pub fn list_relationships_readable(
+        &self,
+        principal_id: &str,
+        source_id: Option<&str>,
+        target_id: Option<&str>,
+        relation_type: Option<&str>,
+        min_confidence: f64,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<Value>, String> {
+        let conn = self.conn.lock().map_err(|_| "database lock poisoned".to_string())?;
+        let mut sql = format!(
+            "{} WHERE relationships.deleted_at IS NULL
+              AND relationships.confidence >= ?
+              AND EXISTS (
+                SELECT 1 FROM objects AS source_object
+                WHERE source_object.id = relationships.source_id
+                  AND source_object.deleted_at IS NULL
+                  AND (
+                    json_extract(CASE WHEN json_valid(source_object.permissions) THEN source_object.permissions ELSE '{{}}' END, '$.owner') = ?
+                    OR EXISTS (
+                      SELECT 1 FROM object_acl_grants AS source_grant
+                      WHERE source_grant.object_id = source_object.id
+                        AND source_grant.permission = 'read'
+                        AND source_grant.principal_id IN (?, '*')
+                    )
+                  )
+              )
+              AND EXISTS (
+                SELECT 1 FROM objects AS target_object
+                WHERE target_object.id = relationships.target_id
+                  AND target_object.deleted_at IS NULL
+                  AND (
+                    json_extract(CASE WHEN json_valid(target_object.permissions) THEN target_object.permissions ELSE '{{}}' END, '$.owner') = ?
+                    OR EXISTS (
+                      SELECT 1 FROM object_acl_grants AS target_grant
+                      WHERE target_grant.object_id = target_object.id
+                        AND target_grant.permission = 'read'
+                        AND target_grant.principal_id IN (?, '*')
+                    )
+                  )
+              )",
+            relationship_select_sql()
+        );
+        let mut values: Vec<Value> = vec![
+            Value::from(min_confidence),
+            Value::String(principal_id.to_string()),
+            Value::String(principal_id.to_string()),
+            Value::String(principal_id.to_string()),
+            Value::String(principal_id.to_string()),
+        ];
+        if let Some(source) = source_id {
+            sql.push_str(" AND relationships.source_id = ?");
+            values.push(Value::String(source.to_string()));
+        }
+        if let Some(target) = target_id {
+            sql.push_str(" AND relationships.target_id = ?");
+            values.push(Value::String(target.to_string()));
+        }
+        if let Some(kind) = relation_type {
+            sql.push_str(" AND relationships.relation_type = ?");
+            values.push(Value::String(kind.to_string()));
+        }
+        sql.push_str(" ORDER BY relationships.confidence DESC, relationships.updated_at DESC LIMIT ? OFFSET ?");
+        values.push(Value::from(limit));
+        values.push(Value::from(offset));
+        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+        let mut rows = stmt
+            .query(rusqlite::params_from_iter(values.iter().map(param_value).map(|v| v.unwrap_or(rusqlite::types::Value::Null))))
+            .map_err(|e| e.to_string())?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+            out.push(relationship_from_row(row).map_err(|e| e.to_string())?);
+        }
+        Ok(out)
+    }
+
+    /// Count only relationships whose two endpoints are readable by a principal.
+    pub fn count_relationships_readable(
+        &self,
+        principal_id: &str,
+        source_id: Option<&str>,
+        target_id: Option<&str>,
+        relation_type: Option<&str>,
+        min_confidence: f64,
+    ) -> Result<i64, String> {
+        let conn = self.conn.lock().map_err(|_| "database lock poisoned".to_string())?;
+        let mut sql = "SELECT COUNT(*) FROM relationships
+            WHERE relationships.deleted_at IS NULL
+              AND relationships.confidence >= ?
+              AND EXISTS (
+                SELECT 1 FROM objects AS source_object
+                WHERE source_object.id = relationships.source_id
+                  AND source_object.deleted_at IS NULL
+                  AND (
+                    json_extract(CASE WHEN json_valid(source_object.permissions) THEN source_object.permissions ELSE '{}' END, '$.owner') = ?
+                    OR EXISTS (
+                      SELECT 1 FROM object_acl_grants AS source_grant
+                      WHERE source_grant.object_id = source_object.id
+                        AND source_grant.permission = 'read'
+                        AND source_grant.principal_id IN (?, '*')
+                    )
+                  )
+              )
+              AND EXISTS (
+                SELECT 1 FROM objects AS target_object
+                WHERE target_object.id = relationships.target_id
+                  AND target_object.deleted_at IS NULL
+                  AND (
+                    json_extract(CASE WHEN json_valid(target_object.permissions) THEN target_object.permissions ELSE '{}' END, '$.owner') = ?
+                    OR EXISTS (
+                      SELECT 1 FROM object_acl_grants AS target_grant
+                      WHERE target_grant.object_id = target_object.id
+                        AND target_grant.permission = 'read'
+                        AND target_grant.principal_id IN (?, '*')
+                    )
+                  )
+              )".to_string();
+        let mut values: Vec<Value> = vec![
+            Value::from(min_confidence),
+            Value::String(principal_id.to_string()),
+            Value::String(principal_id.to_string()),
+            Value::String(principal_id.to_string()),
+            Value::String(principal_id.to_string()),
+        ];
+        if let Some(source) = source_id {
+            sql.push_str(" AND relationships.source_id = ?");
+            values.push(Value::String(source.to_string()));
+        }
+        if let Some(target) = target_id {
+            sql.push_str(" AND relationships.target_id = ?");
+            values.push(Value::String(target.to_string()));
+        }
+        if let Some(kind) = relation_type {
+            sql.push_str(" AND relationships.relation_type = ?");
+            values.push(Value::String(kind.to_string()));
+        }
+        conn.query_row(
+            &sql,
+            rusqlite::params_from_iter(values.iter().map(param_value).map(|v| v.unwrap_or(rusqlite::types::Value::Null))),
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())
     }
 
     pub fn create_relationship(&self, source: &str, target: &str, relation_type: &str, confidence: f64, metadata: Value) -> Result<Value, String> {
