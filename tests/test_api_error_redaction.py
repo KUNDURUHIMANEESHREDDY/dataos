@@ -2,6 +2,7 @@
 
 import asyncio
 import importlib
+from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
@@ -101,7 +102,7 @@ def test_workflow_validation_errors_do_not_echo_untrusted_details(monkeypatch):
 
     assert exc.value.status_code == 422
     assert exc.value.detail == (
-        "Workflow definition is invalid or exceeds the supported execution limits."
+        "Workflow definition must contain valid nodes and stay within the supported execution limits."
     )
     assert "private-customer-id" not in exc.value.detail
     assert "/srv/private" not in exc.value.detail
@@ -113,7 +114,11 @@ def test_invalid_sharing_tokens_return_a_stable_error(monkeypatch):
     def fail_verification(token):
         raise ValueError("signature mismatch for token stored in /srv/private/keys")
 
-    monkeypatch.setattr(api.dataos.tokens, "verify_and_decode_token", fail_verification)
+    monkeypatch.setattr(
+        api.dataos,
+        "tokens",
+        SimpleNamespace(verify_and_decode_token=fail_verification),
+    )
     request = api.VerifySharingTokenRequest(token="synthetic-invalid-token")
 
     with pytest.raises(HTTPException) as exc:

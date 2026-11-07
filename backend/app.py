@@ -894,7 +894,7 @@ async def execute_workflow(req: WorkflowExecutionRequest):
             logger.warning("Workflow request rejected (%s)", type(exc).__name__)
             raise HTTPException(
                 status_code=422,
-                detail="Workflow definition is invalid or exceeds the supported execution limits.",
+                detail="Workflow definition must contain valid nodes and stay within the supported execution limits.",
             ) from None
     finally:
         workflow_slots.release()
