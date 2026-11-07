@@ -118,8 +118,17 @@ class GraphNamespace:
             metadata=metadata
         )
 
-    def neighbors(self, object_id: str, direction: str = "both") -> List[Dict[str, Any]]:
-        return self.engine.get_neighbors(object_id, direction=direction)
+    def neighbors(
+        self,
+        object_id: str,
+        direction: str = "both",
+        allowed_object_ids: Optional[set[str]] = None,
+    ) -> List[Dict[str, Any]]:
+        return self.engine.get_neighbors(
+            object_id,
+            direction=direction,
+            allowed_object_ids=allowed_object_ids,
+        )
 
     def paths(self, source_id: str, target_id: str, max_depth: int = 5) -> List[List[str]]:
         return self.engine.find_paths(source_id, target_id, max_depth=max_depth)
