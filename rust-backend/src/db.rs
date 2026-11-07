@@ -641,6 +641,154 @@ impl Db {
         conn.query_row(&sql, rusqlite::params_from_iter(values.iter().map(param_value).map(|v| v.unwrap_or(rusqlite::types::Value::Null))), |row| row.get(0)).map_err(|e| e.to_string())
     }
 
+    /// List relationships only when both endpoint objects are readable by a principal.
+    /// ACL predicates are evaluated in SQL before pagination, avoiding the prior
+    /// bounded 50k fetch plus per-row authorization queries.
+    pub fn list_relationships_readable(
+        &self,
+        principal_id: &str,
+        source_id: Option<&str>,
+        target_id: Option<&str>,
+        relation_type: Option<&str>,
+        min_confidence: f64,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<Value>, String> {
+        let conn = self.conn.lock().map_err(|_| "database lock poisoned".to_string())?;
+        let mut sql = format!(
+            "{} WHERE relationships.deleted_at IS NULL
+              AND relationships.confidence >= ?
+              AND EXISTS (
+                SELECT 1 FROM objects AS source_object
+                WHERE source_object.id = relationships.source_id
+                  AND source_object.deleted_at IS NULL
+                  AND (
+                    json_extract(CASE WHEN json_valid(source_object.permissions) THEN source_object.permissions ELSE '{{}}' END, '$.owner') = ?
+                    OR EXISTS (
+                      SELECT 1 FROM object_acl_grants AS source_grant
+                      WHERE source_grant.object_id = source_object.id
+                        AND source_grant.permission = 'read'
+                        AND source_grant.principal_id IN (?, '*')
+                    )
+                  )
+              )
+              AND EXISTS (
+                SELECT 1 FROM objects AS target_object
+                WHERE target_object.id = relationships.target_id
+                  AND target_object.deleted_at IS NULL
+                  AND (
+                    json_extract(CASE WHEN json_valid(target_object.permissions) THEN target_object.permissions ELSE '{{}}' END, '$.owner') = ?
+                    OR EXISTS (
+                      SELECT 1 FROM object_acl_grants AS target_grant
+                      WHERE target_grant.object_id = target_object.id
+                        AND target_grant.permission = 'read'
+                        AND target_grant.principal_id IN (?, '*')
+                    )
+                  )
+              )",
+            relationship_select_sql()
+        );
+        let mut values: Vec<Value> = vec![
+            Value::from(min_confidence),
+            Value::String(principal_id.to_string()),
+            Value::String(principal_id.to_string()),
+            Value::String(principal_id.to_string()),
+            Value::String(principal_id.to_string()),
+        ];
+        if let Some(source) = source_id {
+            sql.push_str(" AND relationships.source_id = ?");
+            values.push(Value::String(source.to_string()));
+        }
+        if let Some(target) = target_id {
+            sql.push_str(" AND relationships.target_id = ?");
+            values.push(Value::String(target.to_string()));
+        }
+        if let Some(kind) = relation_type {
+            sql.push_str(" AND relationships.relation_type = ?");
+            values.push(Value::String(kind.to_string()));
+        }
+        sql.push_str(" ORDER BY relationships.confidence DESC, relationships.updated_at DESC LIMIT ? OFFSET ?");
+        values.push(Value::from(limit));
+        values.push(Value::from(offset));
+        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+        let mut rows = stmt
+            .query(rusqlite::params_from_iter(values.iter().map(param_value).map(|v| v.unwrap_or(rusqlite::types::Value::Null))))
+            .map_err(|e| e.to_string())?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+            out.push(relationship_from_row(row).map_err(|e| e.to_string())?);
+        }
+        Ok(out)
+    }
+
+    /// Count only relationships whose two endpoints are readable by a principal.
+    pub fn count_relationships_readable(
+        &self,
+        principal_id: &str,
+        source_id: Option<&str>,
+        target_id: Option<&str>,
+        relation_type: Option<&str>,
+        min_confidence: f64,
+    ) -> Result<i64, String> {
+        let conn = self.conn.lock().map_err(|_| "database lock poisoned".to_string())?;
+        let mut sql = "SELECT COUNT(*) FROM relationships
+            WHERE relationships.deleted_at IS NULL
+              AND relationships.confidence >= ?
+              AND EXISTS (
+                SELECT 1 FROM objects AS source_object
+                WHERE source_object.id = relationships.source_id
+                  AND source_object.deleted_at IS NULL
+                  AND (
+                    json_extract(CASE WHEN json_valid(source_object.permissions) THEN source_object.permissions ELSE '{}' END, '$.owner') = ?
+                    OR EXISTS (
+                      SELECT 1 FROM object_acl_grants AS source_grant
+                      WHERE source_grant.object_id = source_object.id
+                        AND source_grant.permission = 'read'
+                        AND source_grant.principal_id IN (?, '*')
+                    )
+                  )
+              )
+              AND EXISTS (
+                SELECT 1 FROM objects AS target_object
+                WHERE target_object.id = relationships.target_id
+                  AND target_object.deleted_at IS NULL
+                  AND (
+                    json_extract(CASE WHEN json_valid(target_object.permissions) THEN target_object.permissions ELSE '{}' END, '$.owner') = ?
+                    OR EXISTS (
+                      SELECT 1 FROM object_acl_grants AS target_grant
+                      WHERE target_grant.object_id = target_object.id
+                        AND target_grant.permission = 'read'
+                        AND target_grant.principal_id IN (?, '*')
+                    )
+                  )
+              )".to_string();
+        let mut values: Vec<Value> = vec![
+            Value::from(min_confidence),
+            Value::String(principal_id.to_string()),
+            Value::String(principal_id.to_string()),
+            Value::String(principal_id.to_string()),
+            Value::String(principal_id.to_string()),
+        ];
+        if let Some(source) = source_id {
+            sql.push_str(" AND relationships.source_id = ?");
+            values.push(Value::String(source.to_string()));
+        }
+        if let Some(target) = target_id {
+            sql.push_str(" AND relationships.target_id = ?");
+            values.push(Value::String(target.to_string()));
+        }
+        if let Some(kind) = relation_type {
+            sql.push_str(" AND relationships.relation_type = ?");
+            values.push(Value::String(kind.to_string()));
+        }
+        conn.query_row(
+            &sql,
+            rusqlite::params_from_iter(values.iter().map(param_value).map(|v| v.unwrap_or(rusqlite::types::Value::Null))),
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())
+    }
+
     pub fn create_relationship(&self, source: &str, target: &str, relation_type: &str, confidence: f64, metadata: Value) -> Result<Value, String> {
         let created = now();
         let provenance = json!({"established_by":"dataos-rust", "method":"explicit", "timestamp": created});
