@@ -35,6 +35,7 @@ from core.permissions.auth import (
 from backend.knowledge_rag import create_knowledge_router
 from backend.cors_config import cors_middleware_options
 from backend.authorization import CapabilityMiddleware, get_user_store
+from backend.object_acl import can_read_object, can_write_object, list_readable_objects, readable_object_ids, require_read_identity, request_object_permissions
 from backend.workflow_api import WorkflowRequestError, execute_safe_workflow
 from runtime.workflows.workflow_engine import WorkflowEngine
 
@@ -195,9 +196,6 @@ app.add_middleware(
 app.add_middleware(CapabilityMiddleware)
 
 
-app.include_router(create_knowledge_router(dataos))
-
-
 async def get_current_user(
     request: Request,
     authorization: Annotated[Optional[str], Header()] = None,
@@ -251,6 +249,33 @@ def require_capability(capability: str):
         return current_user
 
     return dependency
+
+
+def _request_object_permissions(current_user: Optional[User]) -> Optional[Dict[str, Any]]:
+    """Build private-by-default ACLs and fail closed without production identity."""
+    return request_object_permissions(
+        current_user,
+        jwt_enabled=jwt_configured(),
+        production=_production_mode(),
+    )
+
+
+def _readable_ids(current_user: Optional[User]) -> Optional[set[str]]:
+    """Resolve visible object IDs for authenticated search/graph responses."""
+    return readable_object_ids(
+        dataos.storage,
+        current_user,
+        jwt_enabled=jwt_configured(),
+        production=_production_mode(),
+    )
+
+
+app.include_router(create_knowledge_router(
+    dataos,
+    current_user_dependency=get_current_user,
+    jwt_enabled=jwt_configured,
+    production_mode=_production_mode,
+))
 
 
 # =============================================================================
@@ -416,15 +441,36 @@ async def list_objects(
     object_type: Optional[str] = None,
     source: Optional[str] = None,
     limit: int = FastQuery(default=100, ge=1, le=500),
-    offset: int = FastQuery(default=0, ge=0, le=1_000_000)
+    offset: int = FastQuery(default=0, ge=0, le=1_000_000),
+    current_user: Optional[User] = Depends(get_current_user),
 ):
-    objs = dataos.storage.list_objects(object_type=object_type, source=source, limit=limit, offset=offset)
-    total = dataos.storage.count_objects(object_type=object_type, source=source)
+    if not isinstance(limit, int):
+        limit = 100
+    if not isinstance(offset, int):
+        offset = 0
+    visible = list_readable_objects(
+        dataos.storage,
+        current_user,
+        object_type=object_type,
+        source=source,
+        jwt_enabled=jwt_configured(),
+        production=_production_mode(),
+    )
+    if visible is None:
+        objs = dataos.storage.list_objects(object_type=object_type, source=source, limit=limit, offset=offset)
+        total = dataos.storage.count_objects(object_type=object_type, source=source)
+    else:
+        total = len(visible)
+        objs = visible[offset:offset + limit]
     return {"total": total, "objects": [o.to_dict() for o in objs]}
 
 
 @app.post("/api/objects/", summary="Create DataOS Object")
-async def create_object(req: ObjectCreateRequest):
+async def create_object(
+    req: ObjectCreateRequest,
+    current_user: Optional[User] = Depends(get_current_user),
+):
+    permissions = _request_object_permissions(current_user) or {"owner": "system", "read": ["*"], "write": ["owner"]}
     # These fields are owned by trusted ingestion/storage code. Accepting
     # caller-supplied values would let clients forge duplicate hashes or attach
     # arbitrary blob references to objects.
@@ -446,21 +492,34 @@ async def create_object(req: ObjectCreateRequest):
         content=req.content,
         source=req.source,
         metadata=dict(req.metadata),
+        permissions=permissions,
     )
     saved = dataos.storage.save_object(obj)
     return saved.to_dict()
 
 
 @app.get("/api/objects/{object_id}", summary="Get DataOS Object")
-async def get_object(object_id: str):
+async def get_object(
+    object_id: str,
+    current_user: Optional[User] = Depends(get_current_user),
+):
+    require_read_identity(current_user, jwt_enabled=jwt_configured(), production=_production_mode())
     obj = dataos.storage.get_object(object_id)
-    if not obj:
+    if not obj or not can_read_object(obj, current_user):
         raise HTTPException(status_code=404, detail="Object not found")
     return obj.to_dict()
 
 
 @app.delete("/api/objects/{object_id}", summary="Delete DataOS Object")
-async def delete_object(object_id: str, soft: bool = True):
+async def delete_object(
+    object_id: str,
+    soft: bool = True,
+    current_user: Optional[User] = Depends(get_current_user),
+):
+    require_read_identity(current_user, jwt_enabled=jwt_configured(), production=_production_mode())
+    obj = dataos.storage.get_object(object_id)
+    if not obj or not can_write_object(obj, current_user):
+        raise HTTPException(status_code=404, detail="Object not found or already deleted")
     success = dataos.storage.delete_object(object_id, soft=soft)
     if not success:
         raise HTTPException(status_code=404, detail="Object not found or already deleted")
@@ -479,26 +538,75 @@ async def list_relationships(
     min_confidence: float = FastQuery(default=0.0, ge=0.0, le=1.0),
     limit: int = FastQuery(default=1000, ge=1, le=1000),
     offset: int = FastQuery(default=0, ge=0, le=1_000_000),
+    current_user: Optional[User] = Depends(get_current_user),
 ):
-    rels = dataos.storage.list_relationships(
-        source_id=source_id,
-        target_id=target_id,
-        relation_type=relation_type,
-        min_confidence=min_confidence,
-        limit=limit,
-        offset=offset,
-    )
-    total = dataos.storage.count_relationships(
-        source_id=source_id,
-        target_id=target_id,
-        relation_type=relation_type,
-        min_confidence=min_confidence,
-    )
+    if not isinstance(min_confidence, (int, float)):
+        min_confidence = 0.0
+    if not isinstance(limit, int):
+        limit = 1000
+    if not isinstance(offset, int):
+        offset = 0
+    visible_ids = _readable_ids(current_user)
+    if visible_ids is None:
+        rels = dataos.storage.list_relationships(
+            source_id=source_id, target_id=target_id, relation_type=relation_type,
+            min_confidence=min_confidence, limit=limit, offset=offset,
+        )
+        total = dataos.storage.count_relationships(
+            source_id=source_id, target_id=target_id, relation_type=relation_type,
+            min_confidence=min_confidence,
+        )
+    else:
+        if (source_id is not None and source_id not in visible_ids) or (target_id is not None and target_id not in visible_ids):
+            return {"total": 0, "relationships": []}
+        visible_rels = []
+        scan_offset = 0
+        page_size = 500
+        while scan_offset < 20_000:
+            batch = dataos.storage.list_relationships(
+                source_id=source_id, target_id=target_id, relation_type=relation_type,
+                min_confidence=min_confidence, limit=min(page_size, 20_000 - scan_offset),
+                offset=scan_offset,
+            )
+            if not batch:
+                break
+            visible_rels.extend(
+                rel for rel in batch
+                if str(rel.source) in visible_ids and str(rel.target) in visible_ids
+            )
+            scan_offset += len(batch)
+            if len(batch) < page_size:
+                break
+        else:
+            probe = dataos.storage.list_relationships(
+                source_id=source_id, target_id=target_id, relation_type=relation_type,
+                min_confidence=min_confidence, limit=1, offset=20_000,
+            )
+            if probe:
+                raise HTTPException(status_code=503, detail="Python reference backend cannot safely authorize more than 20000 relationships; use the indexed Rust backend.", headers={"Retry-After": "30"})
+        total = len(visible_rels)
+        rels = visible_rels[offset:offset + limit]
     return {"total": total, "relationships": [r.to_dict() for r in rels]}
 
 
 @app.post("/api/relationships/", summary="Create Relationship")
-async def create_relationship(req: RelationCreateRequest):
+async def create_relationship(
+    req: RelationCreateRequest,
+    current_user: Optional[User] = Depends(get_current_user),
+):
+    if not getattr(current_user, "id", None):
+        current_user = None
+    if current_user is not None or jwt_configured() or _production_mode():
+        require_read_identity(current_user, jwt_enabled=jwt_configured(), production=_production_mode())
+        source_obj = dataos.storage.get_object(req.source_id)
+        target_obj = dataos.storage.get_object(req.target_id)
+        if (
+            source_obj is None
+            or target_obj is None
+            or not can_write_object(source_obj, current_user)
+            or not can_write_object(target_obj, current_user)
+        ):
+            raise HTTPException(status_code=404, detail="Object not found or write access denied")
     rel = dataos.graph.create_relation(
         source_id=req.source_id,
         target_id=req.target_id,
@@ -513,8 +621,22 @@ async def create_relationship(req: RelationCreateRequest):
 async def get_neighbors(
     object_id: str,
     direction: Literal["outgoing", "incoming", "both"] = "both",
+    current_user: Optional[User] = Depends(get_current_user),
 ):
-    neighbors = dataos.graph.neighbors(object_id, direction=direction)
+    visible_ids = _readable_ids(current_user)
+    if visible_ids is not None and object_id not in visible_ids:
+        raise HTTPException(status_code=404, detail="Object not found")
+    if visible_ids is None:
+        neighbors = dataos.graph.neighbors(object_id, direction=direction)
+    else:
+        neighbors = dataos.graph.neighbors(
+            object_id,
+            direction=direction,
+            allowed_object_ids=visible_ids,
+        )
+    if visible_ids is not None:
+        # Keep a response-boundary check as defense in depth for alternate graph adapters.
+        neighbors = [item for item in neighbors if str(item.get("neighbor_id", "")) in visible_ids]
     return {"object_id": object_id, "total": len(neighbors), "neighbors": neighbors}
 
 
@@ -523,12 +645,29 @@ async def traverse_graph(
     object_id: str,
     max_hops: int = FastQuery(default=3, ge=1, le=10),
     min_confidence: float = FastQuery(default=0.0, ge=0.0, le=1.0),
+    current_user: Optional[User] = Depends(get_current_user),
 ):
-    return dataos.graph.engine.traverse(
-        start_id=object_id,
-        max_hops=max_hops,
-        min_confidence=min_confidence,
-    )
+    visible_ids = _readable_ids(current_user)
+    if visible_ids is not None and object_id not in visible_ids:
+        raise HTTPException(status_code=404, detail="Object not found")
+    if not isinstance(max_hops, int):
+        max_hops = 3
+    if not isinstance(min_confidence, (int, float)):
+        min_confidence = 0.0
+    if visible_ids is None:
+        result = dataos.graph.engine.traverse(
+            start_id=object_id,
+            max_hops=max_hops,
+            min_confidence=min_confidence,
+        )
+    else:
+        result = dataos.graph.engine.traverse(
+            start_id=object_id,
+            max_hops=max_hops,
+            min_confidence=min_confidence,
+            allowed_object_ids=visible_ids,
+        )
+    return result
 
 
 @app.get("/api/graph/analytics", summary="Graph Analytics & PageRank")
@@ -565,6 +704,9 @@ async def compute_python(req: PythonComputeRequest):
 
 @app.post("/api/query/", summary="Unified Query Execution")
 async def query_unified(req: UnifiedQueryRequest, current_user: Optional[User] = Depends(get_current_user)):
+    # Direct unit calls bypass FastAPI dependency resolution; treat the Depends sentinel as absent.
+    if not getattr(current_user, "id", None):
+        current_user = None
     query_type = req.query_type.strip().lower()
     if query_type == "auto":
         query_type = "sql" if req.query.lstrip().lower().startswith(("select ", "with ")) else "ask"
@@ -591,10 +733,14 @@ async def query_unified(req: UnifiedQueryRequest, current_user: Optional[User] =
     if query_type in {"ask", "natural_language"}:
         return dataos.ask(req.query)
     if query_type == "search":
+        visible_ids = _readable_ids(current_user)
+        if visible_ids is not None and req.context_object_id and req.context_object_id not in visible_ids:
+            raise HTTPException(status_code=404, detail="Object not found")
         results = dataos.search_engine.search(
             query=req.query,
             context_object_id=req.context_object_id,
             limit=20,
+            object_ids=visible_ids,
         )
         return {"query": req.query, "total_matches": len(results), "results": results}
     raise HTTPException(
@@ -612,13 +758,18 @@ async def hybrid_search(
     q: str = FastQuery(..., description="Search query string"),
     object_type: Optional[str] = None,
     context_id: Optional[str] = None,
-    limit: int = FastQuery(default=20, ge=1, le=100)
+    limit: int = FastQuery(default=20, ge=1, le=100),
+    current_user: Optional[User] = Depends(get_current_user),
 ):
+    visible_ids = _readable_ids(current_user)
+    if visible_ids is not None and context_id and context_id not in visible_ids:
+        raise HTTPException(status_code=404, detail="Object not found")
     results = dataos.search_engine.search(
         query=q,
         object_type=object_type,
         context_object_id=context_id,
         limit=limit,
+        object_ids=visible_ids,
     )
     return {"query": q, "total_matches": len(results), "results": results}
 
@@ -627,8 +778,17 @@ async def hybrid_search(
 async def search_vectors(
     q: str = FastQuery(..., description="Semantic query string"),
     top_k: int = FastQuery(default=10, ge=1, le=100),
+    current_user: Optional[User] = Depends(get_current_user),
 ):
-    results = dataos.search_vector(query_text=q, top_k=top_k)
+    visible_ids = _readable_ids(current_user)
+    if visible_ids is None:
+        results = dataos.search_vector(query_text=q, top_k=top_k)
+    else:
+        results = dataos.vector_index.search_similar(
+            query_text=q,
+            top_k=top_k,
+            object_ids=sorted(visible_ids),
+        )
     return {"query": q, "total_matches": len(results), "results": results}
 
 
@@ -640,10 +800,12 @@ async def recompute_vectors():
 @app.post("/api/notebooks/ingest", summary="Ingest Jupyter Notebook DAG (Rule #51)")
 async def ingest_notebook_api(
     filename: str = Form("analysis.ipynb"),
-    content: str = Form(...)
+    content: str = Form(...),
+    current_user: Optional[User] = Depends(get_current_user),
 ):
     try:
-        return dataos.ingest(content, filename=filename, discover_relations=True)
+        permissions = _request_object_permissions(current_user)
+        return dataos.ingest(content, filename=filename, discover_relations=True, permissions=permissions)
     except (ValueError, TypeError) as exc:
         logger.warning("Notebook ingestion failed (%s)", type(exc).__name__)
         raise HTTPException(
@@ -655,10 +817,12 @@ async def ingest_notebook_api(
 @app.post("/api/documents/extract_rich", summary="Extract Rich Document Tables & Citations (Rule #54)")
 async def extract_rich_document_api(
     filename: str = Form("paper.md"),
-    content: str = Form(...)
+    content: str = Form(...),
+    current_user: Optional[User] = Depends(get_current_user),
 ):
     try:
-        return dataos.ingest(content, filename=filename, discover_relations=True)
+        permissions = _request_object_permissions(current_user)
+        return dataos.ingest(content, filename=filename, discover_relations=True, permissions=permissions)
     except (ValueError, TypeError) as exc:
         logger.warning("Document ingestion failed (%s)", type(exc).__name__)
         raise HTTPException(
@@ -1012,10 +1176,14 @@ async def ask_dataos_api(req: AskDataOSRequest):
 async def universal_ingest_api(
     filename: str = Form("data_artifact"),
     content: str = Form(...),
-    discover_relations: bool = Form(True)
+    discover_relations: bool = Form(True),
+    current_user: Optional[User] = Depends(get_current_user),
 ):
-    res = dataos.ingest(content, filename=filename, discover_relations=discover_relations)
-    return res
+    permissions = _request_object_permissions(current_user)
+    return dataos.ingest(
+        content, filename=filename, discover_relations=discover_relations,
+        permissions=permissions,
+    )
 
 
 # =============================================================================
@@ -1026,13 +1194,17 @@ async def universal_ingest_api(
 async def ingest_text(
     filename: str = Form(...),
     content: str = Form(...),
-    format_type: str = Form("text")
+    format_type: str = Form("text"),
+    current_user: Optional[User] = Depends(get_current_user),
 ):
     # Ingest content directly; never construct a temporary path from client input.
     safe_name = os.path.basename(filename.strip().replace("\\", "/")) or "text.txt"
     if not os.path.splitext(safe_name)[1]:
         safe_name = f"{safe_name}.txt"
-    return dataos.ingest(content, filename=safe_name, discover_relations=True)
+    permissions = _request_object_permissions(current_user)
+    return dataos.ingest(
+        content, filename=safe_name, discover_relations=True, permissions=permissions,
+    )
 
 
 @app.get("/api/io/export", summary="Export DataOS Graph")

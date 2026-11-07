@@ -3,7 +3,8 @@ from __future__ import annotations
 import json
 import re
 from typing import Any, Dict, Iterable, List, Optional, Sequence
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
+from backend.object_acl import can_read_object, require_read_identity
 from pydantic import BaseModel, Field
 
 TOKEN_RE = re.compile(r"[a-zA-Z0-9_]{2,}")
@@ -82,16 +83,32 @@ def resolve_related_files(selected_ids: Sequence[str], relationships: Iterable[A
         if neighbor not in candidates or confidence > candidates[neighbor]["confidence"]: candidates[neighbor] = candidate
     return sorted(candidates.values(), key=lambda x: (-x["confidence"], x["file_id"]))[:max_related_files]
 
-def create_knowledge_router(dataos: Any) -> APIRouter:
+def create_knowledge_router(
+    dataos: Any,
+    current_user_dependency: Any = None,
+    jwt_enabled: Any = None,
+    production_mode: Any = None,
+) -> APIRouter:
     router = APIRouter(tags=["Knowledge Graph RAG"])
+    if current_user_dependency is None:
+        async def current_user_dependency():
+            return None
     @router.post("/api/knowledge/query", summary="Retrieve evidence from selected and related files")
-    async def query_knowledge(req: KnowledgeQueryRequest) -> Dict[str, Any]:
+    async def query_knowledge(
+        req: KnowledgeQueryRequest,
+        current_user: Any = Depends(current_user_dependency),
+    ) -> Dict[str, Any]:
+        require_read_identity(
+            current_user,
+            jwt_enabled=bool(jwt_enabled()) if callable(jwt_enabled) else bool(jwt_enabled),
+            production=bool(production_mode()) if callable(production_mode) else bool(production_mode),
+        )
         selected_ids = list(dict.fromkeys(req.selected_file_ids))
         selected: Dict[str, Any] = {}
         missing = []
         for file_id in selected_ids:
             obj = dataos.storage.get_object(file_id)
-            if obj is None: missing.append(file_id)
+            if obj is None or not can_read_object(obj, current_user): missing.append(file_id)
             else: selected[file_id] = obj
         if missing:
             raise HTTPException(status_code=404, detail={"message":"One or more selected files no longer exist.","missing_file_ids":missing})
@@ -106,9 +123,14 @@ def create_knowledge_router(dataos: Any) -> APIRouter:
                         rel = _relation_dict(item)
                         key = (rel.get("id"), rel.get("source_id") or rel.get("source"), rel.get("target_id") or rel.get("target"), rel.get("relation_type") or rel.get("type"))
                         if key not in seen: seen.add(key); relationships.append(rel)
-        related = resolve_related_files(selected_ids, relationships, req.max_related_files if req.include_related else 0, req.min_confidence)
-        related_objects = {item["file_id"]: dataos.storage.get_object(item["file_id"]) for item in related}
-        related_objects = {k:v for k,v in related_objects.items() if v is not None}
+        related_candidates = resolve_related_files(selected_ids, relationships, req.max_related_files if req.include_related else 0, req.min_confidence)
+        related_objects: Dict[str, Any] = {}
+        related = []
+        for item in related_candidates:
+            obj = dataos.storage.get_object(item["file_id"])
+            if obj is not None and can_read_object(obj, current_user):
+                related_objects[item["file_id"]] = obj
+                related.append(item)
         eligible = {**selected, **related_objects}
         evidence = []
         for file_id, obj in eligible.items():

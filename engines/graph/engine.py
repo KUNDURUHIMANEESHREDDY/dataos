@@ -48,7 +48,8 @@ class GraphEngine:
         object_id: str,
         direction: str = "both",  # "outgoing", "incoming", "both"
         relation_types: Optional[List[str]] = None,
-        min_confidence: float = 0.0
+        min_confidence: float = 0.0,
+        allowed_object_ids: Optional[Set[str]] = None,
     ) -> List[Dict[str, Any]]:
         """
         Get all neighboring objects and the connecting relationships.
@@ -60,6 +61,8 @@ class GraphEngine:
         if direction in ("outgoing", "both"):
             out_rels = self.storage.list_relationships(source_id=object_id, min_confidence=min_confidence)
             for rel in out_rels:
+                if allowed_object_ids is not None and rel.target not in allowed_object_ids:
+                    continue
                 if relation_types and rel.relation_type not in relation_types:
                     continue
                 target_obj = self.storage.get_object(rel.target)
@@ -74,6 +77,8 @@ class GraphEngine:
         if direction in ("incoming", "both"):
             in_rels = self.storage.list_relationships(target_id=object_id, min_confidence=min_confidence)
             for rel in in_rels:
+                if allowed_object_ids is not None and rel.source not in allowed_object_ids:
+                    continue
                 if relation_types and rel.relation_type not in relation_types:
                     continue
                 src_obj = self.storage.get_object(rel.source)
@@ -92,7 +97,8 @@ class GraphEngine:
         max_hops: int = 3,
         direction: str = "outgoing",
         relation_types: Optional[List[str]] = None,
-        min_confidence: float = 0.0
+        min_confidence: float = 0.0,
+        allowed_object_ids: Optional[Set[str]] = None,
     ) -> Dict[str, Any]:
         """
         Multi-hop BFS graph traversal from a root object.
@@ -104,6 +110,13 @@ class GraphEngine:
         traversed_nodes: Dict[str, Dict[str, Any]] = {}
         traversed_edges: List[Dict[str, Any]] = []
         paths_found: List[Dict[str, Any]] = []
+
+        if allowed_object_ids is not None and start_id not in allowed_object_ids:
+            return {
+                "root_id": start_id, "max_hops": max_hops,
+                "total_nodes_reached": 0, "total_edges_traversed": 0,
+                "nodes": [], "edges": [], "paths": [],
+            }
 
         start_obj = self.storage.get_object(start_id)
         if start_obj:
@@ -126,7 +139,8 @@ class GraphEngine:
                 object_id=curr_id,
                 direction=direction,
                 relation_types=relation_types,
-                min_confidence=min_confidence
+                min_confidence=min_confidence,
+                allowed_object_ids=allowed_object_ids,
             )
 
             for neighbor in neighbors:
