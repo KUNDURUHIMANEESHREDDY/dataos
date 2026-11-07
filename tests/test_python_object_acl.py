@@ -276,3 +276,50 @@ def test_hybrid_search_rejects_private_context_object(monkeypatch):
         run(api.hybrid_search(q="sales", context_id="private-context", current_user=user("alice")))
     assert exc.value.status_code == 404
     assert called["value"] is False
+
+
+def test_write_acl_is_separate_from_read_acl():
+    from backend.object_acl import can_write_object
+
+    alice = user("alice")
+    write_only = obj("write-only", owner="bob", read=["bob"], write=["alice"])
+    assert can_write_object(write_only, alice)
+    assert not can_read_object(write_only, alice)
+
+
+def test_api_create_object_assigns_private_creator_acl(monkeypatch):
+    saved = []
+    monkeypatch.setattr(api.dataos.storage, "save_object", lambda item: saved.append(item) or item)
+    request = api.ObjectCreateRequest(type="document", content={"text": "private"})
+    result = run(api.create_object(request, current_user=user("alice")))
+    assert result["permissions"] == {"owner": "alice", "read": ["alice"], "write": ["alice"]}
+    assert saved[0].permissions == {"owner": "alice", "read": ["alice"], "write": ["alice"]}
+
+
+def test_api_delete_object_requires_write_access(monkeypatch):
+    private = obj("private", owner="bob", read=["alice"], write=["bob"])
+    deleted = {"called": False}
+    monkeypatch.setattr(api.dataos.storage, "get_object", lambda object_id: private)
+    monkeypatch.setattr(api.dataos.storage, "delete_object", lambda *args, **kwargs: deleted.update(called=True) or True)
+    with pytest.raises(HTTPException) as exc:
+        run(api.delete_object("private", current_user=user("alice")))
+    assert exc.value.status_code == 404
+    assert deleted["called"] is False
+
+
+def test_api_create_relationship_requires_write_access_to_both_endpoints(monkeypatch):
+    source = obj("source", owner="alice", read=["alice"], write=["alice"])
+    target = obj("target", owner="bob", read=["alice"], write=["bob"])
+    objects = {"source": source, "target": target}
+    monkeypatch.setattr(api.dataos.storage, "get_object", lambda object_id: objects.get(object_id))
+    created = {"called": False}
+    monkeypatch.setattr(
+        api.dataos.graph,
+        "create_relation",
+        lambda **kwargs: created.update(called=True) or SimpleNamespace(to_dict=lambda: {}),
+    )
+    request = api.RelationCreateRequest(source_id="source", target_id="target")
+    with pytest.raises(HTTPException) as exc:
+        run(api.create_relationship(request, current_user=user("alice")))
+    assert exc.value.status_code == 404
+    assert created["called"] is False
