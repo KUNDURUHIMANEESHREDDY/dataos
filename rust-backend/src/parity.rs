@@ -1474,13 +1474,13 @@ pub(crate) async fn pipeline_research(
     // Stage 1 — research agent: search for contextual objects.
     let stage_started = Instant::now();
     let found_objects = if let Some(user) = user.as_ref().filter(|user| user.role != "admin") {
-        let owned = state.db.list_objects_for_owner(&user.id, None, None, 1000, 0).map_err(internal)?;
+        let owned = state.db.list_objects_readable(&user.id, None, None, 1000, 0).map_err(internal)?;
         let needle = request.goal_prompt.trim().to_lowercase();
         owned.iter().filter(|object| {
             serde_json::to_string(object).unwrap_or_default().to_lowercase().contains(&needle)
         }).count() as u64
     } else {
-        search_objects(&state.db, &request.goal_prompt, 5)
+        search_objects(&state.db, &request.goal_prompt, 5, user.as_ref())
             .get("total_matches")
             .and_then(Value::as_u64)
             .unwrap_or(0)
@@ -2398,6 +2398,7 @@ pub struct AgentExecutionRequest {
 
 pub(crate) async fn agents_execute(
     State(state): State<AppState>,
+    Extension(CurrentUser(user)): Extension<CurrentUser>,
     Json(request): Json<AgentExecutionRequest>,
 ) -> Result<Json<Value>, ApiError> {
     let known_agents = ["agent_research", "agent_analysis", "agent_quality", "agent_report"];
@@ -2420,7 +2421,7 @@ pub(crate) async fn agents_execute(
             Ok(Json(json!({
                 "agent_id": request.agent_id,
                 "capability": request.capability,
-                "result": search_objects(&state.db, query, 20),
+                "result": search_objects(&state.db, query, 20, user.as_ref()),
                 "runtime": "rust-deterministic"
             })))
         }
@@ -2432,14 +2433,23 @@ pub(crate) async fn agents_execute(
             Ok(Json(json!({
                 "agent_id": request.agent_id,
                 "capability": request.capability,
-                "result": sql_engine::execute_sql(query, &state.db),
+                "result": match user.as_ref().filter(|user| user.role != "admin") {
+                    Some(user) => sql_engine::execute_sql_for_owner(query, &state.db, &user.id),
+                    None => sql_engine::execute_sql(query, &state.db),
+                },
                 "runtime": "rust-deterministic"
             })))
         }
         "read_object" => {
             let object_id = params.get("object_id").and_then(Value::as_str).unwrap_or("");
+            if let Some(user) = user.as_ref() {
+                let allowed = state.db.can_read_object(object_id, &user.id, user.role == "admin").map_err(internal)?;
+                if !allowed {
+                    return Err(ApiError::new(StatusCode::NOT_FOUND, "Object not found."));
+                }
+            }
             let object = state.db.get_object(object_id).map_err(internal)?.ok_or_else(|| {
-                ApiError::new(StatusCode::NOT_FOUND, format!("Object not found: {object_id}"))
+                ApiError::new(StatusCode::NOT_FOUND, "Object not found.")
             })?;
             Ok(Json(json!({
                 "agent_id": request.agent_id,
@@ -2449,7 +2459,11 @@ pub(crate) async fn agents_execute(
             })))
         }
         "export_data" => {
-            let objects = state.db.list_objects(None, None, 1000, 0).map_err(internal)?;
+            let objects = if let Some(user) = user.as_ref().filter(|user| user.role != "admin") {
+                state.db.list_objects_readable(&user.id, None, None, 1000, 0).map_err(internal)?
+            } else {
+                state.db.list_objects(None, None, 1000, 0).map_err(internal)?
+            };
             Ok(Json(json!({
                 "agent_id": request.agent_id,
                 "capability": request.capability,
