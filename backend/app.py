@@ -630,10 +630,68 @@ async def graph_analytics(algorithm: str = "pagerank"):
 # COMPUTATION & QUERY ROUTES
 # =============================================================================
 
+def _safe_sql_result(result: Dict[str, Any]) -> Dict[str, Any]:
+    """Remove backend exception details before returning SQL failures to clients."""
+    if not isinstance(result, dict) or result.get("success") is not False:
+        return result
+
+    messages = {
+        "SQL_QUERY_TOO_LARGE": "SQL query exceeds the configured byte limit.",
+        "SQL_RESULT_LIMIT_EXCEEDED": "SQL query result exceeds the configured row limit.",
+    }
+    safe_message = messages.get(result.get("error_code"), "SQL query could not be executed.")
+    safe_result = dict(result)
+    safe_result["error"] = safe_message
+
+    provenance = result.get("provenance")
+    if isinstance(provenance, dict) and "error" in provenance:
+        safe_result["provenance"] = {**provenance, "error": safe_message}
+    return safe_result
+
+
+def _execute_sql_for_user(query: str, current_user: Optional[User]) -> Dict[str, Any]:
+    """Execute SQL only over datasets visible to the authenticated principal."""
+    if current_user is not None and not current_user.has_capability(Capability.QUERY_SQL.value):
+        raise HTTPException(status_code=403, detail="SQL query capability is not permitted.")
+
+    production_mode = _production_mode()
+    jwt_ready = jwt_configured()
+    if current_user is None:
+        if production_mode and not jwt_ready:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Per-user JWT authentication is not configured for production SQL routes. "
+                    "Configure DATAOS_JWT_SECRET; DATAOS_API_TOKEN is not a user identity."
+                ),
+            )
+        if requires_per_user_identity(
+            current_user,
+            production_mode=production_mode,
+            jwt_auth_configured=jwt_ready,
+        ):
+            raise HTTPException(
+                status_code=401,
+                detail="A per-user session is required for SQL queries.",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        return _safe_sql_result(dataos.sql(query))
+
+    readable_datasets = datasets_readable_by_user(dataos.storage, current_user)
+    result = dataos.sql_engine.execute_sql(
+        query,
+        table_objects=readable_datasets,
+        agent_or_user=f"user:{current_user.id}",
+    )
+    return _safe_sql_result(result)
+
+
 @app.post("/api/compute/sql", summary="Execute SQL Query")
-async def compute_sql(req: SQLQueryRequest):
-    res = dataos.sql(req.query)
-    return res
+async def compute_sql(
+    req: SQLQueryRequest,
+    current_user: Optional[User] = Depends(get_current_user),
+):
+    return _execute_sql_for_user(req.query, current_user)
 
 
 @app.post("/api/compute/python", summary="Execute Python Sandbox")
@@ -651,44 +709,7 @@ async def query_unified(req: UnifiedQueryRequest, current_user: Optional[User] =
 
     required_capability: Optional[str] = None
     if query_type == "sql":
-        required_capability = Capability.QUERY_SQL.value
-    elif query_type == "python":
-        required_capability = Capability.COMPUTE_PYTHON.value
-    elif query_type in {"ask", "natural_language", "search"}:
-        required_capability = Capability.SEARCH.value
-
-    if current_user is not None and required_capability and not current_user.has_capability(required_capability):
-        raise HTTPException(
-            status_code=403,
-            detail=f"Capability '{required_capability}' is not permitted for role '{current_user.role}'.",
-        )
-
-    if query_type == "sql":
-        # A deployment-wide bearer token proves access to the API, not which
-        # tenant's datasets the caller may query. Once JWT auth is configured
-        # (or production mode is active), require a per-user identity and pass
-        # only datasets visible to that user into the SQL engine.
-        if requires_per_user_identity(
-            current_user,
-            production_mode=_production_mode(),
-            jwt_auth_configured=jwt_configured(),
-        ):
-            raise HTTPException(
-                status_code=401,
-                detail="A per-user session is required for SQL queries.",
-                headers={"WWW-Authenticate": "Bearer"},
-            )
-        if current_user is None:
-            # Preserve unauthenticated local development only when per-user
-            # authentication has not been configured.
-            return dataos.sql(req.query)
-
-        readable_datasets = datasets_readable_by_user(dataos.storage, current_user)
-        return dataos.sql_engine.execute_sql(
-            req.query,
-            table_objects=readable_datasets,
-            agent_or_user=f"user:{current_user.id}",
-        )
+        return _execute_sql_for_user(req.query, current_user)
     if query_type == "python":
         require_python_compute_enabled()
         return dataos.python(req.query)
