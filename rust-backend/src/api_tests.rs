@@ -427,6 +427,39 @@ async fn explicit_read_acl_scopes_list_search_sql_and_never_grants_write() {
     assert!(!db.can_read_object(&write_only_id, &reader_id, false).expect("write must not imply read"));
     let (status, hidden) = call(&app, Method::GET, &format!("/api/objects/{write_only_id}"), None, Some(&reader)).await;
     assert_eq!(status, StatusCode::NOT_FOUND, "write-only principal received object content: {hidden}");
+    // Relationship listing must filter both endpoints in SQL before pagination.
+    let (status, _) = call(
+        &app,
+        Method::POST,
+        "/api/relationships",
+        Some(json!({"source_id": shared_id, "target_id": public_id, "relation_type": "visible_to_reader", "confidence": 0.9})),
+        Some(&owner),
+    ).await;
+    assert_eq!(status, StatusCode::OK, "owner could not create visible relationship");
+
+    let (status, _) = call(
+        &app,
+        Method::POST,
+        "/api/relationships",
+        Some(json!({"source_id": shared_id, "target_id": write_only_id, "relation_type": "must_be_hidden", "confidence": 0.9})),
+        Some(&owner),
+    ).await;
+    assert_eq!(status, StatusCode::OK, "owner could not create private relationship");
+
+    let (status, visible_relationships) = call(
+        &app,
+        Method::GET,
+        "/api/relationships/?limit=10&offset=0",
+        None,
+        Some(&reader),
+    ).await;
+    assert_eq!(status, StatusCode::OK, "reader relationship list failed: {visible_relationships}");
+    assert_eq!(visible_relationships["total"], 1, "relationship with an unreadable endpoint leaked into count");
+    let visible = visible_relationships["relationships"].as_array().expect("relationship list");
+    assert_eq!(visible.len(), 1);
+    assert_eq!(visible[0]["source"], shared_id);
+    assert_eq!(visible[0]["target"], public_id);
+
 
     let admin = register(&app, &db, "admin").await;
     let (status, admin_read) = call(&app, Method::GET, &format!("/api/objects/{write_only_id}"), None, Some(&admin)).await;
