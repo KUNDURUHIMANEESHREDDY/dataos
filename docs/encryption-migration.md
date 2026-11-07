@@ -2,6 +2,8 @@
 
 ## Security contract
 
+**Integration boundary:** `EncryptionEngine` is currently a library component and is not automatically applied to every write in the default SQLite/PostgreSQL storage adapters. This PR hardens that component; it does **not** claim that existing database files or all newly persisted records are encrypted at rest. A separate storage-adapter integration, field classification, key-rotation plan and round-trip/restore tests are required before making that production claim.
+
 The encryption engine writes authenticated ciphertext using Fernet when available and AES-GCM otherwise. It requires the `cryptography` dependency and fails closed if neither authenticated backend is available. It never writes XOR ciphertext.
 
 In production, any of `DATAOS_ENV`, `APP_ENV`, or `ENVIRONMENT` set to `production` or `prod` requires `DATAOS_MASTER_KEY`. A missing or empty key is a startup/configuration error. An ephemeral key is permitted only for local development/test data and must not protect data that needs to survive a process restart.
