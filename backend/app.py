@@ -618,6 +618,9 @@ async def get_neighbors(
         direction=direction,
         allowed_object_ids=visible_ids,
     )
+    if visible_ids is not None:
+        # Keep a response-boundary check as defense in depth for alternate graph adapters.
+        neighbors = [item for item in neighbors if str(item.get("neighbor_id", "")) in visible_ids]
     return {"object_id": object_id, "total": len(neighbors), "neighbors": neighbors}
 
 
