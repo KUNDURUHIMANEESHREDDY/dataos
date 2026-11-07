@@ -639,6 +639,9 @@ async def compute_python(req: PythonComputeRequest):
 
 @app.post("/api/query/", summary="Unified Query Execution")
 async def query_unified(req: UnifiedQueryRequest, current_user: Optional[User] = Depends(get_current_user)):
+    # Direct unit calls bypass FastAPI dependency resolution; treat the Depends sentinel as absent.
+    if not getattr(current_user, "id", None):
+        current_user = None
     query_type = req.query_type.strip().lower()
     if query_type == "auto":
         query_type = "sql" if req.query.lstrip().lower().startswith(("select ", "with ")) else "ask"
