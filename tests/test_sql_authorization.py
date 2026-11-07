@@ -154,7 +154,7 @@ def test_sql_api_redacts_internal_exception_details(monkeypatch):
     import importlib
 
     api = importlib.import_module("backend.app")
-    user = SimpleNamespace(id="alice", role="analyst")
+    user = SimpleNamespace(id="alice", role="analyst", has_capability=lambda capability: True)
     monkeypatch.setattr(api, "datasets_readable_by_user", lambda storage, principal: [])
     monkeypatch.setattr(
         api.dataos.sql_engine,
