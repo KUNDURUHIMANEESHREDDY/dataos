@@ -739,9 +739,13 @@ async fn quota(Path(principal_id): Path<String>) -> Json<Value> {
     }))
 }
 
-async fn federation_search(State(state): State<AppState>, Query(params): Query<FederationQuery>) -> Result<Json<Value>, ApiError> {
+async fn federation_search(
+    State(state): State<AppState>,
+    Extension(CurrentUser(user)): Extension<CurrentUser>,
+    Query(params): Query<FederationQuery>,
+) -> Result<Json<Value>, ApiError> {
     let top_k = clamp_i64(params.top_k, 10, 1, 100);
-    let local = search_objects(&state.db, &params.q, top_k);
+    let local = search_objects(&state.db, &params.q, top_k, user.as_ref());
     if let Some(results) = local.get("results").cloned() {
         return ok_json(json!({
             "query": params.q,
