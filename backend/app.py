@@ -10,6 +10,7 @@ import os
 import uuid
 import datetime
 import hmac
+import logging
 import threading
 from typing import Annotated, Dict, Any, List, Literal, Optional
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Depends, Header, Request, Response, Query as FastQuery
@@ -36,6 +37,8 @@ from backend.cors_config import cors_middleware_options
 from backend.authorization import CapabilityMiddleware, get_user_store
 from backend.workflow_api import WorkflowRequestError, execute_safe_workflow
 from runtime.workflows.workflow_engine import WorkflowEngine
+
+logger = logging.getLogger(__name__)
 
 def _parse_time_travel_timestamp(value: str, field_name: str) -> datetime.datetime:
     """Parse an offset-aware ISO 8601 timestamp and normalize it to UTC.
@@ -333,7 +336,11 @@ async def register_user(req: RegisterRequest):
         store = await run_in_threadpool(get_user_store)
         user = await run_in_threadpool(store.register, req.username, req.email, req.password)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        logger.warning("User registration failed (%s)", type(exc).__name__)
+        raise HTTPException(
+            status_code=400,
+            detail="Registration could not be completed. Check the supplied fields or try a different username/email.",
+        ) from None
     return user.to_dict()
 
 
@@ -638,7 +645,11 @@ async def ingest_notebook_api(
     try:
         return dataos.ingest(content, filename=filename, discover_relations=True)
     except (ValueError, TypeError) as exc:
-        raise HTTPException(status_code=422, detail=f"Notebook ingestion failed: {exc}") from exc
+        logger.warning("Notebook ingestion failed (%s)", type(exc).__name__)
+        raise HTTPException(
+            status_code=422,
+            detail="Notebook ingestion failed. Check the format and supported content limits.",
+        ) from None
 
 
 @app.post("/api/documents/extract_rich", summary="Extract Rich Document Tables & Citations (Rule #54)")
@@ -649,7 +660,11 @@ async def extract_rich_document_api(
     try:
         return dataos.ingest(content, filename=filename, discover_relations=True)
     except (ValueError, TypeError) as exc:
-        raise HTTPException(status_code=422, detail=f"Document ingestion failed: {exc}") from exc
+        logger.warning("Document ingestion failed (%s)", type(exc).__name__)
+        raise HTTPException(
+            status_code=422,
+            detail="Document ingestion failed. Check the format and supported content limits.",
+        ) from None
 
 
 # =============================================================================
@@ -706,8 +721,12 @@ async def resolve_conflict_api(req: ConflictResolutionRequest):
             manual_properties=req.manual_properties
         )
         return res
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+    except ValueError as exc:
+        logger.warning("Conflict resolution failed (%s)", type(exc).__name__)
+        raise HTTPException(
+            status_code=400,
+            detail="Conflict resolution request could not be completed.",
+        ) from None
 
 
 @app.get("/api/profiling/{object_id}", summary="Get Dataset Profile")
@@ -872,7 +891,11 @@ async def execute_workflow(req: WorkflowExecutionRequest):
                 execute_safe_workflow, workflow_engine, req.definition, req.context
             )
         except WorkflowRequestError as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
+            logger.warning("Workflow request rejected (%s)", type(exc).__name__)
+            raise HTTPException(
+                status_code=422,
+                detail="Workflow definition is invalid or exceeds the supported execution limits.",
+            ) from None
     finally:
         workflow_slots.release()
 
@@ -942,8 +965,9 @@ async def verify_sharing_token_api(req: VerifySharingTokenRequest):
         payload = dataos.tokens.verify_and_decode_token(req.token)
         import dataclasses
         return {"status": "valid", "payload": dataclasses.asdict(payload)}
-    except Exception as e:
-        raise HTTPException(status_code=403, detail=str(e))
+    except Exception as exc:
+        logger.warning("Sharing token verification failed (%s)", type(exc).__name__)
+        raise HTTPException(status_code=403, detail="Sharing token is invalid or expired.") from None
 
 
 @app.get("/api/federation/search", summary="Federated Cross-Instance Search (Rule #64)")
