@@ -130,14 +130,36 @@ def test_python_compute_is_disabled_by_default_in_production(monkeypatch):
     assert unified_exc.value.status_code == 403
 
 
-def test_python_compute_requires_explicit_production_opt_in(monkeypatch):
+def test_python_compute_requires_per_user_identity_even_when_enabled_in_production(monkeypatch):
     monkeypatch.setenv("DATAOS_ENV", "production")
     monkeypatch.delenv("APP_ENV", raising=False)
     monkeypatch.delenv("ENVIRONMENT", raising=False)
     monkeypatch.setenv("DATAOS_ALLOW_PYTHON_COMPUTE", "true")
-    monkeypatch.setattr(api.dataos, "python", lambda code, input_object_ids=None: {"executed": code})
-    result = run(api.compute_python(api.PythonComputeRequest(code="print(1)")))
-    assert result == {"executed": "print(1)"}
+
+    with pytest.raises(HTTPException) as anonymous_exc:
+        run(api.compute_python(api.PythonComputeRequest(code="print(1)"), current_user=None))
+    assert anonymous_exc.value.status_code == 401
+
+    user = SimpleNamespace(id="alice", role="analyst")
+    monkeypatch.setattr(api, "_readable_object_ids", lambda principal: ["obj-1"])
+    monkeypatch.setattr(
+        api.dataos,
+        "python",
+        lambda code, input_object_ids=None, agent_or_user="system": {
+            "executed": code,
+            "inputs": input_object_ids,
+            "principal": agent_or_user,
+        },
+    )
+    result = run(api.compute_python(
+        api.PythonComputeRequest(code="print(1)", input_object_ids=["obj-1"]),
+        current_user=user,
+    ))
+    assert result == {
+        "executed": "print(1)",
+        "inputs": ["obj-1"],
+        "principal": "user:alice",
+    }
 
 
 def test_unified_query_auto_dispatches_sql_and_natural_language(monkeypatch):
