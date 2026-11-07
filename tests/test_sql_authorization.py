@@ -131,6 +131,23 @@ def test_object_read_and_write_permissions_are_separate():
     assert not can_write_object(alice, private)
 
 
+
+def test_unresolved_fastapi_dependency_fails_closed_in_production(monkeypatch):
+    import importlib
+
+    import pytest
+    from fastapi import HTTPException
+    from fastapi.params import Depends as DependsParam
+
+    api = importlib.import_module("backend.app")
+    unresolved = DependsParam(dependency=api.get_current_user)
+    assert api._resolved_current_user(unresolved) is None
+
+    monkeypatch.setenv("DATAOS_ENV", "production")
+    with pytest.raises(HTTPException) as exc:
+        api._request_object_permissions(unresolved)
+    assert exc.value.status_code == 401
+
 def test_object_listing_paginates_after_acl_filtering():
     storage = FakeStorage(
         [
