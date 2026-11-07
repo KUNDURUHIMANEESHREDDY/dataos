@@ -34,7 +34,14 @@ export default function EmptyState() {
       },
       {
         filename: "q4_report.md",
-        content: `# Q4 Revenue Report\n\nTotal revenue: $2.4M\nGrowth: +18% YoY\n\n## Key Drivers\n- New enterprise deals\n- Expansion in APAC region`,
+        content: `# Q4 Revenue Report
+
+Total revenue: $2.4M
+Growth: +18% YoY
+
+## Key Drivers
+- New enterprise deals
+- Expansion in APAC region`,
       },
     ];
 
@@ -149,8 +156,16 @@ export default function EmptyState() {
       )}
       {ingestNotice && (
         <div className="absolute top-24 right-4 z-40 max-w-[min(90vw,40rem)] pointer-events-auto">
-          <div role="status" aria-live="polite" className="glass rounded-xl px-4 py-3 text-sm text-[var(--color-text-primary)] shadow-lg">
-            {ingestNotice}
+          <div role="status" aria-live="polite" className="glass rounded-xl px-4 py-3 text-sm text-[var(--color-text-primary)] shadow-lg flex items-start gap-3">
+            <span className="flex-1">{ingestNotice}</span>
+            <button
+              type="button"
+              aria-label="Dismiss ingestion notice"
+              onClick={() => setIngestNotice(null)}
+              className="shrink-0 rounded px-2 py-1 hover:bg-black/10 focus-visible:outline focus-visible:outline-2"
+            >
+              Dismiss
+            </button>
           </div>
         </div>
       )}
