@@ -587,13 +587,14 @@ async def query_unified(req: UnifiedQueryRequest, current_user: Optional[User] =
             production_mode=_production_mode(),
             jwt_auth_configured=jwt_configured(),
         ):
-                raise HTTPException(
-                    status_code=401,
-                    detail="A per-user session is required for SQL queries.",
-                    headers={"WWW-Authenticate": "Bearer"},
-                )
-            # Preserve the unauthenticated local-development workflow only
-            # when per-user authentication has not been configured.
+            raise HTTPException(
+                status_code=401,
+                detail="A per-user session is required for SQL queries.",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        if current_user is None:
+            # Preserve unauthenticated local development only when per-user
+            # authentication has not been configured.
             return dataos.sql(req.query)
 
         readable_datasets = datasets_readable_by_user(dataos.storage, current_user)
