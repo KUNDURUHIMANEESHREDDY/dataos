@@ -104,11 +104,90 @@ def test_graph_analytics_uses_supported_namespace(monkeypatch):
 def test_compute_routes_call_real_kernel_methods(monkeypatch):
     monkeypatch.setattr(api.dataos, "sql", lambda query: {"sql": query})
     monkeypatch.setattr(api.dataos, "python", lambda code, input_object_ids=None: {"code": code, "inputs": input_object_ids})
-    assert run(api.compute_sql(api.SQLQueryRequest(query="SELECT 1"))) == {"sql": "SELECT 1"}
+    assert run(api.compute_sql(api.SQLQueryRequest(query="SELECT 1"), current_user=None)) == {"sql": "SELECT 1"}
     assert run(api.compute_python(api.PythonComputeRequest(code="print(1)", input_object_ids=["obj-1"]))) == {
         "code": "print(1)", "inputs": ["obj-1"]
     }
 
+
+
+
+def test_compute_sql_fails_closed_without_per_user_identity_in_production(monkeypatch):
+    monkeypatch.setenv("DATAOS_ENV", "production")
+    monkeypatch.delenv("APP_ENV", raising=False)
+    monkeypatch.delenv("ENVIRONMENT", raising=False)
+    monkeypatch.delenv("DATAOS_JWT_SECRET", raising=False)
+    monkeypatch.setattr(api, "jwt_configured", lambda: False)
+    monkeypatch.setattr(api.dataos, "sql", lambda query: pytest.fail("unscoped SQL must not execute"))
+
+    with pytest.raises(HTTPException) as exc:
+        run(api.compute_sql(api.SQLQueryRequest(query="SELECT * FROM private_data"), current_user=None))
+
+    assert exc.value.status_code == 503
+    assert "DATAOS_JWT_SECRET" in exc.value.detail
+
+
+def test_compute_sql_scopes_execution_to_readable_datasets(monkeypatch):
+    dataset = SimpleNamespace(id="dataset-alice")
+    user = SimpleNamespace(
+        id="alice",
+        role="analyst",
+        has_capability=lambda capability: True,
+    )
+    captured = {}
+    monkeypatch.setattr(api, "_production_mode", lambda: False)
+    monkeypatch.setattr(api, "jwt_configured", lambda: True)
+    monkeypatch.setattr(api, "datasets_readable_by_user", lambda storage, principal: [dataset])
+    monkeypatch.setattr(
+        api.dataos.sql_engine,
+        "execute_sql",
+        lambda query, table_objects, agent_or_user: captured.update(
+            query=query,
+            table_objects=table_objects,
+            agent_or_user=agent_or_user,
+        ) or {"success": True, "rows": []},
+    )
+    monkeypatch.setattr(api.dataos, "sql", lambda query: pytest.fail("global SQL path must not execute"))
+
+    result = run(api.compute_sql(api.SQLQueryRequest(query="SELECT 1"), current_user=user))
+
+    assert result == {"success": True, "rows": []}
+    assert captured == {
+        "query": "SELECT 1",
+        "table_objects": [dataset],
+        "agent_or_user": "user:alice",
+    }
+
+
+def test_compute_sql_rejects_users_without_sql_capability(monkeypatch):
+    user = SimpleNamespace(id="viewer", role="viewer", has_capability=lambda capability: False)
+    monkeypatch.setattr(api.dataos, "sql", lambda query: pytest.fail("unauthorized SQL must not execute"))
+
+    with pytest.raises(HTTPException) as exc:
+        run(api.compute_sql(api.SQLQueryRequest(query="SELECT 1"), current_user=user))
+
+    assert exc.value.status_code == 403
+
+
+def test_compute_sql_redacts_backend_exception_details(monkeypatch):
+    monkeypatch.setattr(api, "_production_mode", lambda: False)
+    monkeypatch.setattr(api, "jwt_configured", lambda: False)
+    monkeypatch.setattr(
+        api.dataos,
+        "sql",
+        lambda query: {
+            "success": False,
+            "error_code": "SQL_EXECUTION_FAILED",
+            "error": "sqlite error at /srv/private/customer.db",
+            "provenance": {"error": "Traceback at /srv/private/customer.db"},
+        },
+    )
+
+    result = run(api.compute_sql(api.SQLQueryRequest(query="SELECT 1"), current_user=None))
+
+    assert result["error"] == "SQL query could not be executed."
+    assert result["provenance"]["error"] == "SQL query could not be executed."
+    assert "/srv/private" not in str(result)
 
 
 def test_python_compute_is_disabled_by_default_in_production(monkeypatch):
