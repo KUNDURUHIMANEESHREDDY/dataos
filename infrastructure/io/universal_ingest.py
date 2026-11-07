@@ -40,11 +40,22 @@ class UniversalIngestionPipeline:
         if self.allowed_file_root is not None and not self.allowed_file_root.is_dir():
             raise ValueError("DATAOS_INGEST_ROOT must point to an existing directory.")
 
+    def _save_ingested_object(
+        self,
+        obj: DataObject,
+        permissions: Optional[Dict[str, Any]],
+    ) -> DataObject:
+        """Persist an ingested object with request-scoped ACLs when supplied."""
+        if permissions is not None:
+            obj.permissions = dict(permissions)
+        return self.storage.save_object(obj)
+
     def ingest(
         self,
         file_path_or_content: Any,
         filename: Optional[str] = None,
-        discover_relations: bool = True
+        discover_relations: bool = True,
+        permissions: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
         Ingest text/bytes content or an explicitly scoped local file.
@@ -89,14 +100,24 @@ class UniversalIngestionPipeline:
         # ---------------------------------------------------------------------
         if ext == ".ipynb":
             # Jupyter Notebook DAG Engine
-            res = JupyterNotebookParser.ingest_notebook_to_graph(content_str, fn, self.storage)
+            res = JupyterNotebookParser.ingest_notebook_to_graph(
+                content_str,
+                fn,
+                self.storage,
+                permissions=permissions,
+            )
             notebook_obj = self.storage.get_object(res["notebook_id"])
             primary_object = notebook_obj
             created_objects.append(notebook_obj)
 
         elif ext in (".md", ".txt", ".docx", ".pdf"):
             # Rich Document Extraction (Tables, Figures, Citations)
-            res = RichDocumentExtractor.ingest_rich_document_to_graph(content_str, fn, self.storage)
+            res = RichDocumentExtractor.ingest_rich_document_to_graph(
+                content_str,
+                fn,
+                self.storage,
+                permissions=permissions,
+            )
             doc_obj = self.storage.get_object(res["document_id"])
             primary_object = doc_obj
             created_objects.append(doc_obj)
@@ -119,7 +140,7 @@ class UniversalIngestionPipeline:
                 content=df.head(100).to_dict(orient="records"),
                 source=f"file://{fn}"
             )
-            saved = self.storage.save_object(dataset_obj)
+            saved = self._save_ingested_object(dataset_obj, permissions)
             primary_object = saved
             created_objects.append(saved)
 
@@ -136,7 +157,7 @@ class UniversalIngestionPipeline:
                 content=parsed_json,
                 source=f"file://{fn}"
             )
-            saved = self.storage.save_object(json_obj)
+            saved = self._save_ingested_object(json_obj, permissions)
             primary_object = saved
             created_objects.append(saved)
 
@@ -156,7 +177,7 @@ class UniversalIngestionPipeline:
                 content=content_str,
                 source=f"file://{fn}"
             )
-            saved = self.storage.save_object(code_obj)
+            saved = self._save_ingested_object(code_obj, permissions)
             primary_object = saved
             created_objects.append(saved)
 
@@ -174,7 +195,7 @@ class UniversalIngestionPipeline:
                 content=media_result.get("segments", []),
                 source=f"file://{fn}"
             )
-            saved = self.storage.save_object(media_obj)
+            saved = self._save_ingested_object(media_obj, permissions)
             primary_object = saved
             created_objects.append(saved)
 
@@ -186,7 +207,7 @@ class UniversalIngestionPipeline:
                 content=content_str,
                 source=f"file://{fn}"
             )
-            saved = self.storage.save_object(generic_obj)
+            saved = self._save_ingested_object(generic_obj, permissions)
             primary_object = saved
             created_objects.append(saved)
 
