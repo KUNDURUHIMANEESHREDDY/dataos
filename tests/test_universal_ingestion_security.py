@@ -1,4 +1,4 @@
-"""Security regression tests for local-file ingestion boundaries."""
+"""Security regression tests for local-file ingestion and request-scoped ACLs."""
 
 from pathlib import Path
 import json
@@ -60,9 +60,7 @@ class TestUniversalIngestionSecurity(unittest.TestCase):
             saved = storage.get_object(result["primary_object_id"])
             self.assertEqual(saved.content, str(secret))
 
-
-
-    def test_ingested_objects_inherit_request_scoped_permissions(self):
+    def test_csv_ingestion_preserves_request_scoped_permissions_and_rows(self):
         with tempfile.TemporaryDirectory() as tmp:
             storage = SQLiteStorage(db_path=str(Path(tmp) / "storage.db"))
             pipeline = UniversalIngestionPipeline(
@@ -76,7 +74,7 @@ class TestUniversalIngestionSecurity(unittest.TestCase):
             }
 
             result = pipeline.ingest(
-                "name,value\\nalpha,1\\n",
+                "name,value\nalpha,1\n",
                 filename="private.csv",
                 discover_relations=False,
                 permissions=permissions,
@@ -84,10 +82,7 @@ class TestUniversalIngestionSecurity(unittest.TestCase):
             saved = storage.get_object(result["primary_object_id"])
 
             self.assertEqual(saved.permissions, permissions)
-
-if __name__ == "__main__":
-    unittest.main()
-
+            self.assertEqual(saved.content, [{"name": "alpha", "value": 1}])
 
     def test_notebook_and_rich_document_children_inherit_request_acl(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -108,7 +103,7 @@ if __name__ == "__main__":
                     "execution_count": 1,
                     "metadata": {},
                     "outputs": [],
-                    "source": ["value = 1\\n"],
+                    "source": ["value = 1\n"],
                 }],
                 "metadata": {},
                 "nbformat": 4,
@@ -128,8 +123,15 @@ if __name__ == "__main__":
             self.assertEqual(len(notebook_objects), 2)
             self.assertTrue(all(obj.permissions == permissions for obj in notebook_objects))
 
+            markdown = (
+                "# Private report\n\n"
+                "| Name | Value |\n"
+                "| --- | --- |\n"
+                "| alpha | 1 |\n\n"
+                "[^source]: Private citation\n"
+            )
             document_result = pipeline.ingest(
-                "# Private report\\n\\n| Name | Value |\\n| --- | --- |\\n| alpha | 1 |\\n\\n[^source]: Private citation\\n",
+                markdown,
                 filename="private.md",
                 discover_relations=False,
                 permissions=permissions,
@@ -141,3 +143,7 @@ if __name__ == "__main__":
             ]
             self.assertEqual(len(document_objects), 3)
             self.assertTrue(all(obj.permissions == permissions for obj in document_objects))
+
+
+if __name__ == "__main__":
+    unittest.main()
