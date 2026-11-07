@@ -149,6 +149,46 @@ def test_unresolved_fastapi_dependency_fails_closed_in_production(monkeypatch):
     assert exc.value.status_code == 401
 
 
+
+def test_authenticated_search_uses_only_readable_object_ids(monkeypatch):
+    import asyncio
+    import importlib
+
+    api = importlib.import_module("backend.app")
+    user = SimpleNamespace(id="alice", role="analyst", has_capability=lambda capability: True)
+    captured = {}
+    monkeypatch.setattr(api, "_readable_object_ids", lambda principal: ["owned", "shared"])
+    monkeypatch.setattr(
+        api.dataos.search_engine,
+        "search",
+        lambda **kwargs: captured.update(kwargs) or [{"object_id": "owned"}],
+    )
+
+    result = asyncio.run(api.hybrid_search(q="project", current_user=user))
+
+    assert result["total_matches"] == 1
+    assert captured["object_ids"] == ["owned", "shared"]
+
+
+def test_authenticated_natural_language_search_fails_closed_until_scoped(monkeypatch):
+    import asyncio
+    import importlib
+
+    from fastapi import HTTPException
+
+    api = importlib.import_module("backend.app")
+    user = SimpleNamespace(id="alice", role="analyst", has_capability=lambda capability: True)
+    monkeypatch.setattr(api.dataos, "ask", lambda query: pytest.fail("global Ask must not run for a tenant user"))
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(api.query_unified(
+            api.UnifiedQueryRequest(query="summarize all files", query_type="ask"),
+            current_user=user,
+        ))
+
+    assert exc.value.status_code == 501
+
+
 def test_sql_api_redacts_internal_exception_details(monkeypatch):
     import asyncio
     import importlib
