@@ -63,3 +63,13 @@ def requires_per_user_identity(
 ) -> bool:
     """Return whether SQL must reject a request that has no resolved user."""
     return user is None and (production_mode or jwt_auth_configured)
+
+
+def user_owned_object_permissions(user: User) -> dict[str, Any]:
+    """Build private-by-default object permissions for an authenticated user."""
+    principal_id = str(user.id)
+    return {
+        "owner": principal_id,
+        "read": [principal_id],
+        "write": [principal_id],
+    }
