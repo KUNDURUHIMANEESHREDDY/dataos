@@ -244,7 +244,10 @@ class PersistentVectorIndex:
             WHERE model_name = ? AND model_version = ?
         """
         params: list = [self.model.model_name, self.model.model_version]
-        if object_ids:
+        if object_ids is not None:
+            if not object_ids:
+                self._close(conn)
+                return []
             placeholders = ",".join("?" * len(object_ids))
             query_sql += f" AND object_id IN ({placeholders})"
             params.extend(object_ids)
