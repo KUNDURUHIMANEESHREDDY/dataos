@@ -35,7 +35,7 @@ from core.permissions.auth import (
 from backend.knowledge_rag import create_knowledge_router
 from backend.cors_config import cors_middleware_options
 from backend.authorization import CapabilityMiddleware, get_user_store
-from backend.object_acl import can_read_object, list_readable_objects, readable_object_ids, require_read_identity
+from backend.object_acl import can_read_object, can_write_object, list_readable_objects, readable_object_ids, require_read_identity, request_object_permissions
 from backend.workflow_api import WorkflowRequestError, execute_safe_workflow
 from runtime.workflows.workflow_engine import WorkflowEngine
 
@@ -453,7 +453,15 @@ async def list_objects(
 
 
 @app.post("/api/objects/", summary="Create DataOS Object")
-async def create_object(req: ObjectCreateRequest):
+async def create_object(
+    req: ObjectCreateRequest,
+    current_user: Optional[User] = Depends(get_current_user),
+):
+    permissions = request_object_permissions(
+        current_user,
+        jwt_enabled=jwt_configured(),
+        production=_production_mode(),
+    ) or {"owner": "system", "read": ["*"], "write": ["owner"]}
     # These fields are owned by trusted ingestion/storage code. Accepting
     # caller-supplied values would let clients forge duplicate hashes or attach
     # arbitrary blob references to objects.
@@ -475,6 +483,7 @@ async def create_object(req: ObjectCreateRequest):
         content=req.content,
         source=req.source,
         metadata=dict(req.metadata),
+        permissions=permissions,
     )
     saved = dataos.storage.save_object(obj)
     return saved.to_dict()
@@ -493,7 +502,15 @@ async def get_object(
 
 
 @app.delete("/api/objects/{object_id}", summary="Delete DataOS Object")
-async def delete_object(object_id: str, soft: bool = True):
+async def delete_object(
+    object_id: str,
+    soft: bool = True,
+    current_user: Optional[User] = Depends(get_current_user),
+):
+    require_read_identity(current_user, jwt_enabled=jwt_configured(), production=_production_mode())
+    obj = dataos.storage.get_object(object_id)
+    if not obj or not can_write_object(obj, current_user):
+        raise HTTPException(status_code=404, detail="Object not found or already deleted")
     success = dataos.storage.delete_object(object_id, soft=soft)
     if not success:
         raise HTTPException(status_code=404, detail="Object not found or already deleted")
@@ -558,7 +575,20 @@ async def list_relationships(
 
 
 @app.post("/api/relationships/", summary="Create Relationship")
-async def create_relationship(req: RelationCreateRequest):
+async def create_relationship(
+    req: RelationCreateRequest,
+    current_user: Optional[User] = Depends(get_current_user),
+):
+    require_read_identity(current_user, jwt_enabled=jwt_configured(), production=_production_mode())
+    source_obj = dataos.storage.get_object(req.source_id)
+    target_obj = dataos.storage.get_object(req.target_id)
+    if (
+        source_obj is None
+        or target_obj is None
+        or not can_write_object(source_obj, current_user)
+        or not can_write_object(target_obj, current_user)
+    ):
+        raise HTTPException(status_code=404, detail="Object not found or write access denied")
     rel = dataos.graph.create_relation(
         source_id=req.source_id,
         target_id=req.target_id,
