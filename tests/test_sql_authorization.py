@@ -148,6 +148,41 @@ def test_unresolved_fastapi_dependency_fails_closed_in_production(monkeypatch):
         api._request_object_permissions(unresolved)
     assert exc.value.status_code == 401
 
+
+def test_sql_api_redacts_internal_exception_details(monkeypatch):
+    import asyncio
+    import importlib
+
+    api = importlib.import_module("backend.app")
+    user = SimpleNamespace(id="alice", role="analyst")
+    monkeypatch.setattr(api, "datasets_readable_by_user", lambda storage, principal: [])
+    monkeypatch.setattr(
+        api.dataos.sql_engine,
+        "execute_sql",
+        lambda *args, **kwargs: {
+            "success": False,
+            "query": "SELECT * FROM private_table",
+            "error": "Traceback: sqlite3.OperationalError at /srv/private/dataos.db",
+            "provenance": {
+                "engine": "sqlite_in_memory",
+                "error": "Traceback: sqlite3.OperationalError at /srv/private/dataos.db",
+            },
+        },
+    )
+
+    result = asyncio.run(
+        api.query_unified(
+            api.UnifiedQueryRequest(query="SELECT * FROM private_table", query_type="sql"),
+            current_user=user,
+        )
+    )
+
+    assert result["error"] == "SQL query could not be executed."
+    assert result["provenance"]["error"] == "SQL query could not be executed."
+    assert "Traceback" not in str(result)
+    assert "/srv/private" not in str(result)
+
+
 def test_object_listing_paginates_after_acl_filtering():
     storage = FakeStorage(
         [
