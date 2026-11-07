@@ -620,6 +620,47 @@ async fn sql_executes_over_registered_dataset() {
 }
 
 #[tokio::test]
+async fn sql_does_not_silently_choose_between_duplicate_dataset_aliases() {
+    let (app, db) = test_app();
+    let token = register(&app, &db, "operator").await;
+    let first_id = create_dataset(&app, &token, "id,name,score\\n1,first,10\\n").await;
+    let second_id = create_dataset(&app, &token, "id,name,score\\n2,second,20\\n").await;
+    let first_table = format!("tbl_{}", &first_id[..8]);
+    let second_table = format!("tbl_{}", &second_id[..8]);
+
+    // Both uploads use demo.csv. The friendly alias is ambiguous and must not
+    // expose whichever dataset happened to be registered first.
+    let (status, ambiguous) = call(
+        &app,
+        Method::POST,
+        "/api/compute/sql",
+        Some(json!({"query": "SELECT name FROM demo"})),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(ambiguous["success"], false, "ambiguous alias unexpectedly resolved: {ambiguous}");
+
+    for (table, expected_name) in [(&first_table, "first"), (&second_table, "second")] {
+        let (status, result) = call(
+            &app,
+            Method::POST,
+            "/api/compute/sql",
+            Some(json!({"query": format!("SELECT name FROM {table}")})),
+            Some(&token),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "SQL endpoint contract changed: {result}");
+        assert_eq!(result["success"], true, "unique dataset alias failed: {result}");
+        assert_eq!(result["rows"][0]["name"], expected_name);
+        assert!(
+            result["ambiguous_table_names"].as_array().unwrap().iter().any(|name| name == "demo"),
+            "ambiguous aliases must be disclosed: {result}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn sql_authorizer_rejects_extension_loading() {
     let (app, db) = test_app();
     let token = register(&app, &db, "operator").await;
