@@ -2,16 +2,16 @@
 
 Status: **partial parity; not a production tenant-isolation certification**
 
-The Rust/Axum production backend has an indexed object_acl_grants implementation merged in PR #70. This document describes the separate Python reference-backend enforcement added in PR #71 and, equally importantly, the routes that remain outside that boundary.
+The Rust/Axum production backend has an indexed `object_acl_grants` implementation merged in PR #70. This document describes the separate Python reference-backend enforcement added in PR #71 and, equally importantly, the routes that remain outside that boundary.
 
 ## Permission semantics
 
 For an authenticated principal:
 
 - The object owner can read and write.
-- A principal listed in permissions.read can read.
-- A principal listed in permissions.write can write but does not gain read access.
-- An explicit * in permissions.read grants public read access.
+- A principal listed in `permissions.read` can read.
+- A principal listed in `permissions.write` can write but does not gain read access.
+- An explicit `*` in `permissions.read` grants public read access.
 - An administrator has an explicit administrative bypass.
 - Missing or malformed ACL metadata is not treated as an implicit grant by the Python helper.
 
@@ -52,9 +52,9 @@ Authenticated per-user reads and writes require a resolved user principal. If JW
 
 Unauthenticated local development retains the existing local behavior. That mode must not be exposed as a shared production service.
 
-## Explicitly not covered yet
+## Explicitly not covered by object-level ACLs yet
 
-The following Python routes still need route-by-route authorization or explicit administrator-only gating before the Python backend can be considered tenant-isolated:
+The following Python routes still need route-by-route authorization before the Python backend can be considered tenant-isolated:
 
 - Graph analytics and aggregate graph metrics.
 - Time-travel graph and global change history.
@@ -63,9 +63,18 @@ The following Python routes still need route-by-route authorization or explicit 
 - Federation search.
 - Graph/object export.
 - SQL and Python compute over registered datasets.
+- General agent/workflow execution, global conflict resolution, sharing-token operations, and global governance/profiling/quality surfaces.
 - Any additional route that returns object IDs, object metadata, graph edges, embeddings or derived evidence.
 
-The PR intentionally does not claim these routes are safe. They remain tracked under Issue #69.
+### Temporary administrator-only containment
+
+Until those handlers become principal-scoped, the Python `CapabilityMiddleware` now restricts the unscoped route families above to a resolved `admin` principal whenever JWT authentication is enabled. This includes graph analytics, time-travel graph/changes, provenance/lineage, recommendations, federation, export, Ask, SQL/Python compute, dynamic query/agent/workflow execution, vector recomputation, conflict resolution, sharing-token operations, global governance/duplicates, profiling/quality, and object `why`/`impact` views.
+
+In production, these routes return HTTP 503 when per-user JWT authentication is not configured, even if the deployment-wide shared API bearer token is present. A shared application credential is not an administrator identity. With JWT configured, missing/invalid sessions return 401 and non-admin principals receive 403. Local development without JWT retains its existing behavior.
+
+This is a containment measure, not a claim that the underlying routes are tenant-isolated. It deliberately limits non-admin access until each route has object-aware authorization and adversarial cross-user tests. The regression suite covers viewer denial, administrator access, production shared-token rejection, and preservation of scoped object/search/traversal routes.
+
+The PR intentionally does not claim these routes are safe for non-admin use. They remain tracked under Issue #69.
 
 ## Legacy data and migration risk
 
