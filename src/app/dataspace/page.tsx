@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, lazy, Suspense } from "react";
+import { useEffect, useState, lazy, Suspense, useRef } from "react";
 import { useSpatialStore, type ObjectType } from "@/hooks/useSpatialStore";
 import { api } from "@/lib/api";
 import paginate from "@/lib/paginate.js";
@@ -94,6 +94,7 @@ export default function DataspacePage() {
   const [error, setError] = useState<string | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
   const [notice, setNotice] = useState<string | null>(null);
+  const canvasSurfaceRef = useRef<HTMLDivElement>(null);
 
   useKeyboard();
 
@@ -189,7 +190,7 @@ export default function DataspacePage() {
             </div>
           )}
 
-          <div className="flex-1 relative overflow-hidden">
+          <div ref={canvasSurfaceRef} className="flex-1 relative overflow-hidden">
             {notice && (
               <div
                 className="absolute top-3 left-3 right-3 z-20 mx-auto max-w-3xl glass rounded-lg px-4 py-3 text-xs text-[var(--color-text-secondary)] shadow-lg"
@@ -205,7 +206,7 @@ export default function DataspacePage() {
               </Suspense>
             )}
             <NodePopover />
-            <DropZone />
+            <DropZone targetRef={canvasSurfaceRef} />
             <EmptyState />
             <CanvasControls />
           </div>
