@@ -280,9 +280,18 @@ class DataOS:
         """Execute real SQL query against registered datasets."""
         return self.sql_engine.execute_sql(query)
 
-    def python(self, code_str: str, input_object_ids: Optional[List[str]] = None) -> Dict[str, Any]:
+    def python(
+        self,
+        code_str: str,
+        input_object_ids: Optional[List[str]] = None,
+        agent_or_user: str = "system",
+    ) -> Dict[str, Any]:
         """Execute safe, sandboxed Python computation against loaded DataObjects."""
-        return self.python_sandbox.execute_code(code_str, input_object_ids=input_object_ids)
+        return self.python_sandbox.execute_code(
+            code_str,
+            input_object_ids=input_object_ids,
+            agent_or_user=agent_or_user,
+        )
 
     def search(self, query: str, top_k: int = 10) -> List[Dict[str, Any]]:
         """Hybrid BM25 + TF-IDF search across objects."""
