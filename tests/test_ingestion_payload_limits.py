@@ -13,7 +13,7 @@ def run(coro):
     return asyncio.run(coro)
 
 
-def request_from_body(body: bytes, content_type: str) -> Request:
+def request_from_body(body: bytes, content_type: str, path: str = "/api/ingest/universal") -> Request:
     headers = [
         (b"content-type", content_type.encode("ascii")),
         (b"content-length", str(len(body)).encode("ascii")),
@@ -24,8 +24,8 @@ def request_from_body(body: bytes, content_type: str) -> Request:
         "http_version": "1.1",
         "method": "POST",
         "scheme": "http",
-        "path": "/api/ingest/universal",
-        "raw_path": b"/api/ingest/universal",
+        "path": path,
+        "raw_path": path.encode("ascii"),
         "query_string": b"",
         "root_path": "",
         "headers": headers,
@@ -141,3 +141,53 @@ def test_universal_ingestion_rejects_invalid_boolean_form_value(monkeypatch):
         run(api.universal_ingest_api(request, current_user=None))
 
     assert exc.value.status_code == 422
+
+
+def test_text_ingestion_accepts_two_mib_urlencoded_content(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        api,
+        "dataos",
+        SimpleNamespace(ingest=lambda *args, **kwargs: calls.append((args, kwargs)) or {"status": "ingested"}),
+    )
+    content = "x" * api.MAX_TEXT_INGEST_BYTES
+    request = request_from_body(
+        urlencode([
+            ("filename", "report.txt"),
+            ("content", content),
+            ("format_type", "text"),
+        ]).encode("ascii"),
+        "application/x-www-form-urlencoded",
+        path="/api/io/ingest_text",
+    )
+
+    result = run(api.ingest_text(request, current_user=None))
+
+    assert result == {"status": "ingested"}
+    assert len(calls) == 1
+    assert calls[0][0][0] == content
+    assert calls[0][1]["filename"] == "report.txt"
+
+
+def test_text_ingestion_rejects_urlencoded_content_over_two_mib(monkeypatch):
+    monkeypatch.setattr(
+        api,
+        "dataos",
+        SimpleNamespace(ingest=lambda *args, **kwargs: pytest.fail("oversized text must not ingest")),
+    )
+    content = "x" * (api.MAX_TEXT_INGEST_BYTES + 1)
+    request = request_from_body(
+        urlencode([
+            ("filename", "report.txt"),
+            ("content", content),
+            ("format_type", "text"),
+        ]).encode("ascii"),
+        "application/x-www-form-urlencoded",
+        path="/api/io/ingest_text",
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        run(api.ingest_text(request, current_user=None))
+
+    assert exc.value.status_code == 413
+    assert exc.value.detail == "Text content exceeds the 2 MiB limit."
