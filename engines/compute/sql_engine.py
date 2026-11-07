@@ -11,6 +11,7 @@ import datetime
 import io
 import os
 import sqlite3
+import logging
 import time
 from typing import Any, Dict, List, Optional
 
@@ -55,6 +56,9 @@ _DENIED_SQLITE_ACTIONS = frozenset(
     )
     if hasattr(sqlite3, name)
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 class SQLExecutionEngine:
@@ -217,6 +221,10 @@ class SQLExecutionEngine:
 
         except Exception as exc:
             execution_time_ms = round((time.time() - start_time) * 1000.0, 2)
+            # Keep SQLite diagnostics server-side; never return exception text
+            # that may reveal schema, paths, SQL fragments, or internal state.
+            logger.warning("SQL execution failed (%s)", type(exc).__name__)
+            safe_error = "SQL query could not be executed."
             return {
                 "success": False,
                 "query": sql_query,
@@ -228,10 +236,11 @@ class SQLExecutionEngine:
                 "provenance": {
                     "engine": "sqlite_in_memory",
                     "query_text": sql_query,
-                    "error": str(exc),
+                    "error": safe_error,
                     "executed_at": now,
                 },
-                "error": str(exc),
+                "error_code": "SQL_EXECUTION_FAILED",
+                "error": safe_error,
             }
         finally:
             conn.close()
