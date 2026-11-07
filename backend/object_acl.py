@@ -50,6 +50,39 @@ def can_read_object(obj: Any, current_user: Any) -> bool:
     return owner == principal_id or "*" in readers or principal_id in readers
 
 
+def can_write_object(obj: Any, current_user: Any) -> bool:
+    """Return whether the principal may mutate an object."""
+    current_user = _normalized_user(current_user)
+    if current_user is None:
+        return True
+    if getattr(current_user, "role", None) == "admin":
+        return True
+    principal_id = str(getattr(current_user, "id", "") or "")
+    if not principal_id:
+        return False
+    permissions = getattr(obj, "permissions", None)
+    if not isinstance(permissions, dict):
+        return False
+    owner = str(permissions.get("owner", "") or "")
+    writers = _principal_values(permissions.get("write"))
+    return owner == principal_id or "*" in writers or principal_id in writers
+
+
+def request_object_permissions(
+    current_user: Any,
+    *,
+    jwt_enabled: bool,
+    production: bool,
+) -> Optional[dict[str, Any]]:
+    """Assign new API objects to the authenticated creator by default."""
+    current_user = _normalized_user(current_user)
+    require_read_identity(current_user, jwt_enabled=jwt_enabled, production=production)
+    if current_user is None:
+        return None
+    principal_id = str(current_user.id)
+    return {"owner": principal_id, "read": [principal_id], "write": [principal_id]}
+
+
 def require_read_identity(
     current_user: Any,
     *,
