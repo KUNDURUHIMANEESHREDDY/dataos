@@ -249,6 +249,20 @@ app.include_router(
 )
 
 
+async def require_admin_for_unscoped_data(
+    current_user: Optional[User] = Depends(get_current_user),
+) -> Optional[User]:
+    """Fail closed for endpoints that have not yet gained object-level filtering."""
+    current_user = _resolved_current_user(current_user)
+    _request_object_permissions(current_user)
+    if current_user is not None and current_user.role != "admin":
+        raise HTTPException(
+            status_code=403,
+            detail="This operation is not yet scoped to the caller's object permissions; administrator access is required.",
+        )
+    return current_user
+
+
 def require_capability(capability: str):
     """Build a FastAPI dependency that enforces a capability for the JWT user."""
     async def dependency(
@@ -409,7 +423,7 @@ async def get_me(current_user: Optional[User] = Depends(get_current_user)):
     return {"authenticated": True, "user": current_user.to_dict()}
 
 
-@app.get("/api/auth/users", summary="List registered users (admin)", dependencies=[Depends(require_capability(Capability.EXPORT_DATA.value))])
+@app.get("/api/auth/users", summary="List registered users (admin)", dependencies=[Depends(require_admin_for_unscoped_data), Depends(require_capability(Capability.EXPORT_DATA.value))])
 async def list_users(current_user: Optional[User] = Depends(get_current_user)):
     if current_user is None:
         raise HTTPException(status_code=503, detail="User auth is not configured.")
@@ -567,7 +581,7 @@ async def delete_object(
 # RELATIONSHIP & GRAPH ROUTES
 # =============================================================================
 
-@app.get("/api/relationships/", summary="List Relationships")
+@app.get("/api/relationships/", summary="List Relationships", dependencies=[Depends(require_admin_for_unscoped_data)])
 async def list_relationships(
     source_id: Optional[str] = None,
     target_id: Optional[str] = None,
@@ -593,7 +607,7 @@ async def list_relationships(
     return {"total": total, "relationships": [r.to_dict() for r in rels]}
 
 
-@app.post("/api/relationships/", summary="Create Relationship")
+@app.post("/api/relationships/", summary="Create Relationship", dependencies=[Depends(require_admin_for_unscoped_data)])
 async def create_relationship(req: RelationCreateRequest):
     rel = dataos.graph.create_relation(
         source_id=req.source_id,
@@ -605,7 +619,7 @@ async def create_relationship(req: RelationCreateRequest):
     return rel.to_dict()
 
 
-@app.get("/api/graph/neighbors/{object_id}", summary="Get Object Neighbors")
+@app.get("/api/graph/neighbors/{object_id}", summary="Get Object Neighbors", dependencies=[Depends(require_admin_for_unscoped_data)])
 async def get_neighbors(
     object_id: str,
     direction: Literal["outgoing", "incoming", "both"] = "both",
@@ -614,7 +628,7 @@ async def get_neighbors(
     return {"object_id": object_id, "total": len(neighbors), "neighbors": neighbors}
 
 
-@app.get("/api/graph/traverse/{object_id}", summary="Multi-Hop Graph Traversal")
+@app.get("/api/graph/traverse/{object_id}", summary="Multi-Hop Graph Traversal", dependencies=[Depends(require_admin_for_unscoped_data)])
 async def traverse_graph(
     object_id: str,
     max_hops: int = FastQuery(default=3, ge=1, le=10),
@@ -627,7 +641,7 @@ async def traverse_graph(
     )
 
 
-@app.get("/api/graph/analytics", summary="Graph Analytics & PageRank")
+@app.get("/api/graph/analytics", summary="Graph Analytics & PageRank", dependencies=[Depends(require_admin_for_unscoped_data)])
 async def graph_analytics(algorithm: str = "pagerank"):
     metrics = dataos.graph.analytics()
     if algorithm == "pagerank":
@@ -820,7 +834,7 @@ async def search_vectors(
     return {"query": q, "total_matches": len(results), "results": results}
 
 
-@app.post("/api/vectors/recompute", summary="Recompute All Vector Embeddings (Rule #45)")
+@app.post("/api/vectors/recompute", summary="Recompute All Vector Embeddings (Rule #45)", dependencies=[Depends(require_admin_for_unscoped_data)])
 async def recompute_vectors():
     return dataos.vector_index.recompute_all(dataos.storage)
 
@@ -855,7 +869,7 @@ async def extract_rich_document_api(
 # TIME-TRAVEL & BI-TEMPORAL ROUTES (Rule #27, Rule #29, Rule #59)
 # =============================================================================
 
-@app.get("/api/time_travel/object/{object_id}", summary="Time-Travel Point-in-Time Object Query (Rule #27)")
+@app.get("/api/time_travel/object/{object_id}", summary="Time-Travel Point-in-Time Object Query (Rule #27)", dependencies=[Depends(require_admin_for_unscoped_data)])
 async def time_travel_object(
     object_id: str,
     as_of: str = FastQuery(..., min_length=17, max_length=64, description="Offset-aware ISO 8601 timestamp"),
@@ -869,7 +883,7 @@ async def time_travel_object(
     return obj.to_dict()
 
 
-@app.get("/api/time_travel/graph", summary="Time-Travel Point-in-Time Graph Topology Query (Rule #27)")
+@app.get("/api/time_travel/graph", summary="Time-Travel Point-in-Time Graph Topology Query (Rule #27)", dependencies=[Depends(require_admin_for_unscoped_data)])
 async def time_travel_graph(
     as_of: str = FastQuery(..., min_length=17, max_length=64, description="Offset-aware ISO 8601 timestamp"),
     temporal_axis: Literal["system_time", "validity_time"] = "system_time"
@@ -878,7 +892,7 @@ async def time_travel_graph(
     return dataos.time_travel.get_graph_as_of(timestamp.isoformat(), temporal_axis=temporal_axis)
 
 
-@app.get("/api/time_travel/changes", summary="Changes Between Two Historical Timestamps (Rule #27)")
+@app.get("/api/time_travel/changes", summary="Changes Between Two Historical Timestamps (Rule #27)", dependencies=[Depends(require_admin_for_unscoped_data)])
 async def time_travel_changes(
     t1: str = FastQuery(..., min_length=17, max_length=64, description="Start offset-aware ISO 8601 timestamp"),
     t2: str = FastQuery(..., min_length=17, max_length=64, description="End offset-aware ISO 8601 timestamp"),
@@ -896,7 +910,7 @@ class ConflictResolutionRequest(BaseModel):
     manual_properties: Optional[Dict[str, Any]] = None
 
 
-@app.post("/api/sync/resolve_conflict", summary="Explicit Conflict Resolution (Rule #59)")
+@app.post("/api/sync/resolve_conflict", summary="Explicit Conflict Resolution (Rule #59)", dependencies=[Depends(require_admin_for_unscoped_data)])
 async def resolve_conflict_api(req: ConflictResolutionRequest):
     try:
         res = dataos.sync.resolve_conflict(
@@ -973,7 +987,7 @@ async def evaluate_quality(
 # PROVENANCE & LINEAGE ROUTES
 # =============================================================================
 
-@app.get("/api/provenance/lineage/{object_id}", summary="Data Lineage Traversal")
+@app.get("/api/provenance/lineage/{object_id}", summary="Data Lineage Traversal", dependencies=[Depends(require_admin_for_unscoped_data)])
 async def get_lineage(
     object_id: str,
     direction: Literal["upstream", "downstream"] = FastQuery(default="upstream"),
@@ -1001,7 +1015,7 @@ class MultiAgentPipelineRequest(BaseModel):
     quality_rules: Optional[List[Dict[str, Any]]] = None
 
 
-@app.post("/api/agents/pipeline/research", summary="Run Composable Multi-Agent Research Pipeline (Rule #20)")
+@app.post("/api/agents/pipeline/research", summary="Run Composable Multi-Agent Research Pipeline (Rule #20)", dependencies=[Depends(require_admin_for_unscoped_data)])
 async def run_multi_agent_pipeline_api(req: MultiAgentPipelineRequest):
     res = dataos.multi_agent.run_end_to_end_research_pipeline(
         goal_prompt=req.goal_prompt,
@@ -1012,7 +1026,7 @@ async def run_multi_agent_pipeline_api(req: MultiAgentPipelineRequest):
     return res
 
 
-@app.get("/api/recommendations/connections/{object_id}", summary="Graph Recommendation & Missing Link Discovery (Rule #57)")
+@app.get("/api/recommendations/connections/{object_id}", summary="Graph Recommendation & Missing Link Discovery (Rule #57)", dependencies=[Depends(require_admin_for_unscoped_data)])
 async def recommend_connections_api(
     object_id: str,
     top_k: int = FastQuery(default=10, ge=1, le=100),
@@ -1021,7 +1035,7 @@ async def recommend_connections_api(
     return {"target_object_id": object_id, "recommendations": recs}
 
 
-@app.get("/api/recommendations/datasets/{object_id}", summary="Recommend Relevant Datasets (Rule #57)")
+@app.get("/api/recommendations/datasets/{object_id}", summary="Recommend Relevant Datasets (Rule #57)", dependencies=[Depends(require_admin_for_unscoped_data)])
 async def recommend_datasets_api(
     object_id: str,
     top_k: int = FastQuery(default=5, ge=1, le=100),
@@ -1039,7 +1053,7 @@ async def recommend_datasets_api(
     return {"target_object_id": object_id, "recommended_datasets": recs}
 
 
-@app.post("/api/agents/execute", summary="Execute Agent Capability")
+@app.post("/api/agents/execute", summary="Execute Agent Capability", dependencies=[Depends(require_admin_for_unscoped_data)])
 async def execute_agent(req: AgentExecutionRequest, current_user: Optional[User] = Depends(get_current_user)):
     agents = {
         "agent_research": dataos.multi_agent.research_agent,
@@ -1064,7 +1078,7 @@ async def execute_agent(req: AgentExecutionRequest, current_user: Optional[User]
         raise HTTPException(status_code=403, detail="Agent capability is not permitted") from exc
 
 
-@app.post("/api/workflows/execute", summary="Execute a bounded built-in Workflow DAG")
+@app.post("/api/workflows/execute", summary="Execute a bounded built-in Workflow DAG", dependencies=[Depends(require_admin_for_unscoped_data)])
 async def execute_workflow(req: WorkflowExecutionRequest):
     # Do not queue an unbounded number of workflow requests behind the shared
     # ASGI worker pool. Reject overload explicitly so clients can retry.
@@ -1092,7 +1106,7 @@ async def execute_workflow(req: WorkflowExecutionRequest):
 # GOVERNANCE, SHARING & FEDERATION ROUTES (Rule #58, Rule #61, Rule #64, Rule #65)
 # =============================================================================
 
-@app.get("/api/governance/duplicates", summary="Fuzzy Duplicate Detection (Rule #58)")
+@app.get("/api/governance/duplicates", summary="Fuzzy Duplicate Detection (Rule #58)", dependencies=[Depends(require_admin_for_unscoped_data)])
 async def detect_duplicates_api(
     object_id: Optional[str] = None,
     min_similarity: float = 0.75
@@ -1104,7 +1118,7 @@ async def detect_duplicates_api(
     return {"total": len(results), "duplicates": results}
 
 
-@app.get("/api/governance/quota/{principal_id}", summary="Get Principal Quota & Usage Status (Rule #61)")
+@app.get("/api/governance/quota/{principal_id}", summary="Get Principal Quota & Usage Status (Rule #61)", dependencies=[Depends(require_admin_for_unscoped_data)])
 async def get_quota_status_api(principal_id: str):
     return dataos.governor.get_principal_status(principal_id)
 
@@ -1118,7 +1132,7 @@ class IssueSharingTokenRequest(BaseModel):
     duration_seconds: int = Field(default=3600, ge=1, le=86400)
 
 
-@app.post("/api/sharing/issue_token", summary="Issue Cryptographically Signed Subgraph Token (Rule #65)")
+@app.post("/api/sharing/issue_token", summary="Issue Cryptographically Signed Subgraph Token (Rule #65)", dependencies=[Depends(require_admin_for_unscoped_data)])
 async def issue_sharing_token_api(req: IssueSharingTokenRequest):
     if not os.getenv("DATAOS_SHARING_TOKEN_SECRET"):
         raise HTTPException(
@@ -1142,7 +1156,7 @@ class VerifySharingTokenRequest(BaseModel):
     token: str
 
 
-@app.post("/api/sharing/verify_token", summary="Verify and Decode Sharing Token (Rule #65)")
+@app.post("/api/sharing/verify_token", summary="Verify and Decode Sharing Token (Rule #65)", dependencies=[Depends(require_admin_for_unscoped_data)])
 async def verify_sharing_token_api(req: VerifySharingTokenRequest):
     if not os.getenv("DATAOS_SHARING_TOKEN_SECRET"):
         raise HTTPException(
@@ -1157,7 +1171,7 @@ async def verify_sharing_token_api(req: VerifySharingTokenRequest):
         raise HTTPException(status_code=403, detail=str(e))
 
 
-@app.get("/api/federation/search", summary="Federated Cross-Instance Search (Rule #64)")
+@app.get("/api/federation/search", summary="Federated Cross-Instance Search (Rule #64)", dependencies=[Depends(require_admin_for_unscoped_data)])
 async def federated_search_api(
     q: str = FastQuery(..., description="Query string"),
     top_k: int = FastQuery(default=10, ge=1, le=100),
@@ -1169,7 +1183,7 @@ async def federated_search_api(
 # EXPLANATION, IMPACT & ASK DATAOS ROUTES
 # =============================================================================
 
-@app.get("/api/objects/{object_id}/why", summary="Explain Object Origin, Provenance & Transformations")
+@app.get("/api/objects/{object_id}/why", summary="Explain Object Origin, Provenance & Transformations", dependencies=[Depends(require_admin_for_unscoped_data)])
 async def explain_object_why(object_id: str):
     res = dataos.why(object_id)
     if "error" in res:
@@ -1177,7 +1191,7 @@ async def explain_object_why(object_id: str):
     return res
 
 
-@app.get("/api/objects/{object_id}/impact", summary="Explain Downstream Breaking Impact")
+@app.get("/api/objects/{object_id}/impact", summary="Explain Downstream Breaking Impact", dependencies=[Depends(require_admin_for_unscoped_data)])
 async def explain_object_impact(object_id: str):
     res = dataos.impact(object_id)
     if "error" in res:
@@ -1244,7 +1258,7 @@ async def ingest_text(
     )
 
 
-@app.get("/api/io/export", summary="Export DataOS Graph")
+@app.get("/api/io/export", summary="Export DataOS Graph", dependencies=[Depends(require_admin_for_unscoped_data)])
 async def export_graph(format: str = "json_ld"):
     if format == "json_ld":
         return dataos.exporter.export_json_ld()
@@ -1262,7 +1276,7 @@ async def export_graph(format: str = "json_ld"):
 # CATALOG & HEALTH ROUTES
 # =============================================================================
 
-@app.get("/api/catalog/health", summary="System Health & Catalog Overview")
+@app.get("/api/catalog/health", summary="System Health & Catalog Overview", dependencies=[Depends(require_admin_for_unscoped_data)])
 async def get_health_overview():
     try:
         # A bounded read verifies that the configured storage backend is reachable.
