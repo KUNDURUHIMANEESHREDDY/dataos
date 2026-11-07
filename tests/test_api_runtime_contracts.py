@@ -255,6 +255,9 @@ def test_time_travel_rejects_utc_normalization_overflow():
         assert "representable as a UTC timestamp" in exc.value.detail
 
 def test_ingest_text_does_not_use_client_filename_as_temp_path(monkeypatch):
+    # This test exercises the development-mode permissions=None contract.
+    monkeypatch.setattr(api, "jwt_configured", lambda: False)
+    monkeypatch.setattr(api, "_production_mode", lambda: False)
     called = {}
     def ingest(content, filename, discover_relations, permissions=None):
         called.update(
