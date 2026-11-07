@@ -34,6 +34,7 @@ from core.permissions.auth import (
 from backend.knowledge_rag import create_knowledge_router
 from backend.cors_config import cors_middleware_options
 from backend.authorization import CapabilityMiddleware, get_user_store
+from backend.request_limits import RequestBodyLimitMiddleware, configured_request_body_limit
 from backend.sql_authorization import (
     can_read_object,
     can_write_object,
@@ -193,6 +194,10 @@ app = FastAPI(
     dependencies=[Depends(require_production_api_token)],
 )
 
+app.add_middleware(
+    RequestBodyLimitMiddleware,
+    max_body_bytes=configured_request_body_limit(),
+)
 app.add_middleware(
     CORSMiddleware,
     **cors_middleware_options(os.getenv("DATAOS_CORS_ORIGINS")),

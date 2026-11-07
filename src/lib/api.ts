@@ -3,10 +3,92 @@ import { mergeApiHeaders } from "./api-headers.mjs";
 const API_BASE = "";
 
 export class ApiError extends Error {
-  constructor(public readonly status: number, message: string) {
+  readonly status: number;
+
+  constructor(status: number, message: string) {
     super(message);
     this.name = "ApiError";
+    this.status = status;
   }
+}
+
+const MAX_ERROR_BODY_BYTES = 4096;
+const MAX_ERROR_DETAIL_CHARS = 1000;
+
+const truncateText = (value: string, maxChars = MAX_ERROR_DETAIL_CHARS): string =>
+  value.length > maxChars ? `${value.slice(0, maxChars - 1)}…` : value;
+
+const pathSegment = (value: string): string => {
+  if (value.length === 0 || value === "." || value === "..") {
+    throw new TypeError("DataOS resource IDs must be non-empty and cannot be dot path segments.");
+  }
+  return encodeURIComponent(value);
+};
+
+async function readBoundedErrorBody(response: Response): Promise<string> {
+  const reader = response.body?.getReader();
+  if (!reader) return "";
+
+  const decoder = new TextDecoder();
+  let text = "";
+  let bytesRead = 0;
+  let truncated = false;
+
+  try {
+    while (bytesRead < MAX_ERROR_BODY_BYTES) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      const remaining = MAX_ERROR_BODY_BYTES - bytesRead;
+      const chunk = value.subarray(0, remaining);
+      text += decoder.decode(chunk, { stream: true });
+      bytesRead += chunk.byteLength;
+
+      if (chunk.byteLength < value.byteLength) {
+        truncated = true;
+        await reader.cancel().catch(() => undefined);
+        break;
+      }
+    }
+
+    if (bytesRead === MAX_ERROR_BODY_BYTES) {
+      truncated = true;
+      await reader.cancel().catch(() => undefined);
+    }
+
+    text += decoder.decode();
+    return truncated ? `${text}…` : text;
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+function errorDetail(body: string, contentType: string, statusText: string): string {
+  const fallback = statusText || "Request failed";
+  if (!body) return fallback;
+
+  if (contentType.includes("json")) {
+    try {
+      const payload: unknown = JSON.parse(body);
+      if (payload && typeof payload === "object") {
+        const record = payload as Record<string, unknown>;
+        const detail = record.detail ?? record.message ?? record.error;
+        if (typeof detail === "string" && detail.trim()) return truncateText(detail.trim());
+        if (detail !== undefined) return truncateText(JSON.stringify(detail));
+      }
+    } catch {
+      return fallback;
+    }
+    return fallback;
+  }
+
+  // Never surface an upstream HTML error page or an unbounded response body
+  // in the application UI. Plain-text API errors remain useful when bounded.
+  if (contentType.includes("text/plain")) {
+    const safeText = body.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "").trim();
+    return truncateText(safeText) || fallback;
+  }
+  return fallback;
 }
 
 async function apiFetch(path: string, options?: RequestInit): Promise<any> {
@@ -17,12 +99,25 @@ async function apiFetch(path: string, options?: RequestInit): Promise<any> {
     headers: mergeApiHeaders(options?.headers),
   });
   if (!res.ok) {
-    const text = await res.text();
-    throw new ApiError(res.status, `API ${res.status}: ${text}`);
+    const contentType = (res.headers.get("content-type") || "").toLowerCase();
+    const body = await readBoundedErrorBody(res);
+    throw new ApiError(res.status, `API ${res.status}: ${errorDetail(body, contentType, res.statusText)}`);
   }
-  if (res.status === 204) return undefined;
-  return res.json();
+  if (res.status === 204 || res.status === 205) return undefined;
+
+  const contentType = (res.headers.get("content-type") || "").toLowerCase();
+  if (contentType && !contentType.includes("json")) {
+    if (res.body) await res.body.cancel().catch(() => undefined);
+    throw new ApiError(res.status, `API ${res.status}: expected a JSON response`);
+  }
+  try {
+    return await res.json();
+  } catch {
+    throw new ApiError(res.status, `API ${res.status}: invalid or empty JSON response`);
+  }
 }
+
+type ReadOptions = Pick<RequestInit, "signal" | "headers">;
 
 export const api = {
   authMe: () => apiFetch("/api/auth/me"),
@@ -39,27 +134,33 @@ export const api = {
   logout: () => apiFetch("/api/auth/logout", { method: "POST" }),
   health: () => apiFetch("/api/catalog/health"),
 
-  listObjects: (params?: { object_type?: string; limit?: number; offset?: number }, options?: RequestInit) => {
+  listObjects: (
+    params?: { object_type?: string; limit?: number; offset?: number },
+    options?: ReadOptions,
+  ) => {
     const qs = new URLSearchParams();
     if (params?.object_type) qs.set("object_type", params.object_type);
-    if (params?.limit) qs.set("limit", String(params.limit));
+    if (params?.limit !== undefined) qs.set("limit", String(params.limit));
     if (params?.offset !== undefined) qs.set("offset", String(params.offset));
     return apiFetch(`/api/objects/?${qs}`, options);
   },
 
-  getObject: (id: string) => apiFetch(`/api/objects/${id}`),
+  getObject: (id: string) => apiFetch(`/api/objects/${pathSegment(id)}`),
 
   createObject: (data: any) =>
     apiFetch("/api/objects/", { method: "POST", body: JSON.stringify(data) }),
 
   deleteObject: (id: string) =>
-    apiFetch(`/api/objects/${id}`, { method: "DELETE" }),
+    apiFetch(`/api/objects/${pathSegment(id)}`, { method: "DELETE" }),
 
-  listRelationships: (params?: { source_id?: string; target_id?: string; limit?: number; offset?: number }, options?: RequestInit) => {
+  listRelationships: (
+    params?: { source_id?: string; target_id?: string; limit?: number; offset?: number },
+    options?: ReadOptions,
+  ) => {
     const qs = new URLSearchParams();
     if (params?.source_id) qs.set("source_id", params.source_id);
     if (params?.target_id) qs.set("target_id", params.target_id);
-    if (params?.limit) qs.set("limit", String(params.limit));
+    if (params?.limit !== undefined) qs.set("limit", String(params.limit));
     if (params?.offset !== undefined) qs.set("offset", String(params.offset));
     return apiFetch(`/api/relationships/?${qs}`, options);
   },
@@ -67,26 +168,36 @@ export const api = {
   createRelationship: (data: any) =>
     apiFetch("/api/relationships/", { method: "POST", body: JSON.stringify(data) }),
 
-  getNeighbors: (id: string, direction?: string) =>
-    apiFetch(`/api/graph/neighbors/${id}?direction=${direction || "both"}`),
+  getNeighbors: (id: string, direction?: string) => {
+    const qs = new URLSearchParams({ direction: direction ?? "both" });
+    return apiFetch(`/api/graph/neighbors/${pathSegment(id)}?${qs}`);
+  },
 
-  traverse: (id: string, maxHops?: number) =>
-    apiFetch(`/api/graph/traverse/${id}?max_hops=${maxHops || 3}`),
+  traverse: (id: string, maxHops?: number) => {
+    const qs = new URLSearchParams({ max_hops: String(maxHops ?? 3) });
+    return apiFetch(`/api/graph/traverse/${pathSegment(id)}?${qs}`);
+  },
 
-  graphAnalytics: (algorithm?: string) =>
-    apiFetch(`/api/graph/analytics?algorithm=${algorithm || "pagerank"}`),
+  graphAnalytics: (algorithm?: string) => {
+    const qs = new URLSearchParams({ algorithm: algorithm ?? "pagerank" });
+    return apiFetch(`/api/graph/analytics?${qs}`);
+  },
 
-  search: (q: string, limit?: number) =>
-    apiFetch(`/api/search/?q=${encodeURIComponent(q)}&limit=${limit || 20}`),
+  search: (q: string, limit?: number) => {
+    const qs = new URLSearchParams({ q, limit: String(limit ?? 20) });
+    return apiFetch(`/api/search/?${qs}`);
+  },
 
   askDataOS: (query: string) =>
     apiFetch("/api/ask", { method: "POST", body: JSON.stringify({ query }) }),
 
-  lineage: (id: string, direction?: string) =>
-    apiFetch(`/api/provenance/lineage/${id}?direction=${direction || "upstream"}`),
+  lineage: (id: string, direction?: string) => {
+    const qs = new URLSearchParams({ direction: direction ?? "upstream" });
+    return apiFetch(`/api/provenance/lineage/${pathSegment(id)}?${qs}`);
+  },
 
-  why: (id: string) => apiFetch(`/api/objects/${id}/why`),
-  impact: (id: string) => apiFetch(`/api/objects/${id}/impact`),
+  why: (id: string) => apiFetch(`/api/objects/${pathSegment(id)}/why`),
+  impact: (id: string) => apiFetch(`/api/objects/${pathSegment(id)}/impact`),
 
   executeSQL: (query: string) =>
     apiFetch("/api/compute/sql", { method: "POST", body: JSON.stringify({ query }) }),
@@ -97,13 +208,18 @@ export const api = {
       body: JSON.stringify({ code, input_object_ids: inputIds || [] }),
     }),
 
-  profile: (id: string) => apiFetch(`/api/profiling/${id}`),
+  profile: (id: string) => apiFetch(`/api/profiling/${pathSegment(id)}`),
 
-  duplicates: (id?: string) =>
-    apiFetch(`/api/governance/duplicates${id ? `?object_id=${id}` : ""}`),
+  duplicates: (id?: string) => {
+    const qs = new URLSearchParams();
+    if (id) qs.set("object_id", id);
+    const query = qs.toString();
+    return apiFetch(`/api/governance/duplicates${query ? `?${query}` : ""}`);
+  },
 
   recommendations: (id: string) =>
-    apiFetch(`/api/recommendations/connections/${id}`),
+    apiFetch(`/api/recommendations/connections/${pathSegment(id)}`),
+
   queryKnowledge: (data: { query: string; selected_file_ids: string[]; include_related?: boolean; max_related_files?: number; min_confidence?: number }) =>
     apiFetch("/api/knowledge/query", { method: "POST", body: JSON.stringify(data) }),
 };
