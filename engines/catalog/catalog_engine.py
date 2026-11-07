@@ -1,57 +1,149 @@
 """
-Data Catalog & System Health Engine for DataOS (Rule #37, Rule #40).
-Indexes assets, evaluates freshness, quality pass ratios, and overall health scores.
+Bounded catalog inventory and data-health summary for DataOS.
 """
 
 from __future__ import annotations
+
 import datetime
-from typing import Dict, Any, List, Optional
-from core.object.model import DataObject, ObjectType
+import math
+from typing import Any, Dict, List, Optional
+
+from core.object.model import ObjectType
 from infrastructure.storage.base import StorageBackend
 
 
-class DataCatalogEngine:
-    """Maintains automated asset inventory, usage statistics, and data health scores."""
+DEFAULT_CATALOG_OBJECT_SAMPLE_LIMIT = 10_000
+DEFAULT_CATALOG_RELATIONSHIP_SAMPLE_LIMIT = 50_000
 
-    def __init__(self, storage: StorageBackend):
+
+class DataCatalogEngine:
+    """Maintains bounded asset inventory, usage statistics, and health summaries."""
+
+    def __init__(
+        self,
+        storage: StorageBackend,
+        max_objects: int = DEFAULT_CATALOG_OBJECT_SAMPLE_LIMIT,
+        max_relationships: int = DEFAULT_CATALOG_RELATIONSHIP_SAMPLE_LIMIT,
+    ):
+        for name, value in (
+            ("max_objects", max_objects),
+            ("max_relationships", max_relationships),
+        ):
+            maximum = (
+                DEFAULT_CATALOG_OBJECT_SAMPLE_LIMIT
+                if name == "max_objects"
+                else DEFAULT_CATALOG_RELATIONSHIP_SAMPLE_LIMIT
+            )
+            if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= maximum:
+                raise ValueError(f"{name} must be an integer between 1 and {maximum}")
         self.storage = storage
+        self.max_objects = max_objects
+        self.max_relationships = max_relationships
 
     def get_catalog_summary(self) -> Dict[str, Any]:
-        """Aggregate catalog metrics across all DataOS assets."""
-        objects = self.storage.list_objects(limit=10000)
-        relationships = self.storage.list_relationships(limit=50000)
+        """Return exact totals plus metrics calculated from explicitly bounded samples."""
+        objects = self.storage.list_objects(limit=self.max_objects)
+        relationships = self.storage.list_relationships(limit=self.max_relationships)
 
-        type_counts: Dict[str, int] = {}
+        total_objects = self.storage.count_objects()
+        total_relationships = self.storage.count_relationships()
+        quality_reports_count = self.storage.count_objects(
+            object_type=ObjectType.QUALITY_REPORT.value
+        )
+
+        object_types: Dict[str, int] = {}
         for obj in objects:
-            type_counts[obj.type] = type_counts.get(obj.type, 0) + 1
+            object_type = str(obj.type)
+            object_types[object_type] = object_types.get(object_type, 0) + 1
 
-        rel_type_counts: Dict[str, int] = {}
-        for rel in relationships:
-            rel_type_counts[rel.relation_type] = rel_type_counts.get(rel.relation_type, 0) + 1
+        relationship_types: Dict[str, int] = {}
+        for relationship in relationships:
+            relation_type = str(relationship.relation_type)
+            relationship_types[relation_type] = relationship_types.get(relation_type, 0) + 1
 
-        # Calculate data health score (0-100%)
-        # Based on: non-empty objects, average relationship confidence, quality check scores
-        quality_reports = [obj for obj in objects if obj.type == ObjectType.QUALITY_REPORT.value]
-        avg_quality = 100.0
-        if quality_reports:
-            scores = [r.properties.get("quality_score", 100.0) for r in quality_reports]
-            avg_quality = sum(scores) / len(scores)
+        quality_reports = [
+            obj for obj in objects if obj.type == ObjectType.QUALITY_REPORT.value
+        ]
+        quality_scores: List[float] = []
+        for report in quality_reports:
+            properties = report.properties if isinstance(report.properties, dict) else {}
+            score = properties.get("quality_score")
+            if isinstance(score, bool) or not isinstance(score, (int, float)):
+                continue
+            try:
+                numeric_score = float(score)
+            except (OverflowError, ValueError):
+                continue
+            if not math.isfinite(numeric_score):
+                continue
+            quality_scores.append(max(0.0, min(100.0, numeric_score)))
 
-        avg_confidence = 1.0
-        if relationships:
-            avg_confidence = sum(r.confidence for r in relationships) / len(relationships)
+        confidences: List[float] = []
+        for relationship in relationships:
+            confidence = relationship.confidence
+            if isinstance(confidence, bool) or not isinstance(confidence, (int, float)):
+                continue
+            try:
+                numeric_confidence = float(confidence)
+            except (OverflowError, ValueError):
+                continue
+            if math.isfinite(numeric_confidence):
+                confidences.append(max(0.0, min(1.0, numeric_confidence)))
 
-        composite_health_score = round((avg_quality * 0.6) + (avg_confidence * 100.0 * 0.4), 1)
+        average_quality = (
+            sum(quality_scores) / len(quality_scores) if quality_scores else None
+        )
+        average_confidence = (
+            sum(confidences) / len(confidences) if confidences else None
+        )
+
+        # Missing quality or relationship evidence is unknown, not a perfect score.
+        score_components = []
+        if average_quality is not None:
+            score_components.append((average_quality, 0.6))
+        if average_confidence is not None:
+            score_components.append((average_confidence * 100.0, 0.4))
+
+        if score_components:
+            weight_total = sum(weight for _, weight in score_components)
+            composite = sum(value * weight for value, weight in score_components) / weight_total
+            health_score: Optional[float] = round(max(0.0, min(100.0, composite)), 1)
+            health_grade = "A" if health_score >= 90 else ("B" if health_score >= 75 else "C")
+        else:
+            health_score = None
+            health_grade = "unrated"
+
+        is_partial = (
+            total_objects > len(objects)
+            or total_relationships > len(relationships)
+        )
 
         return {
-            "total_objects": len(objects),
-            "total_relationships": len(relationships),
-            "object_types": type_counts,
-            "relationship_types": rel_type_counts,
-            "data_health_score": min(100.0, composite_health_score),
-            "health_grade": "A" if composite_health_score >= 90 else ("B" if composite_health_score >= 75 else "C"),
-            "quality_reports_count": len(quality_reports),
-            "average_quality_score": round(avg_quality, 2),
-            "average_relationship_confidence": round(avg_confidence, 4),
-            "catalog_refreshed_at": datetime.datetime.now(datetime.timezone.utc).isoformat()
+            "total_objects": total_objects,
+            "sampled_objects": len(objects),
+            "total_relationships": total_relationships,
+            "sampled_relationships": len(relationships),
+            "object_types": object_types,
+            "relationship_types": relationship_types,
+            "data_health_score": health_score,
+            "health_grade": health_grade,
+            "quality_reports_count": quality_reports_count,
+            "quality_reports_sampled": len(quality_reports),
+            "quality_scores_used": len(quality_scores),
+            "quality_scores_ignored": len(quality_reports) - len(quality_scores),
+            "average_quality_score": (
+                round(average_quality, 2) if average_quality is not None else None
+            ),
+            "average_relationship_confidence": (
+                round(average_confidence, 4) if average_confidence is not None else None
+            ),
+            "is_partial": is_partial,
+            "metrics_scope": "sampled" if is_partial else "complete",
+            "sample_limits": {
+                "objects": self.max_objects,
+                "relationships": self.max_relationships,
+            },
+            "catalog_refreshed_at": datetime.datetime.now(
+                datetime.timezone.utc
+            ).isoformat(),
         }
