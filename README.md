@@ -66,6 +66,16 @@ export DATAOS_SHARING_TOKEN_SECRET="$(python -c 'import secrets; print(secrets.t
 
 This secret protects sharing-token signatures only.
 
+### Encryption at rest
+
+The encryption engine requires the `cryptography` package and writes only authenticated Fernet or AES-GCM ciphertext. It no longer writes the legacy XOR format. In production, one of `DATAOS_ENV`, `APP_ENV`, or `ENVIRONMENT` set to `production`/`prod` requires `DATAOS_MASTER_KEY`; an ephemeral development key is never substituted in production.
+
+When using a passphrase, DataOS derives a 32-byte key with PBKDF2-HMAC-SHA256 (480,000 iterations) and a persistent 16-byte salt. The default salt path is `~/.dataos/encryption_salt`; set `DATAOS_ENCRYPTION_SALT_FILE` to a durable path shared by replicas. Back up the salt with the deployment's key metadata. Losing or replacing it makes ciphertext derived from that passphrase unreadable.
+
+An explicit `key_file` is authoritative: it must be a regular non-symlink file, at most 4 KiB, containing either 32 raw key bytes or a UTF-8 passphrase. Missing or invalid key files fail closed.
+
+Legacy `xor:` ciphertext is rejected by default. A migration process may opt in with `allow_legacy_xor_decryption=True` only when the original key and salt are available; decrypt and re-encrypt into an authenticated format, verify the migrated records, and remove the migration opt-in. No automatic data migration is performed. `rotate_key()` changes the active key but does not re-encrypt existing stored records. See [Encryption migration and operations](docs/encryption-migration.md).
+
 ### Production API authentication
 
 Per-user authentication is available when `DATAOS_JWT_SECRET` is configured. Users authenticate with `/api/auth/login` and receive a signed HS256 JWT; role capabilities are derived from `ROLE_CAPABILITIES`. Without `DATAOS_JWT_SECRET`, local development falls back to shared-token behavior.
