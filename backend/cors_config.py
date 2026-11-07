@@ -11,7 +11,7 @@ DEFAULT_DEV_ORIGINS = (
     "http://127.0.0.1:3000",
 )
 
-_DNS_LABEL = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\Z")
+_DNS_LABEL = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
 
 
 def _is_loopback_host(hostname: str) -> bool:
@@ -36,7 +36,7 @@ def _canonical_host(hostname: str) -> str:
         # WHATWG URL parsing treats legacy numeric forms (127.1, 0177.0.0.1,
         # 0x7f000001, and single-number IPv4) as IP addresses. Reject them
         # instead of storing a hostname that browsers serialize differently.
-        if re.fullmatch(r"(?i)(?:0x[0-9a-f]+|[0-9]+)(?:\.(?:0x[0-9a-f]+|[0-9]+)){0,3}", hostname):
+        if re.fullmatch(r"(?i)(?:0x[0-9a-f]+|[0-9]+)(?:[.](?:0x[0-9a-f]+|[0-9]+)){0,3}", hostname):
             raise ValueError(f"Non-canonical IPv4-like host in CORS origin: {hostname!r}")
 
         try:
@@ -101,7 +101,7 @@ def parse_cors_origins(raw: str | None) -> list[str]:
 
         # urlsplit strips some ASCII controls before parsing; reject them first
         # so malformed configuration cannot normalize into a different origin.
-        if any(char.isspace() or ord(char) < 0x20 or ord(char) == 0x7F for char in candidate) or "\\" in candidate:
+        if any(char.isspace() or ord(char) < 0x20 or ord(char) == 0x7F for char in candidate) or chr(92) in candidate:
             raise ValueError(f"Invalid CORS origin: {candidate!r}")
 
         try:
