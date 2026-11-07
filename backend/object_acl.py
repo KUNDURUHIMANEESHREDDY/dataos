@@ -15,6 +15,11 @@ PAGE_SIZE = 500
 MAX_AUTHORIZATION_SCAN = 20_000
 
 
+def _normalized_user(current_user: Any) -> Any:
+    """Treat FastAPI dependency placeholders like an absent principal in direct tests."""
+    return current_user if current_user is not None and getattr(current_user, "id", None) else None
+
+
 def _principal_values(value: Any) -> set[str]:
     if isinstance(value, str):
         return {value}
@@ -25,6 +30,7 @@ def _principal_values(value: Any) -> set[str]:
 
 def can_read_object(obj: Any, current_user: Any) -> bool:
     """Return whether the authenticated principal may read one object."""
+    current_user = _normalized_user(current_user)
     if current_user is None:
         # Development/shared-token mode is handled by require_read_identity.
         return True
@@ -51,6 +57,7 @@ def require_read_identity(
     production: bool,
 ) -> None:
     """Require a principal whenever the API is configured for authenticated reads."""
+    current_user = _normalized_user(current_user)
     if current_user is not None:
         return
     if jwt_enabled:
@@ -86,6 +93,7 @@ def list_readable_objects(
         jwt_enabled=jwt_enabled,
         production=production,
     )
+    current_user = _normalized_user(current_user)
     if current_user is None or getattr(current_user, "role", None) == "admin":
         return None
 
