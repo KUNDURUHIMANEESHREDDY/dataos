@@ -18,7 +18,7 @@ def test_object_list_total_counts_all_filtered_rows(monkeypatch, tmp_path):
         store.save_object(DataObject(type="report", source="imports/beta"))
 
         response = asyncio.run(
-            api.list_objects(object_type="dataset", source="alpha", limit=1, offset=0)
+            api.list_objects(object_type="dataset", source="alpha", limit=1, offset=0, current_user=None)
         )
 
         assert response["total"] == 2

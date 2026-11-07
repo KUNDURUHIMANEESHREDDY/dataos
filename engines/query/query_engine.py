@@ -61,6 +61,7 @@ class UnifiedQueryEngine:
                 "row_count": res["row_count"],
                 "duration_ms": res["execution_time_ms"],
                 "provenance": res["provenance"],
+                "error_code": res.get("error_code"),
                 "error": res["error"]
             }
 
@@ -80,6 +81,7 @@ class UnifiedQueryEngine:
                     "timestamp": res.get("timestamp"),
                     "security_violation": res.get("security_violation", False)
                 },
+                "error_code": res.get("error_code"),
                 "error": res["error"]
             }
 

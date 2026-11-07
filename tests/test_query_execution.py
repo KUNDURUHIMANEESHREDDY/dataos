@@ -82,7 +82,8 @@ class TestQueryExecution(unittest.TestCase):
                 result = self.sql_engine.execute_sql(query, table_objects=[self.dataset])
                 self.assertFalse(result["success"])
                 if "load_extension" in query:
-                    self.assertIn("not authorized", result["error"].lower())
+                    self.assertEqual(result["error_code"], "SQL_EXECUTION_FAILED")
+                    self.assertEqual(result["error"], "SQL query could not be executed.")
 
     def test_sql_engine_rejects_multiple_statements(self):
         result = self.sql_engine.execute_sql(
@@ -95,6 +96,7 @@ class TestQueryExecution(unittest.TestCase):
         query = "SELECT 1 -- " + ("x" * SQLExecutionEngine.MAX_QUERY_BYTES)
         result = self.sql_engine.execute_sql(query, table_objects=[])
         self.assertFalse(result["success"])
+        self.assertEqual(result["error_code"], "SQL_QUERY_TOO_LARGE")
         self.assertIn("byte limit", result["error"])
 
     def test_sql_engine_rejects_oversized_result(self):
@@ -105,6 +107,7 @@ class TestQueryExecution(unittest.TestCase):
         )
         result = self.sql_engine.execute_sql(query, table_objects=[])
         self.assertFalse(result["success"])
+        self.assertEqual(result["error_code"], "SQL_RESULT_LIMIT_EXCEEDED")
         self.assertIn("row limit", result["error"])
 
     def test_sql_engine_enforces_execution_deadline(self):
@@ -116,7 +119,8 @@ class TestQueryExecution(unittest.TestCase):
         with patch.object(SQLExecutionEngine, "MAX_QUERY_SECONDS", -1):
             result = self.sql_engine.execute_sql(query, table_objects=[])
         self.assertFalse(result["success"])
-        self.assertIn("interrupted", result["error"].lower())
+        self.assertEqual(result["error_code"], "SQL_EXECUTION_FAILED")
+        self.assertEqual(result["error"], "SQL query could not be executed.")
 
     def test_python_query_execution(self):
         """Verify Python execution."""
@@ -140,6 +144,53 @@ class TestQueryExecution(unittest.TestCase):
         )
         self.assertTrue(res["success"])
         self.assertTrue(len(res["evidence"]) >= 1)
+
+
+    def test_unified_sql_query_preserves_stable_error_code(self):
+        with patch.object(
+            self.query_engine.sql_engine,
+            "execute_sql",
+            return_value={
+                "success": False,
+                "rows": [],
+                "columns": [],
+                "row_count": 0,
+                "execution_time_ms": 0,
+                "provenance": {},
+                "error_code": "SQL_QUERY_TOO_LARGE",
+                "error": "SQL query exceeds the configured byte limit.",
+            },
+        ):
+            result = self.query_engine.execute_query("SELECT 1", query_type="sql")
+
+        self.assertFalse(result["success"])
+        self.assertEqual(result["error_code"], "SQL_QUERY_TOO_LARGE")
+
+    def test_unified_python_query_preserves_sandbox_error_code(self):
+        with patch.object(
+            self.query_engine.python_sandbox,
+            "execute_code",
+            return_value={
+                "success": False,
+                "stdout": "",
+                "output": None,
+                "duration_ms": 0,
+                "input_objects_loaded": [],
+                "agent_or_user": "system",
+                "timestamp": None,
+                "security_violation": False,
+                "error_code": "PYTHON_TIMEOUT",
+                "error": "Python execution timed out.",
+            },
+        ):
+            result = self.query_engine.execute_query(
+                "print('slow')",
+                query_type="python",
+            )
+
+        self.assertFalse(result["success"])
+        self.assertEqual(result["error_code"], "PYTHON_TIMEOUT")
+
 
 
 if __name__ == "__main__":

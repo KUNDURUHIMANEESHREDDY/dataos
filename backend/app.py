@@ -18,6 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from starlette.concurrency import run_in_threadpool
+from starlette.formparsers import MultiPartException
 from pydantic import BaseModel, Field, ConfigDict
 
 from dataos_system import DataOS
@@ -35,10 +36,20 @@ from core.permissions.auth import (
 from backend.knowledge_rag import create_knowledge_router
 from backend.cors_config import cors_middleware_options
 from backend.authorization import CapabilityMiddleware, get_user_store
+from backend.request_limits import RequestBodyLimitMiddleware, configured_request_body_limit
+from backend.sql_authorization import (
+    can_read_object,
+    can_write_object,
+    datasets_readable_by_user,
+    list_objects_readable_by_user,
+    requires_per_user_identity,
+    user_owned_object_permissions,
+)
 from backend.workflow_api import WorkflowRequestError, execute_safe_workflow
 from runtime.workflows.workflow_engine import WorkflowEngine
 
 logger = logging.getLogger(__name__)
+
 
 def _parse_time_travel_timestamp(value: str, field_name: str) -> datetime.datetime:
     """Parse an offset-aware ISO 8601 timestamp and normalize it to UTC.
@@ -189,6 +200,10 @@ app = FastAPI(
 )
 
 app.add_middleware(
+    RequestBodyLimitMiddleware,
+    max_body_bytes=configured_request_body_limit(),
+)
+app.add_middleware(
     CORSMiddleware,
     **cors_middleware_options(os.getenv("DATAOS_CORS_ORIGINS")),
 )
@@ -219,7 +234,7 @@ async def get_current_user(
             status_code=401,
             detail="Invalid bearer token.",
             headers={"WWW-Authenticate": "Bearer"},
-        ) from exc
+        ) from None
 
     store = await run_in_threadpool(get_user_store)
     user = await run_in_threadpool(store.get_by_id, str(claims.get("sub", "")))
@@ -411,20 +426,69 @@ async def list_users(current_user: Optional[User] = Depends(get_current_user)):
 # OBJECT ROUTES
 # =============================================================================
 
+def _request_object_permissions(current_user: Optional[User]) -> Optional[Dict[str, Any]]:
+    """Require a per-user identity in authenticated/production deployments."""
+    production_mode = _production_mode()
+    jwt_ready = jwt_configured()
+    if current_user is None and production_mode and not jwt_ready:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Per-user JWT authentication is not configured for production data routes. "
+                "Configure DATAOS_JWT_SECRET; DATAOS_API_TOKEN is not a user identity."
+            ),
+        )
+    if requires_per_user_identity(
+        current_user,
+        production_mode=production_mode,
+        jwt_auth_configured=jwt_ready,
+    ):
+        raise HTTPException(
+            status_code=401,
+            detail="A per-user session is required for object access.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return user_owned_object_permissions(current_user) if current_user is not None else None
+
+
+def _ensure_object_access(current_user: Optional[User], obj: DataObject, *, write: bool = False) -> None:
+    _request_object_permissions(current_user)
+    if current_user is None:
+        return
+    allowed = can_write_object(current_user, obj) if write else can_read_object(current_user, obj)
+    if not allowed:
+        # Avoid disclosing whether another tenant's object exists.
+        raise HTTPException(status_code=404, detail="Object not found")
+
+
 @app.get("/api/objects/", summary="List DataOS Objects")
 async def list_objects(
     object_type: Optional[str] = None,
     source: Optional[str] = None,
     limit: int = FastQuery(default=100, ge=1, le=500),
-    offset: int = FastQuery(default=0, ge=0, le=1_000_000)
+    offset: int = FastQuery(default=0, ge=0, le=1_000_000),
+    current_user: Optional[User] = Depends(get_current_user),
 ):
-    objs = dataos.storage.list_objects(object_type=object_type, source=source, limit=limit, offset=offset)
-    total = dataos.storage.count_objects(object_type=object_type, source=source)
+    _request_object_permissions(current_user)
+    if current_user is None:
+        objs = dataos.storage.list_objects(object_type=object_type, source=source, limit=limit, offset=offset)
+        total = dataos.storage.count_objects(object_type=object_type, source=source)
+    else:
+        objs, total = list_objects_readable_by_user(
+            dataos.storage,
+            current_user,
+            object_type=object_type,
+            source=source,
+            limit=limit,
+            offset=offset,
+        )
     return {"total": total, "objects": [o.to_dict() for o in objs]}
 
 
 @app.post("/api/objects/", summary="Create DataOS Object")
-async def create_object(req: ObjectCreateRequest):
+async def create_object(req: ObjectCreateRequest, current_user: Optional[User] = Depends(get_current_user)):
+    permissions = _request_object_permissions(current_user)
+
     # These fields are owned by trusted ingestion/storage code. Accepting
     # caller-supplied values would let clients forge duplicate hashes or attach
     # arbitrary blob references to objects.
@@ -447,20 +511,37 @@ async def create_object(req: ObjectCreateRequest):
         source=req.source,
         metadata=dict(req.metadata),
     )
+    if permissions is not None:
+        obj.permissions = permissions
+
     saved = dataos.storage.save_object(obj)
     return saved.to_dict()
 
 
 @app.get("/api/objects/{object_id}", summary="Get DataOS Object")
-async def get_object(object_id: str):
+async def get_object(
+    object_id: str,
+    current_user: Optional[User] = Depends(get_current_user),
+):
+    _request_object_permissions(current_user)
     obj = dataos.storage.get_object(object_id)
     if not obj:
         raise HTTPException(status_code=404, detail="Object not found")
+    _ensure_object_access(current_user, obj)
     return obj.to_dict()
 
 
 @app.delete("/api/objects/{object_id}", summary="Delete DataOS Object")
-async def delete_object(object_id: str, soft: bool = True):
+async def delete_object(
+    object_id: str,
+    soft: bool = True,
+    current_user: Optional[User] = Depends(get_current_user),
+):
+    _request_object_permissions(current_user)
+    obj = dataos.storage.get_object(object_id)
+    if not obj:
+        raise HTTPException(status_code=404, detail="Object not found or already deleted")
+    _ensure_object_access(current_user, obj, write=True)
     success = dataos.storage.delete_object(object_id, soft=soft)
     if not success:
         raise HTTPException(status_code=404, detail="Object not found or already deleted")
@@ -550,10 +631,114 @@ async def graph_analytics(algorithm: str = "pagerank"):
 # COMPUTATION & QUERY ROUTES
 # =============================================================================
 
+def _safe_sql_result(result: Dict[str, Any]) -> Dict[str, Any]:
+    """Allowlist SQL response fields so backend exceptions never reach API clients."""
+    if not isinstance(result, dict):
+        return {
+            "success": False,
+            "rows": [],
+            "columns": [],
+            "row_count": 0,
+            "execution_time_ms": 0,
+            "provenance": {},
+            "error_code": "SQL_EXECUTION_FAILED",
+            "error": "SQL query could not be executed.",
+        }
+
+    succeeded = result.get("success") is True
+    safe_result: Dict[str, Any] = {
+        "success": succeeded,
+        "rows": result.get("rows", []) if succeeded and isinstance(result.get("rows"), list) else [],
+        "columns": result.get("columns", []) if succeeded and isinstance(result.get("columns"), list) else [],
+        "row_count": result.get("row_count", 0) if succeeded and type(result.get("row_count")) is int else 0,
+        "execution_time_ms": result.get("execution_time_ms", 0)
+        if type(result.get("execution_time_ms")) in (int, float) else 0,
+    }
+
+    provenance = result.get("provenance")
+    safe_provenance: Dict[str, Any] = {}
+    if isinstance(provenance, dict):
+        for key in ("agent_or_user", "timestamp", "query_hash", "engine"):
+            value = provenance.get(key)
+            if isinstance(value, str) and len(value) <= 256:
+                safe_provenance[key] = value
+        tables_used = provenance.get("tables_used")
+        if isinstance(tables_used, list) and all(
+            isinstance(name, str) and len(name) <= 128 for name in tables_used
+        ):
+            safe_provenance["tables_used"] = tables_used[:100]
+    safe_result["provenance"] = safe_provenance
+
+    if not succeeded:
+        allowed_codes = {
+            "SQL_QUERY_TOO_LARGE",
+            "SQL_RESULT_LIMIT_EXCEEDED",
+            "SQL_EXECUTION_FAILED",
+        }
+        code = result.get("error_code")
+        if code not in allowed_codes:
+            code = "SQL_EXECUTION_FAILED"
+        messages = {
+            "SQL_QUERY_TOO_LARGE": "SQL query exceeds the configured byte limit.",
+            "SQL_RESULT_LIMIT_EXCEEDED": "SQL query result exceeds the configured row limit.",
+            "SQL_EXECUTION_FAILED": "SQL query could not be executed.",
+        }
+        safe_result["error_code"] = code
+        safe_result["error"] = messages[code]
+
+    return safe_result
+
+def _execute_sql_for_user(query: str, current_user: Optional[User]) -> Dict[str, Any]:
+    """Execute SQL only over datasets visible to the authenticated principal."""
+    if current_user is not None and not current_user.has_capability(Capability.QUERY_SQL.value):
+        raise HTTPException(status_code=403, detail="SQL query capability is not permitted.")
+
+    production_mode = _production_mode()
+    jwt_ready = jwt_configured()
+    if current_user is None:
+        if production_mode and not jwt_ready:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Per-user JWT authentication is not configured for production SQL routes. "
+                    "Configure DATAOS_JWT_SECRET; DATAOS_API_TOKEN is not a user identity."
+                ),
+            )
+        if requires_per_user_identity(
+            current_user,
+            production_mode=production_mode,
+            jwt_auth_configured=jwt_ready,
+        ):
+            raise HTTPException(
+                status_code=401,
+                detail="A per-user session is required for SQL queries.",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        try:
+            return _safe_sql_result(dataos.sql(query))
+        except Exception as exc:
+            logger.warning("SQL execution failed (%s)", type(exc).__name__)
+            return _safe_sql_result({"success": False, "error_code": "SQL_EXECUTION_FAILED"})
+
+    readable_datasets = datasets_readable_by_user(dataos.storage, current_user)
+    try:
+        result = dataos.sql_engine.execute_sql(
+            query,
+            table_objects=readable_datasets,
+            agent_or_user=f"user:{current_user.id}",
+        )
+        return _safe_sql_result(result)
+    except Exception as exc:
+        logger.warning("SQL execution failed (%s)", type(exc).__name__)
+        return _safe_sql_result({"success": False, "error_code": "SQL_EXECUTION_FAILED"})
+
+
 @app.post("/api/compute/sql", summary="Execute SQL Query")
-async def compute_sql(req: SQLQueryRequest):
-    res = dataos.sql(req.query)
-    return res
+async def compute_sql(
+    req: SQLQueryRequest,
+    current_user: Optional[User] = Depends(get_current_user),
+):
+    return _execute_sql_for_user(req.query, current_user)
 
 
 @app.post("/api/compute/python", summary="Execute Python Sandbox")
@@ -571,20 +756,7 @@ async def query_unified(req: UnifiedQueryRequest, current_user: Optional[User] =
 
     required_capability: Optional[str] = None
     if query_type == "sql":
-        required_capability = Capability.QUERY_SQL.value
-    elif query_type == "python":
-        required_capability = Capability.COMPUTE_PYTHON.value
-    elif query_type in {"ask", "natural_language", "search"}:
-        required_capability = Capability.SEARCH.value
-
-    if current_user is not None and required_capability and not current_user.has_capability(required_capability):
-        raise HTTPException(
-            status_code=403,
-            detail=f"Capability '{required_capability}' is not permitted for role '{current_user.role}'.",
-        )
-
-    if query_type == "sql":
-        return dataos.sql(req.query)
+        return _execute_sql_for_user(req.query, current_user)
     if query_type == "python":
         require_python_compute_enabled()
         return dataos.python(req.query)
@@ -640,10 +812,12 @@ async def recompute_vectors():
 @app.post("/api/notebooks/ingest", summary="Ingest Jupyter Notebook DAG (Rule #51)")
 async def ingest_notebook_api(
     filename: str = Form("analysis.ipynb"),
-    content: str = Form(...)
+    content: str = Form(...),
+    current_user: Optional[User] = Depends(get_current_user),
 ):
     try:
-        return dataos.ingest(content, filename=filename, discover_relations=True)
+        permissions = _request_object_permissions(current_user)
+        return dataos.ingest(content, filename=filename, discover_relations=True, permissions=permissions)
     except (ValueError, TypeError) as exc:
         logger.warning("Notebook ingestion failed (%s)", type(exc).__name__)
         raise HTTPException(
@@ -655,10 +829,12 @@ async def ingest_notebook_api(
 @app.post("/api/documents/extract_rich", summary="Extract Rich Document Tables & Citations (Rule #54)")
 async def extract_rich_document_api(
     filename: str = Form("paper.md"),
-    content: str = Form(...)
+    content: str = Form(...),
+    current_user: Optional[User] = Depends(get_current_user),
 ):
     try:
-        return dataos.ingest(content, filename=filename, discover_relations=True)
+        permissions = _request_object_permissions(current_user)
+        return dataos.ingest(content, filename=filename, discover_relations=True, permissions=permissions)
     except (ValueError, TypeError) as exc:
         logger.warning("Document ingestion failed (%s)", type(exc).__name__)
         raise HTTPException(
@@ -730,10 +906,15 @@ async def resolve_conflict_api(req: ConflictResolutionRequest):
 
 
 @app.get("/api/profiling/{object_id}", summary="Get Dataset Profile")
-async def get_dataset_profile(object_id: str):
+async def get_dataset_profile(
+    object_id: str,
+    current_user: Optional[User] = Depends(get_current_user),
+):
+    _request_object_permissions(current_user)
     obj = dataos.storage.get_object(object_id)
     if not obj:
         raise HTTPException(status_code=404, detail="Object not found")
+    _ensure_object_access(current_user, obj)
     
     import pandas as pd
     import io
@@ -753,10 +934,16 @@ async def get_dataset_profile(object_id: str):
 
 
 @app.post("/api/quality/{object_id}", summary="Evaluate Data Quality Rules")
-async def evaluate_quality(object_id: str, req: QualityEvaluateRequest):
+async def evaluate_quality(
+    object_id: str,
+    req: QualityEvaluateRequest,
+    current_user: Optional[User] = Depends(get_current_user),
+):
+    _request_object_permissions(current_user)
     obj = dataos.storage.get_object(object_id)
     if not obj:
         raise HTTPException(status_code=404, detail="Object not found")
+    _ensure_object_access(current_user, obj)
     
     import pandas as pd
     import io
@@ -773,6 +960,7 @@ async def evaluate_quality(object_id: str, req: QualityEvaluateRequest):
 
     rules = req.rules if req.rules else [{"type": "row_count_min", "min_rows": 1}]
     quality_obj = dataos.quality.evaluate_rules(df, rules, target_object_id=obj.id)
+    quality_obj.permissions = dict(obj.permissions)
     dataos.storage.save_object(quality_obj)
     return quality_obj.to_dict()
 
@@ -867,9 +1055,9 @@ async def execute_agent(req: AgentExecutionRequest, current_user: Optional[User]
             )
         return agent.execute_capability(capability, req.params)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=f"Invalid capability: {req.capability}") from exc
+        raise HTTPException(status_code=400, detail=f"Invalid capability: {req.capability}") from None
     except PermissionError as exc:
-        raise HTTPException(status_code=403, detail="Agent capability is not permitted") from exc
+        raise HTTPException(status_code=403, detail="Agent capability is not permitted") from None
 
 
 @app.post("/api/workflows/execute", summary="Execute a bounded built-in Workflow DAG")
@@ -965,7 +1153,7 @@ async def verify_sharing_token_api(req: VerifySharingTokenRequest):
         payload = dataos.tokens.verify_and_decode_token(req.token)
         import dataclasses
         return {"status": "valid", "payload": dataclasses.asdict(payload)}
-    except Exception as exc:  # noqa: BLE001 - preserve the fixed 403 contract for every verification failure
+    except Exception as exc:  # noqa: BLE001 - preserve a fixed 403 contract for every verification failure
         logger.warning("Sharing token verification failed (%s)", type(exc).__name__)
         raise HTTPException(status_code=403, detail="Sharing token is invalid or expired.") from None
 
@@ -986,7 +1174,7 @@ async def federated_search_api(
 async def explain_object_why(object_id: str):
     res = dataos.why(object_id)
     if "error" in res:
-        raise HTTPException(status_code=404, detail=res["error"])
+        raise HTTPException(status_code=404, detail="Object explanation is unavailable.") from None
     return res
 
 
@@ -994,7 +1182,7 @@ async def explain_object_why(object_id: str):
 async def explain_object_impact(object_id: str):
     res = dataos.impact(object_id)
     if "error" in res:
-        raise HTTPException(status_code=404, detail=res["error"])
+        raise HTTPException(status_code=404, detail="Object impact analysis is unavailable.") from None
     return res
 
 
@@ -1008,31 +1196,157 @@ async def ask_dataos_api(req: AskDataOSRequest):
     return res
 
 
+MAX_INGEST_CONTENT_BYTES = 5 * 1024 * 1024
+MAX_TEXT_INGEST_BYTES = 2 * 1024 * 1024
+
+
 @app.post("/api/ingest/universal", summary="Universal Multi-Format Ingestion")
 async def universal_ingest_api(
-    filename: str = Form("data_artifact"),
-    content: str = Form(...),
-    discover_relations: bool = Form(True)
+    request: Request,
+    current_user: Optional[User] = Depends(get_current_user),
 ):
-    res = dataos.ingest(content, filename=filename, discover_relations=discover_relations)
-    return res
+    # Parse explicitly so multipart text fields use the bounded request budget
+    # rather than Starlette's 1 MiB default per-part limit. The product-level
+    # content limit remains 5 MiB.
+    try:
+        form = await request.form(
+            max_files=0,
+            max_fields=3,
+            max_part_size=configured_request_body_limit(),
+        )
+    except (HTTPException, MultiPartException):
+        raise HTTPException(status_code=400, detail="Invalid ingestion form.") from None
+
+    try:
+        for field_name in ("filename", "content", "discover_relations"):
+            if len(form.getlist(field_name)) > 1:
+                raise HTTPException(status_code=400, detail="Duplicate ingestion form field.")
+
+        filename_value = form.get("filename", "data_artifact")
+        content_value = form.get("content")
+        discover_value = form.get("discover_relations", "true")
+        if not isinstance(filename_value, str) or not isinstance(content_value, str):
+            raise HTTPException(status_code=422, detail="Filename and content must be text fields.")
+
+        if isinstance(discover_value, bool):
+            discover_relations = discover_value
+        elif isinstance(discover_value, str):
+            normalized_discover = discover_value.strip().lower()
+            if normalized_discover in {"true", "1", "yes", "on"}:
+                discover_relations = True
+            elif normalized_discover in {"false", "0", "no", "off"}:
+                discover_relations = False
+            else:
+                raise HTTPException(status_code=422, detail="discover_relations must be a boolean.")
+        else:
+            raise HTTPException(status_code=422, detail="discover_relations must be a boolean.")
+
+        if len(content_value.encode("utf-8")) > MAX_INGEST_CONTENT_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail="Ingestion file exceeds the 5 MiB content limit.",
+            )
+        permissions = _request_object_permissions(current_user)
+        return dataos.ingest(
+            content_value,
+            filename=filename_value,
+            discover_relations=discover_relations,
+            permissions=permissions,
+        )
+    finally:
+        await form.close()
 
 
 # =============================================================================
 # I/O, IMPORT & EXPORT ROUTES
 # =============================================================================
 
-@app.post("/api/io/ingest_text", summary="Ingest Text Content directly")
+@app.post(
+    "/api/io/ingest_text",
+    summary="Ingest Text Content directly",
+    openapi_extra={
+        "requestBody": {
+            "required": True,
+            "content": {
+                "application/x-www-form-urlencoded": {
+                    "schema": {
+                        "type": "object",
+                        "required": ["filename", "content"],
+                        "properties": {
+                            "filename": {"type": "string"},
+                            "content": {
+                                "type": "string",
+                                "description": "UTF-8 text content; maximum 2 MiB.",
+                            },
+                            "format_type": {"type": "string", "default": "text"},
+                        },
+                    }
+                },
+                "multipart/form-data": {
+                    "schema": {
+                        "type": "object",
+                        "required": ["filename", "content"],
+                        "properties": {
+                            "filename": {"type": "string"},
+                            "content": {
+                                "type": "string",
+                                "description": "UTF-8 text content; maximum 2 MiB.",
+                            },
+                            "format_type": {"type": "string", "default": "text"},
+                        },
+                    }
+                },
+            },
+        }
+    },
+)
 async def ingest_text(
-    filename: str = Form(...),
-    content: str = Form(...),
-    format_type: str = Form("text")
+    request: Request,
+    current_user: Optional[User] = Depends(get_current_user),
 ):
-    # Ingest content directly; never construct a temporary path from client input.
-    safe_name = os.path.basename(filename.strip().replace("\\", "/")) or "text.txt"
-    if not os.path.splitext(safe_name)[1]:
-        safe_name = f"{safe_name}.txt"
-    return dataos.ingest(content, filename=safe_name, discover_relations=True)
+    # Parse explicitly so the Starlette form-field limit stays at the documented
+    # 2 MiB text contract instead of falling back to the 1 MiB parser default.
+    try:
+        form = await request.form(
+            max_files=0,
+            max_fields=3,
+            # URL-encoded parsers count field names and separators in the
+            # parser budget; the exact content-byte limit is checked below.
+            max_part_size=MAX_TEXT_INGEST_BYTES + 16 * 1024,
+        )
+    except MultiPartException as exc:
+        status_code = 400 if str(exc).startswith("Too many fields") else 413
+        detail = (
+            "Invalid text ingestion form."
+            if status_code == 400
+            else "Text content exceeds the 2 MiB limit."
+        )
+        raise HTTPException(status_code=status_code, detail=detail) from None
+    except HTTPException:
+        raise
+
+    try:
+        filename = form.get("filename")
+        content = form.get("content")
+        format_type = form.get("format_type", "text")
+        if not isinstance(filename, str) or not isinstance(content, str) or not isinstance(format_type, str):
+            raise HTTPException(status_code=422, detail="Filename and text content are required.")
+        if len(content.encode("utf-8")) > MAX_TEXT_INGEST_BYTES:
+            raise HTTPException(status_code=413, detail="Text content exceeds the 2 MiB limit.")
+
+        # Ingest content directly; never construct a temporary path from client input.
+        safe_name = os.path.basename(filename.strip().replace("\\", "/")) or "text.txt"
+        if not os.path.splitext(safe_name)[1]:
+            safe_name = f"{safe_name}.txt"
+        permissions = _request_object_permissions(current_user)
+        return dataos.ingest(
+            content,
+            filename=safe_name,
+            discover_relations=True,
+            permissions=permissions,
+        )
+    finally:
+        await form.close()
 
 
 @app.get("/api/io/export", summary="Export DataOS Graph")
@@ -1059,7 +1373,7 @@ async def get_health_overview():
         # A bounded read verifies that the configured storage backend is reachable.
         dataos.storage.list_objects(limit=1)
     except Exception as exc:
-        raise HTTPException(status_code=503, detail="DataOS storage is unavailable") from exc
+        raise HTTPException(status_code=503, detail="DataOS storage is unavailable") from None
     return {
         "status": "operational",
         "storage_backend": type(dataos.storage).__name__,
