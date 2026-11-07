@@ -578,9 +578,11 @@ async def get_neighbors(
     visible_ids = _readable_ids(current_user)
     if visible_ids is not None and object_id not in visible_ids:
         raise HTTPException(status_code=404, detail="Object not found")
-    neighbors = dataos.graph.neighbors(object_id, direction=direction)
-    if visible_ids is not None:
-        neighbors = [item for item in neighbors if str(item.get("neighbor_id", "")) in visible_ids]
+    neighbors = dataos.graph.neighbors(
+        object_id,
+        direction=direction,
+        allowed_object_ids=visible_ids,
+    )
     return {"object_id": object_id, "total": len(neighbors), "neighbors": neighbors}
 
 
@@ -598,13 +600,8 @@ async def traverse_graph(
         start_id=object_id,
         max_hops=max_hops,
         min_confidence=min_confidence,
+        allowed_object_ids=visible_ids,
     )
-    if visible_ids is not None:
-        result["nodes"] = [node for node in result.get("nodes", []) if str(node.get("id", "")) in visible_ids]
-        result["edges"] = [edge for edge in result.get("edges", []) if str(edge.get("source", "")) in visible_ids and str(edge.get("target", "")) in visible_ids]
-        result["paths"] = [path for path in result.get("paths", []) if all(str(node_id) in visible_ids for node_id in path.get("path", []))]
-        result["total_nodes_reached"] = len(result["nodes"])
-        result["total_edges_traversed"] = len(result["edges"])
     return result
 
 
@@ -668,11 +665,14 @@ async def query_unified(req: UnifiedQueryRequest, current_user: Optional[User] =
     if query_type in {"ask", "natural_language"}:
         return dataos.ask(req.query)
     if query_type == "search":
+        visible_ids = _readable_ids(current_user)
+        if visible_ids is not None and req.context_object_id and req.context_object_id not in visible_ids:
+            raise HTTPException(status_code=404, detail="Object not found")
         results = dataos.search_engine.search(
             query=req.query,
             context_object_id=req.context_object_id,
             limit=20,
-            object_ids=_readable_ids(current_user),
+            object_ids=visible_ids,
         )
         return {"query": req.query, "total_matches": len(results), "results": results}
     raise HTTPException(
@@ -693,12 +693,15 @@ async def hybrid_search(
     limit: int = FastQuery(default=20, ge=1, le=100),
     current_user: Optional[User] = Depends(get_current_user),
 ):
+    visible_ids = _readable_ids(current_user)
+    if visible_ids is not None and context_id and context_id not in visible_ids:
+        raise HTTPException(status_code=404, detail="Object not found")
     results = dataos.search_engine.search(
         query=q,
         object_type=object_type,
         context_object_id=context_id,
         limit=limit,
-        object_ids=_readable_ids(current_user),
+        object_ids=visible_ids,
     )
     return {"query": q, "total_matches": len(results), "results": results}
 
