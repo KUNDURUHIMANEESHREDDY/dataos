@@ -34,6 +34,7 @@ from core.permissions.auth import (
 from backend.knowledge_rag import create_knowledge_router
 from backend.cors_config import cors_middleware_options
 from backend.authorization import CapabilityMiddleware, get_user_store
+from backend.sql_authorization import datasets_readable_by_user, requires_per_user_identity
 from backend.workflow_api import WorkflowRequestError, execute_safe_workflow
 from runtime.workflows.workflow_engine import WorkflowEngine
 
@@ -577,7 +578,31 @@ async def query_unified(req: UnifiedQueryRequest, current_user: Optional[User] =
         )
 
     if query_type == "sql":
-        return dataos.sql(req.query)
+        # A deployment-wide bearer token proves access to the API, not which
+        # tenant's datasets the caller may query. Once JWT auth is configured
+        # (or production mode is active), require a per-user identity and pass
+        # only datasets visible to that user into the SQL engine.
+        if requires_per_user_identity(
+            current_user,
+            production_mode=_production_mode(),
+            jwt_auth_configured=jwt_configured(),
+        ):
+            raise HTTPException(
+                status_code=401,
+                detail="A per-user session is required for SQL queries.",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        if current_user is None:
+            # Preserve unauthenticated local development only when per-user
+            # authentication has not been configured.
+            return dataos.sql(req.query)
+
+        readable_datasets = datasets_readable_by_user(dataos.storage, current_user)
+        return dataos.sql_engine.execute_sql(
+            req.query,
+            table_objects=readable_datasets,
+            agent_or_user=f"user:{current_user.id}",
+        )
     if query_type == "python":
         require_python_compute_enabled()
         return dataos.python(req.query)
