@@ -588,3 +588,30 @@ def test_sharing_token_verification_does_not_expose_internal_exception_text(monk
     assert exc.value.status_code == 403
     assert exc.value.detail == "Invalid or expired sharing token."
     assert "private key path" not in exc.value.detail
+
+
+def test_notebook_and_document_ingestion_errors_do_not_expose_exception_text(monkeypatch):
+    def fail_ingestion(*args, **kwargs):
+        raise ValueError("private parser path /internal/customer-data")
+
+    monkeypatch.setattr(api, "dataos", SimpleNamespace(ingest=fail_ingestion))
+
+    with pytest.raises(HTTPException) as notebook_exc:
+        run(api.ingest_notebook_api(
+            filename="private.ipynb",
+            content="{}",
+            current_user=None,
+        ))
+    assert notebook_exc.value.status_code == 422
+    assert notebook_exc.value.detail == "Notebook ingestion could not be completed."
+    assert "internal/customer-data" not in notebook_exc.value.detail
+
+    with pytest.raises(HTTPException) as document_exc:
+        run(api.extract_rich_document_api(
+            filename="private.md",
+            content="# private",
+            current_user=None,
+        ))
+    assert document_exc.value.status_code == 422
+    assert document_exc.value.detail == "Document ingestion could not be completed."
+    assert "internal/customer-data" not in document_exc.value.detail

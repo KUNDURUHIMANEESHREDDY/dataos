@@ -16,6 +16,16 @@ from core.relation.model import Relationship, RelationType
 from infrastructure.storage.base import StorageBackend
 
 
+def _save_with_permissions(
+    storage: StorageBackend,
+    obj: DataObject,
+    permissions: Optional[Dict[str, Any]],
+) -> DataObject:
+    if permissions is not None:
+        obj.permissions = dict(permissions)
+    return storage.save_object(obj)
+
+
 class RichDocumentExtractor:
     """Extracts structured tables, concepts, figures, and citations from rich documents."""
 
@@ -156,7 +166,8 @@ class RichDocumentExtractor:
         cls,
         raw_text: str,
         filename: str,
-        storage: StorageBackend
+        storage: StorageBackend,
+        permissions: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
         Ingest a rich document into DataOS:
@@ -180,7 +191,7 @@ class RichDocumentExtractor:
             content=raw_text,
             source=f"file://{filename}"
         )
-        storage.save_object(doc_obj)
+        _save_with_permissions(storage, doc_obj, permissions)
 
         created_table_ids = []
         # 2. Save extracted tables as first-class dataset/table objects
@@ -201,7 +212,7 @@ class RichDocumentExtractor:
                 content=tbl["sample_rows"],
                 source=f"derived://{doc_obj.id}/table/{idx}"
             )
-            storage.save_object(tbl_obj)
+            _save_with_permissions(storage, tbl_obj, permissions)
             created_table_ids.append(tbl_obj.id)
 
             # Link doc -> contains -> table
@@ -227,7 +238,7 @@ class RichDocumentExtractor:
                 content=cit["text"],
                 source=f"derived://{doc_obj.id}/citation/{cit['key']}"
             )
-            storage.save_object(cit_obj)
+            _save_with_permissions(storage, cit_obj, permissions)
             created_citation_ids.append(cit_obj.id)
 
             # Link doc -> cites -> citation object

@@ -11,10 +11,12 @@ export default function EmptyState() {
   const setEdges = useSpatialStore((s) => s.setEdges);
   const [ingesting, setIngesting] = useState(false);
   const [ingestError, setIngestError] = useState<string | null>(null);
+  const [ingestNotice, setIngestNotice] = useState<string | null>(null);
 
   async function loadSampleData() {
     setIngesting(true);
     setIngestError(null);
+    setIngestNotice(null);
 
     const samples = [
       {
@@ -54,19 +56,20 @@ export default function EmptyState() {
       setEdges(graph.edges);
 
       const messages = failures.slice();
-      if (graph.notice) messages.push(graph.notice);
+      setIngestNotice(graph.notice ?? null);
       if (graph.objects.length === 0) {
         messages.push("The ingestion requests completed, but the catalog returned no objects. Check the backend and try again.");
       }
       setIngestError(messages.length > 0 ? messages.join(" ") : null);
     } catch (err) {
+      setIngestNotice(null);
       setIngestError(err instanceof Error ? err.message : "Failed to load sample data. Check the backend connection and try again.");
     } finally {
       setIngesting(false);
     }
   }
 
-  if (objects.length > 0 && !ingestError) return null;
+  if (objects.length > 0 && !ingestError && !ingestNotice) return null;
 
   return (
     <>
@@ -130,9 +133,24 @@ export default function EmptyState() {
       )}
 
       {ingestError && (
-        <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-50 max-w-[min(90vw,40rem)] pointer-events-auto">
-          <div role="alert" aria-live="assertive" className="glass rounded-xl px-4 py-3 text-sm text-[var(--color-text-primary)] shadow-lg">
-            {ingestError}
+        <div className="absolute top-4 right-4 z-50 max-w-[min(90vw,40rem)] pointer-events-auto">
+          <div role="alert" aria-live="assertive" className="glass rounded-xl px-4 py-3 text-sm text-[var(--color-text-primary)] shadow-lg flex items-start gap-3">
+            <span className="flex-1">{ingestError}</span>
+            <button
+              type="button"
+              aria-label="Dismiss ingestion error"
+              onClick={() => setIngestError(null)}
+              className="shrink-0 rounded px-2 py-1 hover:bg-black/10 focus-visible:outline focus-visible:outline-2"
+            >
+              Dismiss
+            </button>
+          </div>
+        </div>
+      )}
+      {ingestNotice && (
+        <div className="absolute top-24 right-4 z-40 max-w-[min(90vw,40rem)] pointer-events-auto">
+          <div role="status" aria-live="polite" className="glass rounded-xl px-4 py-3 text-sm text-[var(--color-text-primary)] shadow-lg">
+            {ingestNotice}
           </div>
         </div>
       )}

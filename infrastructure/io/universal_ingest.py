@@ -100,14 +100,24 @@ class UniversalIngestionPipeline:
         # ---------------------------------------------------------------------
         if ext == ".ipynb":
             # Jupyter Notebook DAG Engine
-            res = JupyterNotebookParser.ingest_notebook_to_graph(content_str, fn, self.storage)
+            res = JupyterNotebookParser.ingest_notebook_to_graph(
+                content_str,
+                fn,
+                self.storage,
+                permissions=permissions,
+            )
             notebook_obj = self.storage.get_object(res["notebook_id"])
             primary_object = notebook_obj
             created_objects.append(notebook_obj)
 
         elif ext in (".md", ".txt", ".docx", ".pdf"):
             # Rich Document Extraction (Tables, Figures, Citations)
-            res = RichDocumentExtractor.ingest_rich_document_to_graph(content_str, fn, self.storage)
+            res = RichDocumentExtractor.ingest_rich_document_to_graph(
+                content_str,
+                fn,
+                self.storage,
+                permissions=permissions,
+            )
             doc_obj = self.storage.get_object(res["document_id"])
             primary_object = doc_obj
             created_objects.append(doc_obj)

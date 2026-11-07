@@ -10,6 +10,7 @@ import os
 import uuid
 import datetime
 import hmac
+import logging
 import threading
 from typing import Annotated, Dict, Any, List, Literal, Optional
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Depends, Header, Request, Response, Query as FastQuery
@@ -45,6 +46,9 @@ from backend.sql_authorization import (
 )
 from backend.workflow_api import WorkflowRequestError, execute_safe_workflow
 from runtime.workflows.workflow_engine import WorkflowEngine
+
+logger = logging.getLogger(__name__)
+
 
 def _parse_time_travel_timestamp(value: str, field_name: str) -> datetime.datetime:
     """Parse an offset-aware ISO 8601 timestamp and normalize it to UTC.
@@ -743,7 +747,8 @@ async def ingest_notebook_api(
         permissions = _request_object_permissions(current_user)
         return dataos.ingest(content, filename=filename, discover_relations=True, permissions=permissions)
     except (ValueError, TypeError) as exc:
-        raise HTTPException(status_code=422, detail=f"Notebook ingestion failed: {exc}") from exc
+        logger.warning("Notebook ingestion rejected (%s)", type(exc).__name__)
+        raise HTTPException(status_code=422, detail="Notebook ingestion could not be completed.") from None
 
 
 @app.post("/api/documents/extract_rich", summary="Extract Rich Document Tables & Citations (Rule #54)")
@@ -756,7 +761,8 @@ async def extract_rich_document_api(
         permissions = _request_object_permissions(current_user)
         return dataos.ingest(content, filename=filename, discover_relations=True, permissions=permissions)
     except (ValueError, TypeError) as exc:
-        raise HTTPException(status_code=422, detail=f"Document ingestion failed: {exc}") from exc
+        logger.warning("Rich-document ingestion rejected (%s)", type(exc).__name__)
+        raise HTTPException(status_code=422, detail="Document ingestion could not be completed.") from None
 
 
 # =============================================================================
@@ -813,8 +819,12 @@ async def resolve_conflict_api(req: ConflictResolutionRequest):
             manual_properties=req.manual_properties
         )
         return res
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+    except ValueError as exc:
+        logger.warning("Conflict resolution rejected (%s)", type(exc).__name__)
+        raise HTTPException(
+            status_code=400,
+            detail="Conflict could not be resolved with the supplied strategy.",
+        ) from None
 
 
 @app.get("/api/profiling/{object_id}", summary="Get Dataset Profile")
