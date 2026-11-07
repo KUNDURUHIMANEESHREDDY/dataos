@@ -13,6 +13,7 @@ import hmac
 import threading
 from typing import Annotated, Dict, Any, List, Literal, Optional
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Depends, Header, Request, Response, Query as FastQuery
+from fastapi.params import Depends as DependsParam
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
@@ -412,8 +413,20 @@ async def list_users(current_user: Optional[User] = Depends(get_current_user)):
 # OBJECT ROUTES
 # =============================================================================
 
+def _resolved_current_user(current_user: Optional[User]) -> Optional[User]:
+    """Normalize unresolved FastAPI defaults for direct route calls.
+
+    FastAPI resolves Depends before invoking a route. Unit tests and internal
+    direct calls bypass that resolver, so the default is a Depends marker rather
+    than a User/None. Treat it as anonymous; the normal production/JWT guard
+    below still fails closed when a per-user identity is required.
+    """
+    return None if isinstance(current_user, DependsParam) else current_user
+
+
 def _request_object_permissions(current_user: Optional[User]) -> Optional[Dict[str, Any]]:
     """Require a per-user identity in authenticated/production deployments."""
+    current_user = _resolved_current_user(current_user)
     if requires_per_user_identity(
         current_user,
         production_mode=_production_mode(),
@@ -428,6 +441,7 @@ def _request_object_permissions(current_user: Optional[User]) -> Optional[Dict[s
 
 
 def _ensure_object_access(current_user: Optional[User], obj: DataObject, *, write: bool = False) -> None:
+    current_user = _resolved_current_user(current_user)
     _request_object_permissions(current_user)
     if current_user is None:
         return
@@ -445,6 +459,7 @@ async def list_objects(
     offset: int = FastQuery(default=0, ge=0, le=1_000_000),
     current_user: Optional[User] = Depends(get_current_user),
 ):
+    current_user = _resolved_current_user(current_user)
     _request_object_permissions(current_user)
     if current_user is None:
         objs = dataos.storage.list_objects(object_type=object_type, source=source, limit=limit, offset=offset)
@@ -622,6 +637,7 @@ async def compute_python(req: PythonComputeRequest):
 
 @app.post("/api/query/", summary="Unified Query Execution")
 async def query_unified(req: UnifiedQueryRequest, current_user: Optional[User] = Depends(get_current_user)):
+    current_user = _resolved_current_user(current_user)
     query_type = req.query_type.strip().lower()
     if query_type == "auto":
         query_type = "sql" if req.query.lstrip().lower().startswith(("select ", "with ")) else "ask"
