@@ -1,4 +1,4 @@
-use std::{collections::HashSet, time::{Duration, Instant}};
+use std::{collections::{HashMap, HashSet}, time::{Duration, Instant}};
 
 use csv::StringRecord;
 use rusqlite::{Connection, hooks::{AuthAction, AuthContext, Authorization}, types::ValueRef};
@@ -198,7 +198,7 @@ fn execute_sql_scoped(query: &str, db: &Db, owner_id: Option<&str>) -> Value {
             "row_count": 0,
             "rows": [],
             "execution_time_ms": 0.0,
-            "registered_tables": [],
+            "registered_tables": [], "ambiguous_table_names": [],
             "provenance": {"engine": "rust-sqlite", "query_text": query, "error": error},
             "error": error
         });
@@ -212,7 +212,7 @@ fn execute_sql_scoped(query: &str, db: &Db, owner_id: Option<&str>) -> Value {
             "row_count": 0,
             "rows": [],
             "execution_time_ms": 0.0,
-            "registered_tables": [],
+            "registered_tables": [], "ambiguous_table_names": [],
             "provenance": {"engine": "rust-sqlite", "query_text": query, "error": "Only read-only SELECT/WITH queries are permitted"},
             "error": "Only read-only SELECT/WITH queries are permitted"
         });
@@ -227,7 +227,7 @@ fn execute_sql_scoped(query: &str, db: &Db, owner_id: Option<&str>) -> Value {
             "row_count": 0,
             "rows": [],
             "execution_time_ms": 0.0,
-            "registered_tables": [],
+            "registered_tables": [], "ambiguous_table_names": [],
             "provenance": {"engine": "rust-sqlite", "query_text": query, "error": error},
             "error": error
         }),
@@ -245,15 +245,41 @@ fn execute_sql_inner(query: &str, db: &Db, owner_id: Option<&str>) -> Result<Val
     let mut registered_tables = Vec::new();
     let mut source_object_ids = Vec::new();
 
-    for object in &datasets {
+    // Build the alias ownership map before registering any table. SQLite treats
+    // identifiers case-insensitively, so aliases shared by multiple datasets must
+    // be omitted for every owner instead of letting iteration order choose a winner.
+    let mut prepared_datasets = Vec::new();
+    let mut alias_owners: HashMap<String, HashSet<usize>> = HashMap::new();
+    for (index, object) in datasets.iter().enumerate() {
         let (columns, rows) = rows_from_object(object);
         if columns.is_empty() || rows.is_empty() {
             continue;
         }
         let mut names = table_names(object);
-        names.sort();
+        names.sort_by_key(|name| name.to_ascii_lowercase());
+        names.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
+        for table in &names {
+            alias_owners
+                .entry(table.to_ascii_lowercase())
+                .or_default()
+                .insert(index);
+        }
+        prepared_datasets.push((index, object, columns, rows, names));
+    }
+
+    let mut ambiguous_table_names = Vec::new();
+    for (_index, object, columns, rows, names) in prepared_datasets {
         let mut tables_for_object = Vec::new();
         for table in names {
+            let normalized = table.to_ascii_lowercase();
+            if alias_owners
+                .get(&normalized)
+                .map(|owners| owners.len() > 1)
+                .unwrap_or(false)
+            {
+                ambiguous_table_names.push(table);
+                continue;
+            }
             if create_table(&conn, &table, &columns, &rows).is_ok() {
                 tables_for_object.push(table);
             }
@@ -265,6 +291,8 @@ fn execute_sql_inner(query: &str, db: &Db, owner_id: Option<&str>) -> Result<Val
             }
         }
     }
+    ambiguous_table_names.sort_by_key(|name| name.to_ascii_lowercase());
+    ambiguous_table_names.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
 
     // Dataset registration above is trusted setup. From this point onward, caller SQL
     // is constrained by SQLite itself rather than relying on keyword matching alone.
@@ -317,6 +345,7 @@ fn execute_sql_inner(query: &str, db: &Db, owner_id: Option<&str>) -> Result<Val
         "rows": records,
         "execution_time_ms": (start.elapsed().as_secs_f64() * 1000.0).round(),
         "registered_tables": registered_tables,
+        "ambiguous_table_names": ambiguous_table_names,
         "provenance": {
             "engine": "rust-sqlite",
             "query_text": query,
