@@ -347,12 +347,45 @@ def test_time_travel_rejects_utc_normalization_overflow():
         assert "representable as a UTC timestamp" in exc.value.detail
 
 def test_ingest_text_does_not_use_client_filename_as_temp_path(monkeypatch):
+    from urllib.parse import urlencode
+
     called = {}
     def ingest(content, filename, discover_relations, permissions=None):
         called.update(content=content, filename=filename, discover_relations=discover_relations, permissions=permissions)
         return {"status": "ingested"}
     monkeypatch.setattr(api.dataos, "ingest", ingest)
-    result = run(api.ingest_text(filename="../../outside.md", content="safe text", current_user=None))
+    body = urlencode([
+        ("filename", "../../outside.md"),
+        ("content", "safe text"),
+        ("format_type", "text"),
+    ]).encode("ascii")
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": "2.3"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/api/io/ingest_text",
+        "raw_path": b"/api/io/ingest_text",
+        "query_string": b"",
+        "root_path": "",
+        "headers": [
+            (b"content-type", b"application/x-www-form-urlencoded"),
+            (b"content-length", str(len(body)).encode("ascii")),
+        ],
+        "server": ("testserver", 80),
+        "client": ("testclient", 12345),
+    }
+    delivered = False
+    async def receive():
+        nonlocal delivered
+        if delivered:
+            return {"type": "http.disconnect"}
+        delivered = True
+        return {"type": "http.request", "body": body, "more_body": False}
+    request = Request(scope, receive)
+
+    result = run(api.ingest_text(request, current_user=None))
     assert result == {"status": "ingested"}
     assert called == {"content": "safe text", "filename": "outside.md", "discover_relations": True, "permissions": None}
 
