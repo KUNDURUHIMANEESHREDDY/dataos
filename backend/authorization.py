@@ -2,9 +2,8 @@
 
 The shared production bearer token is a deployment gate, not a per-user
 boundary. When DATAOS_JWT_SECRET is configured, every /api request is mapped
-to the minimum Capability required for the method and path. Routes that cannot
-be safely represented statically, such as /api/query/, opt out here and perform
-dynamic capability enforcement in the handler.
+to the minimum Capability required by method and path. Routes whose data is
+not yet principal-scoped are additionally restricted to administrators.
 """
 
 from __future__ import annotations
@@ -31,6 +30,33 @@ DYNAMIC_REVIEW = {
     ("POST", "/api/agents/execute"),
 }
 
+# These routes still read global/aggregate data or execute against a global
+# context. Until each handler enforces object ACLs itself, JWT-enabled
+# deployments expose them only to administrators. This is a fail-closed
+# compatibility boundary, not a substitute for principal-scoped handlers.
+ADMIN_ONLY_UNSCOPED_PREFIXES = (
+    "/api/graph/analytics",
+    "/api/time_travel/graph",
+    "/api/time_travel/changes",
+    "/api/provenance",
+    "/api/lineage",
+    "/api/recommendations",
+    "/api/federation",
+    "/api/io/export",
+    "/api/ask",
+    "/api/compute",
+    "/api/python",
+    "/api/query",
+    "/api/agents",
+    "/api/workflows",
+    "/api/vectors/recompute",
+    "/api/sync/resolve_conflict",
+    "/api/sharing",
+    "/api/governance/duplicates",
+    "/api/profiling",
+    "/api/quality",
+)
+
 _user_store: Optional[UserStore] = None
 
 
@@ -49,6 +75,25 @@ def get_user_store() -> UserStore:
 def _matches(path: str, prefix: str) -> bool:
     normalized = prefix if prefix.endswith("/") else prefix + "/"
     return path == prefix.rstrip("/") or path == prefix or path.startswith(normalized)
+
+
+def is_admin_only_unscoped_route(path: str) -> bool:
+    """Whether a route is not yet safe for non-admin principal access."""
+    if any(_matches(path, prefix) for prefix in ADMIN_ONLY_UNSCOPED_PREFIXES):
+        return True
+    # These object subresources traverse global provenance/impact data today;
+    # the direct object route is ACL-scoped, but these derived views are not.
+    return (
+        path.startswith("/api/objects/")
+        and (path.endswith("/why") or path.endswith("/impact"))
+    )
+
+
+def _production_enabled() -> bool:
+    return any(
+        os.getenv(name, "").strip().lower() in {"production", "prod"}
+        for name in ("DATAOS_ENV", "APP_ENV", "ENVIRONMENT")
+    )
 
 
 def capability_for_api_request(method: str, path: str) -> Optional[str]:
@@ -145,11 +190,12 @@ async def _error_response(send: Send, status: int, detail: str) -> None:
 
 
 class CapabilityMiddleware:
-    """Pure-ASGI per-user capability enforcement for JWT-configured deployments.
+    """Pure-ASGI per-user capability and unscoped-route enforcement.
 
-    When DATAOS_JWT_SECRET is unset, the middleware is deliberately a no-op so
-    existing local development and tests retain current behavior. The separate
-    production shared-bearer dependency still fails closed for /api routes.
+    Local development without JWT keeps its existing behavior. In production,
+    an unscoped route requires a resolvable per-user JWT even when a shared
+    application bearer token is configured; that shared token is never treated
+    as an administrator identity.
     """
 
     def __init__(self, app: ASGIApp):
@@ -161,12 +207,24 @@ class CapabilityMiddleware:
             return
 
         path = scope.get("path", "")
-        if not path.startswith("/api/"):
+        method = scope.get("method", "GET").upper()
+        if not path.startswith("/api/") or method == "OPTIONS":
             await self.app(scope, receive, send)
             return
 
-        capability = capability_for_api_request(scope.get("method", "GET"), path)
-        if capability is None or not jwt_configured():
+        capability = capability_for_api_request(method, path)
+        admin_only = is_admin_only_unscoped_route(path)
+        jwt_ready = jwt_configured()
+
+        if admin_only and _production_enabled() and not jwt_ready:
+            await _error_response(
+                send,
+                503,
+                "This endpoint is restricted until per-user JWT authentication is configured; a shared application token is not a user identity.",
+            )
+            return
+
+        if not jwt_ready or (capability is None and not admin_only):
             await self.app(scope, receive, send)
             return
 
@@ -187,8 +245,8 @@ class CapabilityMiddleware:
         try:
             payload = decode_jwt(token)
             user = _get_user_store().get_by_id(payload.get("sub", ""))
-        except (ValueError, RuntimeError) as exc:
-            await _error_response(send, 401, str(exc))
+        except (ValueError, RuntimeError):
+            await _error_response(send, 401, "Invalid bearer token.")
             return
         except Exception:
             await _error_response(send, 401, "Unable to resolve the authenticated user.")
@@ -196,7 +254,14 @@ class CapabilityMiddleware:
         if user is None:
             await _error_response(send, 401, "Unknown user.")
             return
-        if not user.has_capability(capability):
+        if admin_only and user.role != "admin":
+            await _error_response(
+                send,
+                403,
+                "This endpoint is restricted to administrators until principal-scoped authorization is implemented.",
+            )
+            return
+        if capability is not None and not user.has_capability(capability):
             await _error_response(send, 403, f"Capability '{capability}' is not permitted for role '{user.role}'.")
             return
         await self.app(scope, receive, send)
