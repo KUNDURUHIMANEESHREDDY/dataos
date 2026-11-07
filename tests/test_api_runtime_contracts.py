@@ -111,6 +111,15 @@ def test_compute_routes_call_real_kernel_methods(monkeypatch):
 
 
 
+def test_python_sandbox_does_not_return_exception_tracebacks():
+    result = api.dataos.python_sandbox.execute_code("1 / 0", input_object_ids=[])
+    assert result["success"] is False
+    assert result["error"] == "Python execution failed."
+    assert result["error_code"] == "PYTHON_EXECUTION_FAILED"
+    assert "Traceback" not in str(result)
+    assert "ZeroDivisionError" not in str(result)
+
+
 def test_python_compute_is_disabled_by_default_in_production(monkeypatch):
     monkeypatch.setenv("DATAOS_ENV", "production")
     monkeypatch.delenv("APP_ENV", raising=False)
@@ -130,14 +139,36 @@ def test_python_compute_is_disabled_by_default_in_production(monkeypatch):
     assert unified_exc.value.status_code == 403
 
 
-def test_python_compute_requires_explicit_production_opt_in(monkeypatch):
+def test_python_compute_requires_per_user_identity_even_when_enabled_in_production(monkeypatch):
     monkeypatch.setenv("DATAOS_ENV", "production")
     monkeypatch.delenv("APP_ENV", raising=False)
     monkeypatch.delenv("ENVIRONMENT", raising=False)
     monkeypatch.setenv("DATAOS_ALLOW_PYTHON_COMPUTE", "true")
-    monkeypatch.setattr(api.dataos, "python", lambda code, input_object_ids=None: {"executed": code})
-    result = run(api.compute_python(api.PythonComputeRequest(code="print(1)")))
-    assert result == {"executed": "print(1)"}
+
+    with pytest.raises(HTTPException) as anonymous_exc:
+        run(api.compute_python(api.PythonComputeRequest(code="print(1)"), current_user=None))
+    assert anonymous_exc.value.status_code == 401
+
+    user = SimpleNamespace(id="alice", role="analyst")
+    monkeypatch.setattr(api, "_readable_object_ids", lambda principal: ["obj-1"])
+    monkeypatch.setattr(
+        api.dataos,
+        "python",
+        lambda code, input_object_ids=None, agent_or_user="system": {
+            "executed": code,
+            "inputs": input_object_ids,
+            "principal": agent_or_user,
+        },
+    )
+    result = run(api.compute_python(
+        api.PythonComputeRequest(code="print(1)", input_object_ids=["obj-1"]),
+        current_user=user,
+    ))
+    assert result == {
+        "executed": "print(1)",
+        "inputs": ["obj-1"],
+        "principal": "user:alice",
+    }
 
 
 def test_unified_query_auto_dispatches_sql_and_natural_language(monkeypatch):
@@ -256,13 +287,23 @@ def test_time_travel_rejects_utc_normalization_overflow():
 
 def test_ingest_text_does_not_use_client_filename_as_temp_path(monkeypatch):
     called = {}
-    def ingest(content, filename, discover_relations):
-        called.update(content=content, filename=filename, discover_relations=discover_relations)
+    def ingest(content, filename, discover_relations, permissions=None):
+        called.update(
+            content=content,
+            filename=filename,
+            discover_relations=discover_relations,
+            permissions=permissions,
+        )
         return {"status": "ingested"}
     monkeypatch.setattr(api.dataos, "ingest", ingest)
     result = run(api.ingest_text(filename="../../outside.md", content="safe text"))
     assert result == {"status": "ingested"}
-    assert called == {"content": "safe text", "filename": "outside.md", "discover_relations": True}
+    assert called == {
+        "content": "safe text",
+        "filename": "outside.md",
+        "discover_relations": True,
+        "permissions": None,
+    }
 
 
 def test_sharing_token_routes_fail_closed_without_secret(monkeypatch):

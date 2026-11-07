@@ -60,5 +60,29 @@ class TestUniversalIngestionSecurity(unittest.TestCase):
             self.assertEqual(saved.content, str(secret))
 
 
+
+    def test_ingested_objects_inherit_request_scoped_permissions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = SQLiteStorage(db_path=str(Path(tmp) / "storage.db"))
+            pipeline = UniversalIngestionPipeline(
+                storage,
+                db_path=str(Path(tmp) / "index.db"),
+            )
+            permissions = {
+                "owner": "alice",
+                "read": ["alice"],
+                "write": ["alice"],
+            }
+
+            result = pipeline.ingest(
+                "name,value\\nalpha,1\\n",
+                filename="private.csv",
+                discover_relations=False,
+                permissions=permissions,
+            )
+            saved = storage.get_object(result["primary_object_id"])
+
+            self.assertEqual(saved.permissions, permissions)
+
 if __name__ == "__main__":
     unittest.main()

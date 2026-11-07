@@ -12,7 +12,7 @@ import json
 import io
 import time
 import datetime
-import traceback
+import logging
 import threading
 from typing import Dict, Any, List, Optional, Set
 import pandas as pd
@@ -106,6 +106,9 @@ class SecurityASTValidator(ast.NodeVisitor):
         self.generic_visit(node)
 
 
+logger = logging.getLogger(__name__)
+
+
 class PythonSandbox:
     """Deterministic, hardened Python execution against real DataOS objects."""
 
@@ -149,9 +152,10 @@ class PythonSandbox:
         except SecurityViolationError as sve:
             return {
                 "success": False,
-                "error": str(sve),
+                "error": "Python code was rejected by the sandbox policy.",
+                "error_code": "PYTHON_SECURITY_VIOLATION",
                 "stdout": "",
-                "stderr": str(sve),
+                "stderr": "Python code was rejected by the sandbox policy.",
                 "output": {},
                 "results": {},
                 "duration_ms": round((time.time() - start_time) * 1000.0, 2),
@@ -221,11 +225,12 @@ class PythonSandbox:
 
         success = True
         error_msg = None
+        error_code = None
         timeout_exceeded = False
 
         # 3. Threaded Execution with Hard Timeout
         def _exec_target():
-            nonlocal success, error_msg
+            nonlocal success, error_msg, error_code
             old_stdout = sys.stdout
             old_stderr = sys.stderr
             try:
@@ -234,7 +239,9 @@ class PythonSandbox:
                 exec(code_str, exec_globals)
             except Exception as e:
                 success = False
-                error_msg = f"{type(e).__name__}: {str(e)}\n{traceback.format_exc()}"
+                error_msg = "Python execution failed."
+                error_code = "PYTHON_EXECUTION_FAILED"
+                logger.warning("Python sandbox execution failed (%s)", type(e).__name__)
             finally:
                 sys.stdout = old_stdout
                 sys.stderr = old_stderr
@@ -246,7 +253,8 @@ class PythonSandbox:
         if worker.is_alive():
             success = False
             timeout_exceeded = True
-            error_msg = f"ExecutionTimeoutError: Sandbox computation exceeded hard timeout of {timeout} seconds."
+            error_msg = f"Sandbox computation exceeded hard timeout of {timeout} seconds."
+            error_code = "PYTHON_TIMEOUT"
 
         stdout_content = redirected_stdout.getvalue()
         stderr_content = redirected_stderr.getvalue()
@@ -270,7 +278,8 @@ class PythonSandbox:
                 payload_json = json.dumps(safe_output)
                 if len(payload_json.encode("utf-8")) > self.max_output_payload_bytes:
                     success = False
-                    error_msg = f"MemoryPayloadExceeded: Output payload size exceeded {self.max_output_payload_bytes} bytes limit."
+                    error_msg = f"Output payload exceeded the {self.max_output_payload_bytes} byte limit."
+                    error_code = "PYTHON_OUTPUT_LIMIT"
                     safe_output = {}
             except Exception:
                 pass
@@ -280,6 +289,7 @@ class PythonSandbox:
             "stdout": stdout_content,
             "stderr": stderr_content or error_msg,
             "error": error_msg,
+            "error_code": error_code,
             "output": safe_output,
             "results": safe_output,  # alias kept for backward compatibility
             "input_objects_loaded": loaded_ids,

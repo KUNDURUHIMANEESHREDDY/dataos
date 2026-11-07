@@ -27,7 +27,8 @@ class HybridSearchEngine:
         source_filter: Optional[str] = None,
         context_object_id: Optional[str] = None,
         limit: int = 20,
-        weights: Optional[Dict[str, float]] = None
+        weights: Optional[Dict[str, float]] = None,
+        object_ids: Optional[List[str]] = None,
     ) -> List[Dict[str, Any]]:
         """
         Execute hybrid search.
@@ -36,9 +37,17 @@ class HybridSearchEngine:
         weights = weights or {"lexical": 0.45, "semantic": 0.35, "graph": 0.20}
         all_objects = self.storage.list_objects(limit=5000)
 
-        # Filter by type / source
+        # An explicitly empty allowlist means no readable objects, not
+        # unrestricted access. Filter before building text or ranking results.
+        if object_ids is not None and not object_ids:
+            return []
+        allowed_ids = set(object_ids) if object_ids is not None else None
+
+        # Filter by type / source and the optional per-user object boundary.
         candidates = []
         for obj in all_objects:
+            if allowed_ids is not None and obj.id not in allowed_ids:
+                continue
             if object_type and obj.type != object_type:
                 continue
             if source_filter and source_filter not in obj.source:

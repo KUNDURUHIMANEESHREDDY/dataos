@@ -244,12 +244,24 @@ class PersistentVectorIndex:
             WHERE model_name = ? AND model_version = ?
         """
         params: list = [self.model.model_name, self.model.model_version]
-        if object_ids:
-            placeholders = ",".join("?" * len(object_ids))
-            query_sql += f" AND object_id IN ({placeholders})"
-            params.extend(object_ids)
-        cursor.execute(query_sql, params)
-        rows = cursor.fetchall()
+        if object_ids is not None:
+            if not object_ids:
+                self._close(conn)
+                return []
+            # Keep each SQLite IN clause below conservative variable limits;
+            # ACL allowlists can contain thousands of object IDs.
+            rows = []
+            for offset in range(0, len(object_ids), 500):
+                chunk = object_ids[offset:offset + 500]
+                placeholders = ",".join("?" * len(chunk))
+                cursor.execute(
+                    query_sql + f" AND object_id IN ({placeholders})",
+                    [*params, *chunk],
+                )
+                rows.extend(cursor.fetchall())
+        else:
+            cursor.execute(query_sql, params)
+            rows = cursor.fetchall()
         self._close(conn)
 
         if not rows:

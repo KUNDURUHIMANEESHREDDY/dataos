@@ -243,9 +243,26 @@ class DataOS:
     # TOP-LEVEL CONVENIENCE SYSTEM APIS
     # -------------------------------------------------------------------------
 
-    def ingest(self, file_path_or_content: Any, filename: Optional[str] = None, discover_relations: bool = True) -> Dict[str, Any]:
-        """Ingest any file format (Markdown, PDF, CSV, Notebook, Code, Audio/Video) in one call."""
-        return self.ingestion_pipeline.ingest(file_path_or_content, filename=filename, discover_relations=discover_relations)
+    def ingest(
+        self,
+        file_path_or_content: Any,
+        filename: Optional[str] = None,
+        discover_relations: bool = True,
+        permissions: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Ingest content, optionally applying request-scoped object permissions."""
+        if permissions is None:
+            return self.ingestion_pipeline.ingest(
+                file_path_or_content,
+                filename=filename,
+                discover_relations=discover_relations,
+            )
+        return self.ingestion_pipeline.ingest(
+            file_path_or_content,
+            filename=filename,
+            discover_relations=discover_relations,
+            permissions=permissions,
+        )
 
     def why(self, object_id: str) -> Dict[str, Any]:
         """Explain the complete origin, lineage, and rationale of any object."""
@@ -263,9 +280,18 @@ class DataOS:
         """Execute real SQL query against registered datasets."""
         return self.sql_engine.execute_sql(query)
 
-    def python(self, code_str: str, input_object_ids: Optional[List[str]] = None) -> Dict[str, Any]:
+    def python(
+        self,
+        code_str: str,
+        input_object_ids: Optional[List[str]] = None,
+        agent_or_user: str = "system",
+    ) -> Dict[str, Any]:
         """Execute safe, sandboxed Python computation against loaded DataObjects."""
-        return self.python_sandbox.execute_code(code_str, input_object_ids=input_object_ids)
+        return self.python_sandbox.execute_code(
+            code_str,
+            input_object_ids=input_object_ids,
+            agent_or_user=agent_or_user,
+        )
 
     def search(self, query: str, top_k: int = 10) -> List[Dict[str, Any]]:
         """Hybrid BM25 + TF-IDF search across objects."""
