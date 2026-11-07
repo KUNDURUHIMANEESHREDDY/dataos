@@ -419,10 +419,20 @@ async def list_users(current_user: Optional[User] = Depends(get_current_user)):
 
 def _request_object_permissions(current_user: Optional[User]) -> Optional[Dict[str, Any]]:
     """Require a per-user identity in authenticated/production deployments."""
+    production_mode = _production_mode()
+    jwt_ready = jwt_configured()
+    if current_user is None and production_mode and not jwt_ready:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Per-user JWT authentication is not configured for production data routes. "
+                "Configure DATAOS_JWT_SECRET; DATAOS_API_TOKEN is not a user identity."
+            ),
+        )
     if requires_per_user_identity(
         current_user,
-        production_mode=_production_mode(),
-        jwt_auth_configured=jwt_configured(),
+        production_mode=production_mode,
+        jwt_auth_configured=jwt_ready,
     ):
         raise HTTPException(
             status_code=401,
@@ -1051,8 +1061,10 @@ async def verify_sharing_token_api(req: VerifySharingTokenRequest):
         payload = dataos.tokens.verify_and_decode_token(req.token)
         import dataclasses
         return {"status": "valid", "payload": dataclasses.asdict(payload)}
-    except Exception as e:
-        raise HTTPException(status_code=403, detail=str(e))
+    except Exception:
+        # Token parser/crypto diagnostics may contain internal state. Keep the
+        # public contract stable and do not expose exception text.
+        raise HTTPException(status_code=403, detail="Invalid or expired sharing token.") from None
 
 
 @app.get("/api/federation/search", summary="Federated Cross-Instance Search (Rule #64)")
@@ -1098,23 +1110,59 @@ MAX_INGEST_CONTENT_BYTES = 5 * 1024 * 1024
 
 @app.post("/api/ingest/universal", summary="Universal Multi-Format Ingestion")
 async def universal_ingest_api(
-    filename: str = Form("data_artifact"),
-    content: str = Form(...),
-    discover_relations: bool = Form(True),
+    request: Request,
     current_user: Optional[User] = Depends(get_current_user),
 ):
-    if len(content.encode("utf-8")) > MAX_INGEST_CONTENT_BYTES:
-        raise HTTPException(
-            status_code=413,
-            detail="Ingestion file exceeds the 5 MiB content limit.",
+    # Parse explicitly so multipart text fields use the bounded request budget
+    # rather than Starlette's 1 MiB default per-part limit. The product-level
+    # content limit remains 5 MiB.
+    try:
+        form = await request.form(
+            max_files=0,
+            max_fields=3,
+            max_part_size=configured_request_body_limit(),
         )
-    permissions = _request_object_permissions(current_user)
-    return dataos.ingest(
-        content,
-        filename=filename,
-        discover_relations=discover_relations,
-        permissions=permissions,
-    )
+    except HTTPException:
+        raise HTTPException(status_code=400, detail="Invalid ingestion form.") from None
+
+    try:
+        for field_name in ("filename", "content", "discover_relations"):
+            if len(form.getlist(field_name)) > 1:
+                raise HTTPException(status_code=400, detail="Duplicate ingestion form field.")
+
+        filename_value = form.get("filename", "data_artifact")
+        content_value = form.get("content")
+        discover_value = form.get("discover_relations", "true")
+        if not isinstance(filename_value, str) or not isinstance(content_value, str):
+            raise HTTPException(status_code=422, detail="Filename and content must be text fields.")
+
+        if isinstance(discover_value, bool):
+            discover_relations = discover_value
+        elif isinstance(discover_value, str):
+            normalized_discover = discover_value.strip().lower()
+            if normalized_discover in {"true", "1", "yes", "on"}:
+                discover_relations = True
+            elif normalized_discover in {"false", "0", "no", "off"}:
+                discover_relations = False
+            else:
+                raise HTTPException(status_code=422, detail="discover_relations must be a boolean.")
+        else:
+            raise HTTPException(status_code=422, detail="discover_relations must be a boolean.")
+
+        if len(content_value.encode("utf-8")) > MAX_INGEST_CONTENT_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail="Ingestion file exceeds the 5 MiB content limit.",
+            )
+        permissions = _request_object_permissions(current_user)
+        return dataos.ingest(
+            content_value,
+            filename=filename_value,
+            discover_relations=discover_relations,
+            permissions=permissions,
+        )
+    finally:
+        await form.close()
 
 
 # =============================================================================

@@ -11,6 +11,7 @@ export default function DropZone() {
   const [lastResult, setLastResult] = useState<string | null>(null);
   const [lastResultIsError, setLastResultIsError] = useState(false);
   const counter = useRef(0);
+  const inFlight = useRef(false);
 
   const handleDragEnter = useCallback((e: React.DragEvent) => {
     e.preventDefault();
@@ -36,10 +37,12 @@ export default function DropZone() {
     e.stopPropagation();
     counter.current = 0;
     setDragging(false);
+    if (inFlight.current) return;
 
     const files = Array.from(e.dataTransfer.files);
     if (files.length === 0) return;
 
+    inFlight.current = true;
     setUploading(true);
     setLastResult(null);
     setLastResultIsError(false);
@@ -83,6 +86,7 @@ export default function DropZone() {
       setLastResult(err instanceof Error ? err.message : "File ingestion failed.");
       setLastResultIsError(true);
     } finally {
+      inFlight.current = false;
       setUploading(false);
     }
   }, []);
@@ -110,7 +114,7 @@ export default function DropZone() {
               Drop files to ingest
             </div>
             <div className="text-xs text-[var(--color-text-secondary)] mt-1">
-              CSV, JSON, Markdown, Notebooks, and more ? 5 MiB per file
+              CSV, JSON, Markdown, Notebooks, and more. Maximum 5 MiB per file.
             </div>
           </div>
         </div>
@@ -138,7 +142,7 @@ export default function DropZone() {
             onClick={() => setLastResult(null)}
             className="shrink-0 rounded px-1 hover:bg-black/10 focus-visible:outline focus-visible:outline-2"
           >
-            ?
+            Close
           </button>
         </div>
       )}

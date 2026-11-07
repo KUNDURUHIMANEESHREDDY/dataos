@@ -49,7 +49,7 @@ def test_dataset_visibility_includes_owner_explicit_reader_and_public_data():
     )
 
     assert [item.id for item in visible] == ["owned", "shared", "public"]
-    assert storage.calls == [{"object_type": "dataset", "limit": 100}]
+    assert storage.calls == [{"object_type": "dataset", "limit": 1000, "offset": 0}]
 
 
 def test_malformed_permissions_fail_closed_for_non_admin_users():
@@ -117,6 +117,33 @@ def test_new_objects_default_to_private_permissions_for_the_authenticated_owner(
         "owner": "alice",
         "read": ["alice"],
         "write": ["alice"],
+    }
+
+
+
+def test_dataset_visibility_scans_past_private_rows_before_applying_limit():
+    private_datasets = [
+        dataset(f"private-{index}", {"owner": "other", "read": [], "write": []})
+        for index in range(100)
+    ]
+    visible_dataset = dataset(
+        "visible-after-first-page",
+        {"owner": "alice", "read": ["alice"], "write": ["alice"]},
+    )
+    storage = FakeStorage(private_datasets + [visible_dataset])
+
+    visible = datasets_readable_by_user(
+        storage,
+        SimpleNamespace(id="alice", role="analyst"),
+        limit=1,
+        scan_page_size=10,
+    )
+
+    assert [item.id for item in visible] == ["visible-after-first-page"]
+    assert storage.calls[-1] == {
+        "object_type": "dataset",
+        "limit": 10,
+        "offset": 100,
     }
 
 

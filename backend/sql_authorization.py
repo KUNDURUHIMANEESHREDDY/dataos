@@ -72,13 +72,38 @@ def datasets_readable_by_user(
     user: User,
     *,
     limit: int = 100,
+    scan_page_size: int = 1000,
 ) -> list[Any]:
-    """Return only datasets the authenticated user may read."""
-    datasets = storage.list_objects(
-        object_type=ObjectType.DATASET.value,
-        limit=limit,
-    )
-    return [dataset for dataset in datasets if can_read_object(user, dataset)]
+    """Return up to the requested number of readable datasets after ACL filtering.
+
+    Filtering only the first requested number of stored rows can hide a user's
+    datasets when other tenants occupy the beginning of the shared catalog.
+    Scan in bounded pages and stop after collecting enough visible datasets.
+    """
+    if type(limit) is not int or limit < 1:
+        raise ValueError("limit must be a positive integer")
+    if type(scan_page_size) is not int or scan_page_size < 1:
+        raise ValueError("scan_page_size must be a positive integer")
+
+    visible: list[Any] = []
+    scan_offset = 0
+    while len(visible) < limit:
+        batch = storage.list_objects(
+            object_type=ObjectType.DATASET.value,
+            limit=scan_page_size,
+            offset=scan_offset,
+        )
+        if not batch:
+            break
+        for dataset in batch:
+            if can_read_object(user, dataset):
+                visible.append(dataset)
+                if len(visible) >= limit:
+                    break
+        scan_offset += len(batch)
+        if len(batch) < scan_page_size:
+            break
+    return visible
 
 
 def list_objects_readable_by_user(

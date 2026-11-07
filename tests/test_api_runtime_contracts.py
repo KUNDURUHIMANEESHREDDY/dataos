@@ -549,3 +549,42 @@ def test_object_creation_preserves_ordinary_client_metadata(monkeypatch):
 
     assert result["metadata"]["source_note"] == "uploaded through API"
     assert saved["object"].metadata["source_note"] == "uploaded through API"
+
+
+def test_production_data_routes_report_missing_jwt_configuration(monkeypatch):
+    monkeypatch.setattr(api, "_production_mode", lambda: True)
+    monkeypatch.setattr(api, "jwt_configured", lambda: False)
+
+    with pytest.raises(HTTPException) as exc:
+        api._request_object_permissions(None)
+
+    assert exc.value.status_code == 503
+    assert "DATAOS_JWT_SECRET" in exc.value.detail
+    assert "DATAOS_API_TOKEN is not a user identity" in exc.value.detail
+
+
+def test_production_data_routes_require_a_user_when_jwt_is_configured(monkeypatch):
+    monkeypatch.setattr(api, "_production_mode", lambda: True)
+    monkeypatch.setattr(api, "jwt_configured", lambda: True)
+
+    with pytest.raises(HTTPException) as exc:
+        api._request_object_permissions(None)
+
+    assert exc.value.status_code == 401
+    assert exc.value.headers["WWW-Authenticate"] == "Bearer"
+
+
+def test_sharing_token_verification_does_not_expose_internal_exception_text(monkeypatch):
+    monkeypatch.setenv("DATAOS_SHARING_TOKEN_SECRET", "test-sharing-secret-with-at-least-32-bytes")
+
+    def fail_verification(_token):
+        raise RuntimeError("private key path /internal/secrets")
+
+    monkeypatch.setattr(api.dataos.tokens, "verify_and_decode_token", fail_verification)
+
+    with pytest.raises(HTTPException) as exc:
+        run(api.verify_sharing_token_api(SimpleNamespace(token="invalid-token")))
+
+    assert exc.value.status_code == 403
+    assert exc.value.detail == "Invalid or expired sharing token."
+    assert "private key path" not in exc.value.detail
