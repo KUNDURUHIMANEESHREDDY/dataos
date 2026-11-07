@@ -251,6 +251,15 @@ def require_capability(capability: str):
     return dependency
 
 
+def _request_object_permissions(current_user: Optional[User]) -> Optional[Dict[str, Any]]:
+    """Build private-by-default ACLs and fail closed without production identity."""
+    return request_object_permissions(
+        current_user,
+        jwt_enabled=jwt_configured(),
+        production=_production_mode(),
+    )
+
+
 def _readable_ids(current_user: Optional[User]) -> Optional[set[str]]:
     """Resolve visible object IDs for authenticated search/graph responses."""
     return readable_object_ids(
@@ -457,11 +466,7 @@ async def create_object(
     req: ObjectCreateRequest,
     current_user: Optional[User] = Depends(get_current_user),
 ):
-    permissions = request_object_permissions(
-        current_user,
-        jwt_enabled=jwt_configured(),
-        production=_production_mode(),
-    ) or {"owner": "system", "read": ["*"], "write": ["owner"]}
+    permissions = _request_object_permissions(current_user) or {"owner": "system", "read": ["*"], "write": ["owner"]}
     # These fields are owned by trusted ingestion/storage code. Accepting
     # caller-supplied values would let clients forge duplicate hashes or attach
     # arbitrary blob references to objects.
@@ -765,10 +770,12 @@ async def recompute_vectors():
 @app.post("/api/notebooks/ingest", summary="Ingest Jupyter Notebook DAG (Rule #51)")
 async def ingest_notebook_api(
     filename: str = Form("analysis.ipynb"),
-    content: str = Form(...)
+    content: str = Form(...),
+    current_user: Optional[User] = Depends(get_current_user),
 ):
     try:
-        return dataos.ingest(content, filename=filename, discover_relations=True)
+        permissions = _request_object_permissions(current_user)
+        return dataos.ingest(content, filename=filename, discover_relations=True, permissions=permissions)
     except (ValueError, TypeError) as exc:
         logger.warning("Notebook ingestion failed (%s)", type(exc).__name__)
         raise HTTPException(
@@ -780,10 +787,12 @@ async def ingest_notebook_api(
 @app.post("/api/documents/extract_rich", summary="Extract Rich Document Tables & Citations (Rule #54)")
 async def extract_rich_document_api(
     filename: str = Form("paper.md"),
-    content: str = Form(...)
+    content: str = Form(...),
+    current_user: Optional[User] = Depends(get_current_user),
 ):
     try:
-        return dataos.ingest(content, filename=filename, discover_relations=True)
+        permissions = _request_object_permissions(current_user)
+        return dataos.ingest(content, filename=filename, discover_relations=True, permissions=permissions)
     except (ValueError, TypeError) as exc:
         logger.warning("Document ingestion failed (%s)", type(exc).__name__)
         raise HTTPException(
@@ -1137,10 +1146,14 @@ async def ask_dataos_api(req: AskDataOSRequest):
 async def universal_ingest_api(
     filename: str = Form("data_artifact"),
     content: str = Form(...),
-    discover_relations: bool = Form(True)
+    discover_relations: bool = Form(True),
+    current_user: Optional[User] = Depends(get_current_user),
 ):
-    res = dataos.ingest(content, filename=filename, discover_relations=discover_relations)
-    return res
+    permissions = _request_object_permissions(current_user)
+    return dataos.ingest(
+        content, filename=filename, discover_relations=discover_relations,
+        permissions=permissions,
+    )
 
 
 # =============================================================================
@@ -1151,13 +1164,17 @@ async def universal_ingest_api(
 async def ingest_text(
     filename: str = Form(...),
     content: str = Form(...),
-    format_type: str = Form("text")
+    format_type: str = Form("text"),
+    current_user: Optional[User] = Depends(get_current_user),
 ):
     # Ingest content directly; never construct a temporary path from client input.
     safe_name = os.path.basename(filename.strip().replace("\\", "/")) or "text.txt"
     if not os.path.splitext(safe_name)[1]:
         safe_name = f"{safe_name}.txt"
-    return dataos.ingest(content, filename=safe_name, discover_relations=True)
+    permissions = _request_object_permissions(current_user)
+    return dataos.ingest(
+        content, filename=safe_name, discover_relations=True, permissions=permissions,
+    )
 
 
 @app.get("/api/io/export", summary="Export DataOS Graph")
