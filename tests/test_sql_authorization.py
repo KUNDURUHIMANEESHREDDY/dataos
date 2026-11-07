@@ -74,3 +74,28 @@ def test_admin_can_query_all_registered_datasets():
     )
 
     assert visible == objects
+
+
+def test_sql_requires_identity_when_production_or_jwt_auth_is_enabled():
+    from backend.sql_authorization import requires_per_user_identity
+
+    assert requires_per_user_identity(
+        None,
+        production_mode=True,
+        jwt_auth_configured=False,
+    )
+    assert requires_per_user_identity(
+        None,
+        production_mode=False,
+        jwt_auth_configured=True,
+    )
+    assert not requires_per_user_identity(
+        None,
+        production_mode=False,
+        jwt_auth_configured=False,
+    )
+    assert not requires_per_user_identity(
+        SimpleNamespace(id="alice", role="analyst"),
+        production_mode=True,
+        jwt_auth_configured=True,
+    )
