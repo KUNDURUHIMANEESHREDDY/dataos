@@ -1189,6 +1189,7 @@ async def ask_dataos_api(req: AskDataOSRequest):
 
 
 MAX_INGEST_CONTENT_BYTES = 5 * 1024 * 1024
+MAX_TEXT_INGEST_BYTES = 2 * 1024 * 1024
 
 
 @app.post("/api/ingest/universal", summary="Universal Multi-Format Ingestion")
@@ -1252,24 +1253,90 @@ async def universal_ingest_api(
 # I/O, IMPORT & EXPORT ROUTES
 # =============================================================================
 
-@app.post("/api/io/ingest_text", summary="Ingest Text Content directly")
+@app.post(
+    "/api/io/ingest_text",
+    summary="Ingest Text Content directly",
+    openapi_extra={
+        "requestBody": {
+            "required": True,
+            "content": {
+                "application/x-www-form-urlencoded": {
+                    "schema": {
+                        "type": "object",
+                        "required": ["filename", "content"],
+                        "properties": {
+                            "filename": {"type": "string"},
+                            "content": {
+                                "type": "string",
+                                "description": "UTF-8 text content; maximum 2 MiB.",
+                            },
+                            "format_type": {"type": "string", "default": "text"},
+                        },
+                    }
+                },
+                "multipart/form-data": {
+                    "schema": {
+                        "type": "object",
+                        "required": ["filename", "content"],
+                        "properties": {
+                            "filename": {"type": "string"},
+                            "content": {
+                                "type": "string",
+                                "description": "UTF-8 text content; maximum 2 MiB.",
+                            },
+                            "format_type": {"type": "string", "default": "text"},
+                        },
+                    }
+                },
+            },
+        }
+    },
+)
 async def ingest_text(
-    filename: str = Form(...),
-    content: str = Form(...),
-    format_type: str = Form("text"),
+    request: Request,
     current_user: Optional[User] = Depends(get_current_user),
 ):
-    # Ingest content directly; never construct a temporary path from client input.
-    safe_name = os.path.basename(filename.strip().replace("\\", "/")) or "text.txt"
-    if not os.path.splitext(safe_name)[1]:
-        safe_name = f"{safe_name}.txt"
-    permissions = _request_object_permissions(current_user)
-    return dataos.ingest(
-        content,
-        filename=safe_name,
-        discover_relations=True,
-        permissions=permissions,
-    )
+    # Parse explicitly so the Starlette form-field limit stays at the documented
+    # 2 MiB text contract instead of falling back to the 1 MiB parser default.
+    try:
+        form = await request.form(
+            max_files=0,
+            max_fields=3,
+            max_part_size=MAX_TEXT_INGEST_BYTES,
+        )
+    except MultiPartException as exc:
+        status_code = 400 if str(exc).startswith("Too many fields") else 413
+        detail = (
+            "Invalid text ingestion form."
+            if status_code == 400
+            else "Text content exceeds the 2 MiB limit."
+        )
+        raise HTTPException(status_code=status_code, detail=detail) from None
+    except HTTPException:
+        raise
+
+    try:
+        filename = form.get("filename")
+        content = form.get("content")
+        format_type = form.get("format_type", "text")
+        if not isinstance(filename, str) or not isinstance(content, str) or not isinstance(format_type, str):
+            raise HTTPException(status_code=422, detail="Filename and text content are required.")
+        if len(content.encode("utf-8")) > MAX_TEXT_INGEST_BYTES:
+            raise HTTPException(status_code=413, detail="Text content exceeds the 2 MiB limit.")
+
+        # Ingest content directly; never construct a temporary path from client input.
+        safe_name = os.path.basename(filename.strip().replace("\\", "/")) or "text.txt"
+        if not os.path.splitext(safe_name)[1]:
+            safe_name = f"{safe_name}.txt"
+        permissions = _request_object_permissions(current_user)
+        return dataos.ingest(
+            content,
+            filename=safe_name,
+            discover_relations=True,
+            permissions=permissions,
+        )
+    finally:
+        await form.close()
 
 
 @app.get("/api/io/export", summary="Export DataOS Graph")
