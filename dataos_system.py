@@ -243,9 +243,20 @@ class DataOS:
     # TOP-LEVEL CONVENIENCE SYSTEM APIS
     # -------------------------------------------------------------------------
 
-    def ingest(self, file_path_or_content: Any, filename: Optional[str] = None, discover_relations: bool = True) -> Dict[str, Any]:
-        """Ingest any file format (Markdown, PDF, CSV, Notebook, Code, Audio/Video) in one call."""
-        return self.ingestion_pipeline.ingest(file_path_or_content, filename=filename, discover_relations=discover_relations)
+    def ingest(
+        self,
+        file_path_or_content: Any,
+        filename: Optional[str] = None,
+        discover_relations: bool = True,
+        permissions: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Ingest any supported format, optionally applying request-scoped object ACLs."""
+        return self.ingestion_pipeline.ingest(
+            file_path_or_content,
+            filename=filename,
+            discover_relations=discover_relations,
+            permissions=permissions,
+        )
 
     def why(self, object_id: str) -> Dict[str, Any]:
         """Explain the complete origin, lineage, and rationale of any object."""
