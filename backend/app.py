@@ -1093,6 +1093,9 @@ async def ask_dataos_api(req: AskDataOSRequest):
     return res
 
 
+MAX_INGEST_CONTENT_BYTES = 5 * 1024 * 1024
+
+
 @app.post("/api/ingest/universal", summary="Universal Multi-Format Ingestion")
 async def universal_ingest_api(
     filename: str = Form("data_artifact"),
@@ -1100,6 +1103,11 @@ async def universal_ingest_api(
     discover_relations: bool = Form(True),
     current_user: Optional[User] = Depends(get_current_user),
 ):
+    if len(content.encode("utf-8")) > MAX_INGEST_CONTENT_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail="Ingestion file exceeds the 5 MiB content limit.",
+        )
     permissions = _request_object_permissions(current_user)
     return dataos.ingest(
         content,
