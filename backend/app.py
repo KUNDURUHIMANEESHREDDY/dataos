@@ -18,6 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from starlette.concurrency import run_in_threadpool
+from starlette.formparsers import MultiPartException
 from pydantic import BaseModel, Field, ConfigDict
 
 from dataos_system import DataOS
@@ -631,23 +632,61 @@ async def graph_analytics(algorithm: str = "pagerank"):
 # =============================================================================
 
 def _safe_sql_result(result: Dict[str, Any]) -> Dict[str, Any]:
-    """Remove backend exception details before returning SQL failures to clients."""
-    if not isinstance(result, dict) or result.get("success") is not False:
-        return result
+    """Allowlist SQL response fields so backend exceptions never reach API clients."""
+    if not isinstance(result, dict):
+        return {
+            "success": False,
+            "rows": [],
+            "columns": [],
+            "row_count": 0,
+            "execution_time_ms": 0,
+            "provenance": {},
+            "error_code": "SQL_EXECUTION_FAILED",
+            "error": "SQL query could not be executed.",
+        }
 
-    messages = {
-        "SQL_QUERY_TOO_LARGE": "SQL query exceeds the configured byte limit.",
-        "SQL_RESULT_LIMIT_EXCEEDED": "SQL query result exceeds the configured row limit.",
+    succeeded = result.get("success") is True
+    safe_result: Dict[str, Any] = {
+        "success": succeeded,
+        "rows": result.get("rows", []) if succeeded and isinstance(result.get("rows"), list) else [],
+        "columns": result.get("columns", []) if succeeded and isinstance(result.get("columns"), list) else [],
+        "row_count": result.get("row_count", 0) if succeeded and type(result.get("row_count")) is int else 0,
+        "execution_time_ms": result.get("execution_time_ms", 0)
+        if type(result.get("execution_time_ms")) in (int, float) else 0,
     }
-    safe_message = messages.get(result.get("error_code"), "SQL query could not be executed.")
-    safe_result = dict(result)
-    safe_result["error"] = safe_message
 
     provenance = result.get("provenance")
-    if isinstance(provenance, dict) and "error" in provenance:
-        safe_result["provenance"] = {**provenance, "error": safe_message}
-    return safe_result
+    safe_provenance: Dict[str, Any] = {}
+    if isinstance(provenance, dict):
+        for key in ("agent_or_user", "timestamp", "query_hash", "engine"):
+            value = provenance.get(key)
+            if isinstance(value, str) and len(value) <= 256:
+                safe_provenance[key] = value
+        tables_used = provenance.get("tables_used")
+        if isinstance(tables_used, list) and all(
+            isinstance(name, str) and len(name) <= 128 for name in tables_used
+        ):
+            safe_provenance["tables_used"] = tables_used[:100]
+    safe_result["provenance"] = safe_provenance
 
+    if not succeeded:
+        allowed_codes = {
+            "SQL_QUERY_TOO_LARGE",
+            "SQL_RESULT_LIMIT_EXCEEDED",
+            "SQL_EXECUTION_FAILED",
+        }
+        code = result.get("error_code")
+        if code not in allowed_codes:
+            code = "SQL_EXECUTION_FAILED"
+        messages = {
+            "SQL_QUERY_TOO_LARGE": "SQL query exceeds the configured byte limit.",
+            "SQL_RESULT_LIMIT_EXCEEDED": "SQL query result exceeds the configured row limit.",
+            "SQL_EXECUTION_FAILED": "SQL query could not be executed.",
+        }
+        safe_result["error_code"] = code
+        safe_result["error"] = messages[code]
+
+    return safe_result
 
 def _execute_sql_for_user(query: str, current_user: Optional[User]) -> Dict[str, Any]:
     """Execute SQL only over datasets visible to the authenticated principal."""
@@ -1166,7 +1205,7 @@ async def universal_ingest_api(
             max_fields=3,
             max_part_size=configured_request_body_limit(),
         )
-    except HTTPException:
+    except (HTTPException, MultiPartException):
         raise HTTPException(status_code=400, detail="Invalid ingestion form.") from None
 
     try:
