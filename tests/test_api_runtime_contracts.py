@@ -186,7 +186,7 @@ def test_compute_sql_redacts_backend_exception_details(monkeypatch):
     result = run(api.compute_sql(api.SQLQueryRequest(query="SELECT 1"), current_user=None))
 
     assert result["error"] == "SQL query could not be executed."
-    assert result["provenance"]["error"] == "SQL query could not be executed."
+    assert "error" not in result["provenance"]
     assert "/srv/private" not in str(result)
 
 
