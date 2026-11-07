@@ -34,7 +34,11 @@ from core.permissions.auth import (
 from backend.knowledge_rag import create_knowledge_router
 from backend.cors_config import cors_middleware_options
 from backend.authorization import CapabilityMiddleware, get_user_store
-from backend.sql_authorization import datasets_readable_by_user, requires_per_user_identity
+from backend.sql_authorization import (
+    datasets_readable_by_user,
+    requires_per_user_identity,
+    user_owned_object_permissions,
+)
 from backend.workflow_api import WorkflowRequestError, execute_safe_workflow
 from runtime.workflows.workflow_engine import WorkflowEngine
 
@@ -418,7 +422,18 @@ async def list_objects(
 
 
 @app.post("/api/objects/", summary="Create DataOS Object")
-async def create_object(req: ObjectCreateRequest):
+async def create_object(req: ObjectCreateRequest, current_user: Optional[User] = Depends(get_current_user)):
+    if requires_per_user_identity(
+        current_user,
+        production_mode=_production_mode(),
+        jwt_auth_configured=jwt_configured(),
+    ):
+        raise HTTPException(
+            status_code=401,
+            detail="A per-user session is required to create objects.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
     # These fields are owned by trusted ingestion/storage code. Accepting
     # caller-supplied values would let clients forge duplicate hashes or attach
     # arbitrary blob references to objects.
@@ -441,6 +456,9 @@ async def create_object(req: ObjectCreateRequest):
         source=req.source,
         metadata=dict(req.metadata),
     )
+    if current_user is not None:
+        obj.permissions = user_owned_object_permissions(current_user)
+
     saved = dataos.storage.save_object(obj)
     return saved.to_dict()
 
