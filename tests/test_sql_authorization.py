@@ -202,6 +202,23 @@ def test_direct_python_endpoint_intersects_requested_ids_with_user_acl(monkeypat
     assert captured["agent_or_user"] == "user:alice"
 
 
+
+def test_unscoped_data_guard_allows_admin_and_rejects_other_roles():
+    import asyncio
+    import importlib
+
+    from fastapi import HTTPException
+
+    api = importlib.import_module("backend.app")
+    analyst = SimpleNamespace(id="alice", role="analyst")
+    admin = SimpleNamespace(id="root", role="admin")
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(api.require_admin_for_unscoped_data(analyst))
+    assert exc.value.status_code == 403
+    assert asyncio.run(api.require_admin_for_unscoped_data(admin)) is admin
+
+
 def test_authenticated_search_uses_only_readable_object_ids(monkeypatch):
     import asyncio
     import importlib
