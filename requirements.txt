@@ -14,8 +14,7 @@ cryptography>=42.0
 idna>=3.6,<4
 
 # ── API backend ──────────────────────────────────────────────────────────────
-fastapi>=0.121.0
-starlette>=0.44,<1  # Request.form(max_part_size=...) is required for bounded multipart ingestion.
+fastapi>=0.142.2  # Keeps the supported Starlette 1.x dependency line; do not pin Starlette separately.
 python-multipart>=0.0.20  # Required for FastAPI form parsing at app import time.
 pydantic>=2.0
 uvicorn>=0.27

@@ -580,7 +580,11 @@ def test_sharing_token_verification_does_not_expose_internal_exception_text(monk
     def fail_verification(_token):
         raise RuntimeError("private key path /internal/secrets")
 
-    monkeypatch.setattr(api.dataos.tokens, "verify_and_decode_token", fail_verification)
+    monkeypatch.setattr(
+        api.dataos,
+        "tokens",
+        SimpleNamespace(verify_and_decode_token=fail_verification),
+    )
 
     with pytest.raises(HTTPException) as exc:
         run(api.verify_sharing_token_api(SimpleNamespace(token="invalid-token")))
