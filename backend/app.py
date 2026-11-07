@@ -34,7 +34,14 @@ from core.permissions.auth import (
 from backend.knowledge_rag import create_knowledge_router
 from backend.cors_config import cors_middleware_options
 from backend.authorization import CapabilityMiddleware, get_user_store
-from backend.sql_authorization import datasets_readable_by_user, requires_per_user_identity
+from backend.sql_authorization import (
+    can_read_object,
+    can_write_object,
+    datasets_readable_by_user,
+    list_objects_readable_by_user,
+    requires_per_user_identity,
+    user_owned_object_permissions,
+)
 from backend.workflow_api import WorkflowRequestError, execute_safe_workflow
 from runtime.workflows.workflow_engine import WorkflowEngine
 
@@ -405,20 +412,59 @@ async def list_users(current_user: Optional[User] = Depends(get_current_user)):
 # OBJECT ROUTES
 # =============================================================================
 
+def _request_object_permissions(current_user: Optional[User]) -> Optional[Dict[str, Any]]:
+    """Require a per-user identity in authenticated/production deployments."""
+    if requires_per_user_identity(
+        current_user,
+        production_mode=_production_mode(),
+        jwt_auth_configured=jwt_configured(),
+    ):
+        raise HTTPException(
+            status_code=401,
+            detail="A per-user session is required for object access.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return user_owned_object_permissions(current_user) if current_user is not None else None
+
+
+def _ensure_object_access(current_user: Optional[User], obj: DataObject, *, write: bool = False) -> None:
+    _request_object_permissions(current_user)
+    if current_user is None:
+        return
+    allowed = can_write_object(current_user, obj) if write else can_read_object(current_user, obj)
+    if not allowed:
+        # Avoid disclosing whether another tenant's object exists.
+        raise HTTPException(status_code=404, detail="Object not found")
+
+
 @app.get("/api/objects/", summary="List DataOS Objects")
 async def list_objects(
     object_type: Optional[str] = None,
     source: Optional[str] = None,
     limit: int = FastQuery(default=100, ge=1, le=500),
-    offset: int = FastQuery(default=0, ge=0, le=1_000_000)
+    offset: int = FastQuery(default=0, ge=0, le=1_000_000),
+    current_user: Optional[User] = Depends(get_current_user),
 ):
-    objs = dataos.storage.list_objects(object_type=object_type, source=source, limit=limit, offset=offset)
-    total = dataos.storage.count_objects(object_type=object_type, source=source)
+    _request_object_permissions(current_user)
+    if current_user is None:
+        objs = dataos.storage.list_objects(object_type=object_type, source=source, limit=limit, offset=offset)
+        total = dataos.storage.count_objects(object_type=object_type, source=source)
+    else:
+        objs, total = list_objects_readable_by_user(
+            dataos.storage,
+            current_user,
+            object_type=object_type,
+            source=source,
+            limit=limit,
+            offset=offset,
+        )
     return {"total": total, "objects": [o.to_dict() for o in objs]}
 
 
 @app.post("/api/objects/", summary="Create DataOS Object")
-async def create_object(req: ObjectCreateRequest):
+async def create_object(req: ObjectCreateRequest, current_user: Optional[User] = Depends(get_current_user)):
+    permissions = _request_object_permissions(current_user)
+
     # These fields are owned by trusted ingestion/storage code. Accepting
     # caller-supplied values would let clients forge duplicate hashes or attach
     # arbitrary blob references to objects.
@@ -441,20 +487,37 @@ async def create_object(req: ObjectCreateRequest):
         source=req.source,
         metadata=dict(req.metadata),
     )
+    if permissions is not None:
+        obj.permissions = permissions
+
     saved = dataos.storage.save_object(obj)
     return saved.to_dict()
 
 
 @app.get("/api/objects/{object_id}", summary="Get DataOS Object")
-async def get_object(object_id: str):
+async def get_object(
+    object_id: str,
+    current_user: Optional[User] = Depends(get_current_user),
+):
+    _request_object_permissions(current_user)
     obj = dataos.storage.get_object(object_id)
     if not obj:
         raise HTTPException(status_code=404, detail="Object not found")
+    _ensure_object_access(current_user, obj)
     return obj.to_dict()
 
 
 @app.delete("/api/objects/{object_id}", summary="Delete DataOS Object")
-async def delete_object(object_id: str, soft: bool = True):
+async def delete_object(
+    object_id: str,
+    soft: bool = True,
+    current_user: Optional[User] = Depends(get_current_user),
+):
+    _request_object_permissions(current_user)
+    obj = dataos.storage.get_object(object_id)
+    if not obj:
+        raise HTTPException(status_code=404, detail="Object not found or already deleted")
+    _ensure_object_access(current_user, obj, write=True)
     success = dataos.storage.delete_object(object_id, soft=soft)
     if not success:
         raise HTTPException(status_code=404, detail="Object not found or already deleted")
@@ -658,10 +721,12 @@ async def recompute_vectors():
 @app.post("/api/notebooks/ingest", summary="Ingest Jupyter Notebook DAG (Rule #51)")
 async def ingest_notebook_api(
     filename: str = Form("analysis.ipynb"),
-    content: str = Form(...)
+    content: str = Form(...),
+    current_user: Optional[User] = Depends(get_current_user),
 ):
     try:
-        return dataos.ingest(content, filename=filename, discover_relations=True)
+        permissions = _request_object_permissions(current_user)
+        return dataos.ingest(content, filename=filename, discover_relations=True, permissions=permissions)
     except (ValueError, TypeError) as exc:
         raise HTTPException(status_code=422, detail=f"Notebook ingestion failed: {exc}") from exc
 
@@ -669,10 +734,12 @@ async def ingest_notebook_api(
 @app.post("/api/documents/extract_rich", summary="Extract Rich Document Tables & Citations (Rule #54)")
 async def extract_rich_document_api(
     filename: str = Form("paper.md"),
-    content: str = Form(...)
+    content: str = Form(...),
+    current_user: Optional[User] = Depends(get_current_user),
 ):
     try:
-        return dataos.ingest(content, filename=filename, discover_relations=True)
+        permissions = _request_object_permissions(current_user)
+        return dataos.ingest(content, filename=filename, discover_relations=True, permissions=permissions)
     except (ValueError, TypeError) as exc:
         raise HTTPException(status_code=422, detail=f"Document ingestion failed: {exc}") from exc
 
@@ -736,10 +803,15 @@ async def resolve_conflict_api(req: ConflictResolutionRequest):
 
 
 @app.get("/api/profiling/{object_id}", summary="Get Dataset Profile")
-async def get_dataset_profile(object_id: str):
+async def get_dataset_profile(
+    object_id: str,
+    current_user: Optional[User] = Depends(get_current_user),
+):
+    _request_object_permissions(current_user)
     obj = dataos.storage.get_object(object_id)
     if not obj:
         raise HTTPException(status_code=404, detail="Object not found")
+    _ensure_object_access(current_user, obj)
     
     import pandas as pd
     import io
@@ -759,10 +831,16 @@ async def get_dataset_profile(object_id: str):
 
 
 @app.post("/api/quality/{object_id}", summary="Evaluate Data Quality Rules")
-async def evaluate_quality(object_id: str, req: QualityEvaluateRequest):
+async def evaluate_quality(
+    object_id: str,
+    req: QualityEvaluateRequest,
+    current_user: Optional[User] = Depends(get_current_user),
+):
+    _request_object_permissions(current_user)
     obj = dataos.storage.get_object(object_id)
     if not obj:
         raise HTTPException(status_code=404, detail="Object not found")
+    _ensure_object_access(current_user, obj)
     
     import pandas as pd
     import io
@@ -779,6 +857,7 @@ async def evaluate_quality(object_id: str, req: QualityEvaluateRequest):
 
     rules = req.rules if req.rules else [{"type": "row_count_min", "min_rows": 1}]
     quality_obj = dataos.quality.evaluate_rules(df, rules, target_object_id=obj.id)
+    quality_obj.permissions = dict(obj.permissions)
     dataos.storage.save_object(quality_obj)
     return quality_obj.to_dict()
 
@@ -1013,10 +1092,16 @@ async def ask_dataos_api(req: AskDataOSRequest):
 async def universal_ingest_api(
     filename: str = Form("data_artifact"),
     content: str = Form(...),
-    discover_relations: bool = Form(True)
+    discover_relations: bool = Form(True),
+    current_user: Optional[User] = Depends(get_current_user),
 ):
-    res = dataos.ingest(content, filename=filename, discover_relations=discover_relations)
-    return res
+    permissions = _request_object_permissions(current_user)
+    return dataos.ingest(
+        content,
+        filename=filename,
+        discover_relations=discover_relations,
+        permissions=permissions,
+    )
 
 
 # =============================================================================
@@ -1027,13 +1112,20 @@ async def universal_ingest_api(
 async def ingest_text(
     filename: str = Form(...),
     content: str = Form(...),
-    format_type: str = Form("text")
+    format_type: str = Form("text"),
+    current_user: Optional[User] = Depends(get_current_user),
 ):
     # Ingest content directly; never construct a temporary path from client input.
     safe_name = os.path.basename(filename.strip().replace("\\", "/")) or "text.txt"
     if not os.path.splitext(safe_name)[1]:
         safe_name = f"{safe_name}.txt"
-    return dataos.ingest(content, filename=safe_name, discover_relations=True)
+    permissions = _request_object_permissions(current_user)
+    return dataos.ingest(
+        content,
+        filename=safe_name,
+        discover_relations=True,
+        permissions=permissions,
+    )
 
 
 @app.get("/api/io/export", summary="Export DataOS Graph")
