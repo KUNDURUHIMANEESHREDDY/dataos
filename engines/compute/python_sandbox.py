@@ -230,7 +230,7 @@ class PythonSandbox:
 
         # 3. Threaded Execution with Hard Timeout
         def _exec_target():
-            nonlocal success, error_msg
+            nonlocal success, error_msg, error_code
             old_stdout = sys.stdout
             old_stderr = sys.stderr
             try:
