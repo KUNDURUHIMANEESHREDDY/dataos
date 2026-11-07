@@ -82,7 +82,8 @@ class TestQueryExecution(unittest.TestCase):
                 result = self.sql_engine.execute_sql(query, table_objects=[self.dataset])
                 self.assertFalse(result["success"])
                 if "load_extension" in query:
-                    self.assertIn("not authorized", result["error"].lower())
+                    self.assertEqual(result["error_code"], "SQL_EXECUTION_FAILED")
+                    self.assertEqual(result["error"], "SQL query could not be executed.")
 
     def test_sql_engine_rejects_multiple_statements(self):
         result = self.sql_engine.execute_sql(
@@ -118,7 +119,8 @@ class TestQueryExecution(unittest.TestCase):
         with patch.object(SQLExecutionEngine, "MAX_QUERY_SECONDS", -1):
             result = self.sql_engine.execute_sql(query, table_objects=[])
         self.assertFalse(result["success"])
-        self.assertIn("interrupted", result["error"].lower())
+        self.assertEqual(result["error_code"], "SQL_EXECUTION_FAILED")
+        self.assertEqual(result["error"], "SQL query could not be executed.")
 
     def test_python_query_execution(self):
         """Verify Python execution."""
