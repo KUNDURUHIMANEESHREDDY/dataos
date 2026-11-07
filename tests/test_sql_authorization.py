@@ -205,6 +205,35 @@ def test_direct_python_endpoint_intersects_requested_ids_with_user_acl(monkeypat
 
 
 
+
+def test_every_data_api_route_has_identity_or_admin_boundary():
+    import importlib
+
+    api = importlib.import_module("backend.app")
+    explicitly_public = {
+        ("POST", "/api/auth/register"),
+        ("POST", "/api/auth/login"),
+        ("POST", "/api/auth/logout"),
+    }
+    unguarded = []
+
+    for route in api.app.routes:
+        path = getattr(route, "path", "")
+        if not path.startswith("/api/") or not hasattr(route, "dependant"):
+            continue
+        dependency_calls = {dependency.call for dependency in route.dependant.dependencies}
+        for method in getattr(route, "methods", set()) or set():
+            if (method, path) in explicitly_public:
+                continue
+            if (
+                api.get_current_user not in dependency_calls
+                and api.require_admin_for_unscoped_data not in dependency_calls
+            ):
+                unguarded.append(f"{method} {path}")
+
+    assert unguarded == []
+
+
 def test_unscoped_data_guard_allows_admin_and_rejects_other_roles():
     import asyncio
     import importlib
