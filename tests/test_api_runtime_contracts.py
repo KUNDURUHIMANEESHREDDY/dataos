@@ -111,6 +111,15 @@ def test_compute_routes_call_real_kernel_methods(monkeypatch):
 
 
 
+def test_python_sandbox_does_not_return_exception_tracebacks():
+    result = api.dataos.python_sandbox.execute_code("1 / 0", input_object_ids=[])
+    assert result["success"] is False
+    assert result["error"] == "Python execution failed."
+    assert result["error_code"] == "PYTHON_EXECUTION_FAILED"
+    assert "Traceback" not in str(result)
+    assert "ZeroDivisionError" not in str(result)
+
+
 def test_python_compute_is_disabled_by_default_in_production(monkeypatch):
     monkeypatch.setenv("DATAOS_ENV", "production")
     monkeypatch.delenv("APP_ENV", raising=False)
