@@ -68,6 +68,8 @@ This secret protects sharing-token signatures only.
 
 ### Encryption at rest
 
+**Integration boundary:** `EncryptionEngine` is currently a library component and is not automatically applied to every write in the default SQLite/PostgreSQL storage adapters. This PR hardens that component; it does **not** claim that existing database files or all newly persisted records are encrypted at rest. A separate storage-adapter integration, field classification, key-rotation plan and round-trip/restore tests are required before making that production claim.
+
 The encryption engine requires the `cryptography` package and writes only authenticated Fernet or AES-GCM ciphertext. It no longer writes the legacy XOR format. In production, one of `DATAOS_ENV`, `APP_ENV`, or `ENVIRONMENT` set to `production`/`prod` requires `DATAOS_MASTER_KEY`; an ephemeral development key is never substituted in production.
 
 When using a passphrase, DataOS derives a 32-byte key with PBKDF2-HMAC-SHA256 (480,000 iterations) and a persistent 16-byte salt. The default salt path is `~/.dataos/encryption_salt`; set `DATAOS_ENCRYPTION_SALT_FILE` to a durable path shared by replicas. Back up the salt with the deployment's key metadata. Losing or replacing it makes ciphertext derived from that passphrase unreadable.
