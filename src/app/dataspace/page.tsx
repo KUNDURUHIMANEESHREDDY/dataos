@@ -1,11 +1,8 @@
 "use client";
 
 import { useEffect, useState, lazy, Suspense, useRef } from "react";
-import { useSpatialStore, type ObjectType } from "@/hooks/useSpatialStore";
-import { api } from "@/lib/api";
-import paginate from "@/lib/paginate.js";
-import { toGraphEdge } from "@/lib/relationship-edge.js";
-import { loadGraphCollections } from "@/lib/load-graph-collections.js";
+import { useSpatialStore } from "@/hooks/useSpatialStore";
+import { loadDataspaceGraph } from "@/lib/dataspace-graph";
 import { useKeyboard } from "@/hooks/useKeyboard";
 import TopBar from "@/components/layout/TopBar";
 import Sidebar from "@/components/layout/Sidebar";
@@ -18,11 +15,6 @@ import EmptyState from "@/components/canvas/EmptyState";
 import CommandPalette from "@/components/ai/CommandPalette";
 
 const SpatialCanvas3D = lazy(() => import("@/components/canvas/SpatialCanvas3D"));
-const { loadBoundedPages } = paginate;
-
-const MAX_GRAPH_OBJECTS = 10_000;
-const MAX_GRAPH_RELATIONSHIPS = 20_000;
-
 function Canvas3DFallback() {
   return (
     <div className="w-full h-full flex items-center justify-center" style={{ background: "linear-gradient(180deg, #f8f8fc 0%, #eeeeee 100%)" }}>
@@ -32,58 +24,6 @@ function Canvas3DFallback() {
       </div>
     </div>
   );
-}
-
-async function loadAllObjects(signal: AbortSignal) {
-  const result = await loadBoundedPages<any>(
-    ({ limit, offset, signal: requestSignal }) => api.listObjects(
-      { limit, offset },
-      requestSignal ? { signal: requestSignal } : undefined,
-    ),
-    "objects",
-    500,
-    MAX_GRAPH_OBJECTS,
-    signal,
-  );
-  return { objects: result.items, total: result.total, truncated: result.truncated };
-}
-
-async function loadAllRelationships(signal: AbortSignal) {
-  // The API caps each relationship page at 1,000 rows. Fetch bounded pages
-  // rather than requesting 5,000 in one call or accumulating an unbounded graph.
-  const result = await loadBoundedPages<any>(
-    ({ limit, offset, signal: requestSignal }) => api.listRelationships(
-      { limit, offset },
-      requestSignal ? { signal: requestSignal } : undefined,
-    ),
-    "relationships",
-    1000,
-    MAX_GRAPH_RELATIONSHIPS,
-    signal,
-  );
-  return { relationships: result.items, total: result.total, truncated: result.truncated };
-}
-
-function buildGraphNotice(
-  objects: { objects: unknown[]; total: number | null; truncated: boolean },
-  relationships: { relationships: unknown[]; total: number | null; truncated: boolean },
-) {
-  const limits: string[] = [];
-  if (objects.truncated) {
-    const total = objects.total === null
-      ? "at least " + (objects.objects.length + 1).toLocaleString()
-      : objects.total.toLocaleString();
-    limits.push(objects.objects.length.toLocaleString() + " of " + total + " objects");
-  }
-  if (relationships.truncated) {
-    const total = relationships.total === null
-      ? "at least " + (relationships.relationships.length + 1).toLocaleString()
-      : relationships.total.toLocaleString();
-    limits.push(relationships.relationships.length.toLocaleString() + " of " + total + " relationships");
-  }
-  if (limits.length === 0) return null;
-  return "Graph view is bounded to " + limits.join(" and ")
-    + " to protect browser memory and rendering performance. All records remain in storage; use search to locate specific objects.";
 }
 
 export default function DataspacePage() {
@@ -107,40 +47,12 @@ export default function DataspacePage() {
       setError(null);
       setNotice(null);
       try {
-        const [objsRes, relsRes] = await loadGraphCollections(
-          controller,
-          loadAllObjects,
-          loadAllRelationships,
-        );
-
+        const graph = await loadDataspaceGraph(controller);
         if (!active) return;
 
-        const typeMap: Record<string, ObjectType> = {
-          document: "dataset",
-          dataset: "dataset",
-          csv: "dataset",
-          entity: "entity",
-          relation: "relation",
-          analysis: "analysis",
-          notebook: "analysis",
-          agent: "agent",
-        };
-
-        const objects = (objsRes.objects || []).map((o: any) => ({
-          id: o.id,
-          type: (typeMap[o.type] || "dataset") as import("@/hooks/useSpatialStore").ObjectType,
-          name: o.properties?.filename || o.properties?.name || o.id.slice(0, 8),
-          properties: o.properties || {},
-        }));
-
-        const edges = (relsRes.relationships || []).flatMap((relationship: any) => {
-          const edge = toGraphEdge(relationship);
-          return edge ? [edge] : [];
-        });
-
-        setObjects(objects);
-        setEdges(edges);
-        setNotice(buildGraphNotice(objsRes, relsRes));
+        setObjects(graph.objects);
+        setEdges(graph.edges);
+        setNotice(graph.notice);
       } catch (err) {
         if (!active) return;
         setError(err instanceof Error ? err.message : "An unknown error occurred while loading the workspace.");
