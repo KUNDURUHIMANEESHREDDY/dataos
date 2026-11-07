@@ -14,6 +14,16 @@ from core.relation.model import Relationship, RelationType
 from infrastructure.storage.base import StorageBackend
 
 
+def _save_with_permissions(
+    storage: StorageBackend,
+    obj: DataObject,
+    permissions: Optional[Dict[str, Any]],
+) -> DataObject:
+    if permissions is not None:
+        obj.permissions = dict(permissions)
+    return storage.save_object(obj)
+
+
 class NotebookCell:
     """Represents a parsed Jupyter Notebook cell."""
 
@@ -229,7 +239,8 @@ class JupyterNotebookParser:
         cls,
         notebook_json_str: str,
         filename: str,
-        storage: StorageBackend
+        storage: StorageBackend,
+        permissions: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
         Ingest notebook into DataOS:
@@ -252,7 +263,7 @@ class JupyterNotebookParser:
             content=notebook_json_str,
             source=f"file://{filename}"
         )
-        storage.save_object(notebook_obj)
+        _save_with_permissions(storage, notebook_obj, permissions)
 
         # 2. Create child cell DataObjects
         cell_obj_map: Dict[int, DataObject] = {}
@@ -272,7 +283,7 @@ class JupyterNotebookParser:
                 content=cell_dict["source"],
                 source=f"derived://{notebook_obj.id}/cell/{c_idx}"
             )
-            storage.save_object(cell_obj)
+            _save_with_permissions(storage, cell_obj, permissions)
             cell_obj_map[c_idx] = cell_obj
 
             # Link notebook -> contains -> cell

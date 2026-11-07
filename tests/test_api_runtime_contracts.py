@@ -102,13 +102,101 @@ def test_graph_analytics_uses_supported_namespace(monkeypatch):
 
 
 def test_compute_routes_call_real_kernel_methods(monkeypatch):
-    monkeypatch.setattr(api.dataos, "sql", lambda query: {"sql": query})
+    monkeypatch.setattr(api.dataos, "sql", lambda query: {
+        "success": True, "rows": [{"sql": query}], "columns": ["sql"],
+        "row_count": 1, "execution_time_ms": 0, "provenance": {},
+    })
     monkeypatch.setattr(api.dataos, "python", lambda code, input_object_ids=None: {"code": code, "inputs": input_object_ids})
-    assert run(api.compute_sql(api.SQLQueryRequest(query="SELECT 1"))) == {"sql": "SELECT 1"}
+    assert run(api.compute_sql(api.SQLQueryRequest(query="SELECT 1"), current_user=None)) == {
+        "success": True, "rows": [{"sql": "SELECT 1"}], "columns": ["sql"],
+        "row_count": 1, "execution_time_ms": 0, "provenance": {},
+    }
     assert run(api.compute_python(api.PythonComputeRequest(code="print(1)", input_object_ids=["obj-1"]))) == {
         "code": "print(1)", "inputs": ["obj-1"]
     }
 
+
+
+
+def test_compute_sql_fails_closed_without_per_user_identity_in_production(monkeypatch):
+    monkeypatch.setenv("DATAOS_ENV", "production")
+    monkeypatch.delenv("APP_ENV", raising=False)
+    monkeypatch.delenv("ENVIRONMENT", raising=False)
+    monkeypatch.delenv("DATAOS_JWT_SECRET", raising=False)
+    monkeypatch.setattr(api, "jwt_configured", lambda: False)
+    monkeypatch.setattr(api.dataos, "sql", lambda query: pytest.fail("unscoped SQL must not execute"))
+
+    with pytest.raises(HTTPException) as exc:
+        run(api.compute_sql(api.SQLQueryRequest(query="SELECT * FROM private_data"), current_user=None))
+
+    assert exc.value.status_code == 503
+    assert "DATAOS_JWT_SECRET" in exc.value.detail
+
+
+def test_compute_sql_scopes_execution_to_readable_datasets(monkeypatch):
+    dataset = SimpleNamespace(id="dataset-alice")
+    user = SimpleNamespace(
+        id="alice",
+        role="analyst",
+        has_capability=lambda capability: True,
+    )
+    captured = {}
+    monkeypatch.setattr(api, "_production_mode", lambda: False)
+    monkeypatch.setattr(api, "jwt_configured", lambda: True)
+    monkeypatch.setattr(api, "datasets_readable_by_user", lambda storage, principal: [dataset])
+    monkeypatch.setattr(
+        api.dataos.sql_engine,
+        "execute_sql",
+        lambda query, table_objects, agent_or_user: captured.update(
+            query=query,
+            table_objects=table_objects,
+            agent_or_user=agent_or_user,
+        ) or {"success": True, "rows": []},
+    )
+    monkeypatch.setattr(api.dataos, "sql", lambda query: pytest.fail("global SQL path must not execute"))
+
+    result = run(api.compute_sql(api.SQLQueryRequest(query="SELECT 1"), current_user=user))
+
+    assert result == {
+        "success": True, "rows": [], "columns": [], "row_count": 0,
+        "execution_time_ms": 0, "provenance": {},
+    }
+    assert captured == {
+        "query": "SELECT 1",
+        "table_objects": [dataset],
+        "agent_or_user": "user:alice",
+    }
+
+
+def test_compute_sql_rejects_users_without_sql_capability(monkeypatch):
+    user = SimpleNamespace(id="viewer", role="viewer", has_capability=lambda capability: False)
+    monkeypatch.setattr(api.dataos, "sql", lambda query: pytest.fail("unauthorized SQL must not execute"))
+
+    with pytest.raises(HTTPException) as exc:
+        run(api.compute_sql(api.SQLQueryRequest(query="SELECT 1"), current_user=user))
+
+    assert exc.value.status_code == 403
+
+
+def test_compute_sql_redacts_backend_exception_details(monkeypatch):
+    monkeypatch.setattr(api, "_production_mode", lambda: False)
+    monkeypatch.setattr(api, "jwt_configured", lambda: False)
+    monkeypatch.setattr(
+        api.dataos,
+        "sql",
+        lambda query: {
+            "success": False,
+            "error_code": "SQL_EXECUTION_FAILED",
+            "error": "sqlite error at /srv/private/customer.db",
+            "provenance": {"error": "Traceback at /srv/private/customer.db"},
+        },
+    )
+
+    result = run(api.compute_sql(api.SQLQueryRequest(query="SELECT 1"), current_user=None))
+
+    assert result["error"] == "SQL query could not be executed."
+    assert "error" not in result["provenance"]
+    assert "/srv/private" not in str(result)
 
 
 def test_python_compute_is_disabled_by_default_in_production(monkeypatch):
@@ -141,10 +229,14 @@ def test_python_compute_requires_explicit_production_opt_in(monkeypatch):
 
 
 def test_unified_query_auto_dispatches_sql_and_natural_language(monkeypatch):
-    monkeypatch.setattr(api.dataos, "sql", lambda query: {"kind": "sql", "query": query})
+    monkeypatch.setattr(api.dataos, "sql", lambda query: {
+        "success": True, "rows": [{"query": query}], "columns": ["query"],
+        "row_count": 1, "execution_time_ms": 0, "provenance": {},
+    })
     monkeypatch.setattr(api.dataos, "ask", lambda query: {"kind": "ask", "query": query})
     assert run(api.query_unified(api.UnifiedQueryRequest(query="SELECT 1"), current_user=None)) == {
-        "kind": "sql", "query": "SELECT 1"
+        "success": True, "rows": [{"query": "SELECT 1"}], "columns": ["query"],
+        "row_count": 1, "execution_time_ms": 0, "provenance": {},
     }
     assert run(api.query_unified(api.UnifiedQueryRequest(query="Why is this dataset empty?"), current_user=None)) == {
         "kind": "ask", "query": "Why is this dataset empty?"
@@ -255,14 +347,47 @@ def test_time_travel_rejects_utc_normalization_overflow():
         assert "representable as a UTC timestamp" in exc.value.detail
 
 def test_ingest_text_does_not_use_client_filename_as_temp_path(monkeypatch):
+    from urllib.parse import urlencode
+
     called = {}
-    def ingest(content, filename, discover_relations):
-        called.update(content=content, filename=filename, discover_relations=discover_relations)
+    def ingest(content, filename, discover_relations, permissions=None):
+        called.update(content=content, filename=filename, discover_relations=discover_relations, permissions=permissions)
         return {"status": "ingested"}
     monkeypatch.setattr(api.dataos, "ingest", ingest)
-    result = run(api.ingest_text(filename="../../outside.md", content="safe text"))
+    body = urlencode([
+        ("filename", "../../outside.md"),
+        ("content", "safe text"),
+        ("format_type", "text"),
+    ]).encode("ascii")
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": "2.3"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/api/io/ingest_text",
+        "raw_path": b"/api/io/ingest_text",
+        "query_string": b"",
+        "root_path": "",
+        "headers": [
+            (b"content-type", b"application/x-www-form-urlencoded"),
+            (b"content-length", str(len(body)).encode("ascii")),
+        ],
+        "server": ("testserver", 80),
+        "client": ("testclient", 12345),
+    }
+    delivered = False
+    async def receive():
+        nonlocal delivered
+        if delivered:
+            return {"type": "http.disconnect"}
+        delivered = True
+        return {"type": "http.request", "body": body, "more_body": False}
+    request = Request(scope, receive)
+
+    result = run(api.ingest_text(request, current_user=None))
     assert result == {"status": "ingested"}
-    assert called == {"content": "safe text", "filename": "outside.md", "discover_relations": True}
+    assert called == {"content": "safe text", "filename": "outside.md", "discover_relations": True, "permissions": None}
 
 
 def test_sharing_token_routes_fail_closed_without_secret(monkeypatch):
@@ -509,3 +634,113 @@ def test_lineage_route_dispatches_only_the_two_supported_directions(monkeypatch)
     assert upstream == {"direction": "upstream", "object_id": "root", "max_depth": 4}
     assert downstream == {"direction": "downstream", "object_id": "root", "max_depth": 2}
     assert calls == [("upstream", "root", 4), ("downstream", "root", 2)]
+
+@pytest.mark.parametrize(
+    ("managed_key", "managed_value"),
+    [
+        ("content_hash", "0" * 64),
+        ("blob", {"sha256": "0" * 64, "path": "/untrusted/client/path"}),
+    ],
+)
+def test_object_creation_rejects_client_supplied_storage_metadata(
+    monkeypatch, managed_key, managed_value
+):
+    def unexpected_save(_obj):
+        pytest.fail("server-managed metadata must be rejected before persistence")
+
+    monkeypatch.setattr(api.dataos.storage, "save_object", unexpected_save)
+    request = api.ObjectCreateRequest(metadata={managed_key: managed_value})
+
+    with pytest.raises(HTTPException) as exc:
+        run(api.create_object(request, current_user=None))
+
+    assert exc.value.status_code == 422
+    assert "managed by DataOS" in exc.value.detail
+    assert managed_key in exc.value.detail
+
+
+def test_object_creation_preserves_ordinary_client_metadata(monkeypatch):
+    saved = {}
+
+    def capture_object(obj):
+        saved["object"] = obj
+        return obj
+
+    monkeypatch.setattr(api.dataos.storage, "save_object", capture_object)
+    result = run(api.create_object(
+        api.ObjectCreateRequest(metadata={"source_note": "uploaded through API"}),
+        current_user=None,
+    ))
+
+    assert result["metadata"]["source_note"] == "uploaded through API"
+    assert saved["object"].metadata["source_note"] == "uploaded through API"
+
+
+def test_production_data_routes_report_missing_jwt_configuration(monkeypatch):
+    monkeypatch.setattr(api, "_production_mode", lambda: True)
+    monkeypatch.setattr(api, "jwt_configured", lambda: False)
+
+    with pytest.raises(HTTPException) as exc:
+        api._request_object_permissions(None)
+
+    assert exc.value.status_code == 503
+    assert "DATAOS_JWT_SECRET" in exc.value.detail
+    assert "DATAOS_API_TOKEN is not a user identity" in exc.value.detail
+
+
+def test_production_data_routes_require_a_user_when_jwt_is_configured(monkeypatch):
+    monkeypatch.setattr(api, "_production_mode", lambda: True)
+    monkeypatch.setattr(api, "jwt_configured", lambda: True)
+
+    with pytest.raises(HTTPException) as exc:
+        api._request_object_permissions(None)
+
+    assert exc.value.status_code == 401
+    assert exc.value.headers["WWW-Authenticate"] == "Bearer"
+
+
+def test_sharing_token_verification_does_not_expose_internal_exception_text(monkeypatch):
+    monkeypatch.setenv("DATAOS_SHARING_TOKEN_SECRET", "test-sharing-secret-with-at-least-32-bytes")
+
+    def fail_verification(_token):
+        raise RuntimeError("private key path /internal/secrets")
+
+    monkeypatch.setattr(
+        api.dataos,
+        "tokens",
+        SimpleNamespace(verify_and_decode_token=fail_verification),
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        run(api.verify_sharing_token_api(SimpleNamespace(token="invalid-token")))
+
+    assert exc.value.status_code == 403
+    assert exc.value.detail == "Sharing token is invalid or expired."
+    assert "private key path" not in exc.value.detail
+
+
+def test_notebook_and_document_ingestion_errors_do_not_expose_exception_text(monkeypatch):
+    def fail_ingestion(*args, **kwargs):
+        raise ValueError("private parser path /internal/customer-data")
+
+    monkeypatch.setattr(api, "dataos", SimpleNamespace(ingest=fail_ingestion))
+
+    with pytest.raises(HTTPException) as notebook_exc:
+        run(api.ingest_notebook_api(
+            filename="private.ipynb",
+            content="{}",
+            current_user=None,
+        ))
+    assert notebook_exc.value.status_code == 422
+    assert notebook_exc.value.detail == "Notebook ingestion failed. Check the format and supported content limits."
+    assert "internal/customer-data" not in notebook_exc.value.detail
+
+    with pytest.raises(HTTPException) as document_exc:
+        run(api.extract_rich_document_api(
+            filename="private.md",
+            content="# private",
+            current_user=None,
+        ))
+    assert document_exc.value.status_code == 422
+    assert document_exc.value.detail == "Document ingestion failed. Check the format and supported content limits."
+    assert "internal/customer-data" not in document_exc.value.detail

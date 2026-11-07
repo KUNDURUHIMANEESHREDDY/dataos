@@ -1,9 +1,8 @@
 "use client";
 
-import { useEffect, useState, lazy, Suspense } from "react";
-import { useSpatialStore, type ObjectType } from "@/hooks/useSpatialStore";
-import { api } from "@/lib/api";
-import paginate from "@/lib/paginate.js";
+import { useEffect, useState, lazy, Suspense, useRef } from "react";
+import { useSpatialStore } from "@/hooks/useSpatialStore";
+import { loadDataspaceGraph } from "@/lib/dataspace-graph";
 import { useKeyboard } from "@/hooks/useKeyboard";
 import TopBar from "@/components/layout/TopBar";
 import Sidebar from "@/components/layout/Sidebar";
@@ -16,8 +15,6 @@ import EmptyState from "@/components/canvas/EmptyState";
 import CommandPalette from "@/components/ai/CommandPalette";
 
 const SpatialCanvas3D = lazy(() => import("@/components/canvas/SpatialCanvas3D"));
-const { loadAllPages } = paginate;
-
 function Canvas3DFallback() {
   return (
     <div className="w-full h-full flex items-center justify-center" style={{ background: "linear-gradient(180deg, #f8f8fc 0%, #eeeeee 100%)" }}>
@@ -29,26 +26,6 @@ function Canvas3DFallback() {
   );
 }
 
-async function loadAllObjects() {
-  const objects = await loadAllPages<any>(
-    ({ limit, offset }) => api.listObjects({ limit, offset }),
-    "objects",
-    500,
-  );
-  return { objects, total: objects.length };
-}
-
-async function loadAllRelationships() {
-  // The API caps each relationship page at 1,000 rows. Fetch every page rather
-  // than requesting 5,000 in one call (which FastAPI rejects with HTTP 422).
-  const relationships = await loadAllPages<any>(
-    ({ limit, offset }) => api.listRelationships({ limit, offset }),
-    "relationships",
-    1000,
-  );
-  return { relationships, total: relationships.length };
-}
-
 export default function DataspacePage() {
   const setObjects = useSpatialStore((s) => s.setObjects);
   const setEdges = useSpatialStore((s) => s.setEdges);
@@ -56,54 +33,39 @@ export default function DataspacePage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
+  const [notice, setNotice] = useState<string | null>(null);
+  const canvasSurfaceRef = useRef<HTMLDivElement>(null);
 
   useKeyboard();
 
   useEffect(() => {
+    const controller = new AbortController();
+    let active = true;
+
     async function load() {
       setLoading(true);
       setError(null);
+      setNotice(null);
       try {
-        const [objsRes, relsRes] = await Promise.all([
-          loadAllObjects(),
-          loadAllRelationships(),
-        ]);
+        const graph = await loadDataspaceGraph(controller);
+        if (!active) return;
 
-        const typeMap: Record<string, ObjectType> = {
-          document: "dataset",
-          dataset: "dataset",
-          csv: "dataset",
-          entity: "entity",
-          relation: "relation",
-          analysis: "analysis",
-          notebook: "analysis",
-          agent: "agent",
-        };
-
-        const objects = (objsRes.objects || []).map((o: any) => ({
-          id: o.id,
-          type: (typeMap[o.type] || "dataset") as import("@/hooks/useSpatialStore").ObjectType,
-          name: o.properties?.filename || o.properties?.name || o.id.slice(0, 8),
-          properties: o.properties || {},
-        }));
-
-        const edges = (relsRes.relationships || []).map((r: any) => ({
-          id: r.id || `${r.source}-${r.target}`,
-          source: r.source,
-          target: r.target,
-          type: r.relation_type || "related_to",
-          confidence: r.confidence ?? 1.0,
-        }));
-
-        setObjects(objects);
-        setEdges(edges);
+        setObjects(graph.objects);
+        setEdges(graph.edges);
+        setNotice(graph.notice);
       } catch (err) {
+        if (!active) return;
         setError(err instanceof Error ? err.message : "An unknown error occurred while loading the workspace.");
       } finally {
-        setLoading(false);
+        if (active) setLoading(false);
       }
     }
+
     load();
+    return () => {
+      active = false;
+      controller.abort();
+    };
   }, [setObjects, setEdges, reloadKey]);
 
   return (
@@ -140,14 +102,23 @@ export default function DataspacePage() {
             </div>
           )}
 
-          <div className="flex-1 relative overflow-hidden">
+          <div ref={canvasSurfaceRef} className="flex-1 relative overflow-hidden">
+            {notice && (
+              <div
+                className="absolute top-3 left-3 right-3 z-20 mx-auto max-w-3xl glass rounded-lg px-4 py-3 text-xs text-[var(--color-text-secondary)] shadow-lg"
+                role="status"
+                aria-live="polite"
+              >
+                {notice}
+              </div>
+            )}
             {viewMode === "2d" ? <SpatialCanvas /> : (
               <Suspense fallback={<Canvas3DFallback />}>
                 <SpatialCanvas3D />
               </Suspense>
             )}
             <NodePopover />
-            <DropZone />
+            <DropZone targetRef={canvasSurfaceRef} />
             <EmptyState />
             <CanvasControls />
           </div>

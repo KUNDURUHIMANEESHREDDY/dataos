@@ -25,7 +25,13 @@ import subprocess
 import sys
 from collections.abc import Sequence
 from typing import Any
-from urllib.parse import urlsplit
+
+from resource_name_utils import normalize_aiplatform_resource_name
+
+
+def _resource_name_from_asset_name(full_name: str) -> str | None:
+  """Backward-compatible wrapper for existing gather-agent-info callers."""
+  return normalize_aiplatform_resource_name(full_name)
 
 try:
   from google.cloud import aiplatform_v1beta1
@@ -39,34 +45,6 @@ except ImportError:
 
 DEFAULT_VERTEX_REGIONS = ["us-central1", "us-east1", "us-west1", "europe-west1"]
 
-
-def _resource_name_from_asset_name(full_name: str) -> str | None:
-  """Normalize a CAI resource name without substring-based URL sanitization."""
-  if not full_name:
-    return None
-
-  parsed = urlsplit(full_name)
-  if parsed.netloc:
-    try:
-      port = parsed.port
-    except ValueError:
-      return None
-    if (
-        parsed.scheme not in ("", "https")
-        or parsed.hostname != "aiplatform.googleapis.com"
-        or parsed.username is not None
-        or parsed.password is not None
-        or port not in (None, 443)
-        or parsed.query
-        or parsed.fragment
-    ):
-      return None
-    resource_name = parsed.path.lstrip("/")
-    return resource_name or None
-
-  if parsed.scheme or full_name.startswith("//"):
-    return None
-  return full_name
 
 
 def run_command(
@@ -123,7 +101,7 @@ def find_agent_via_cais(
         if asset_type == "aiplatform.googleapis.com/ReasoningEngine":
           print(f"FOUND via CAIS: Reasoning Engine in {location}")
           full_name = asset.get("name", "")
-          resource_name = _resource_name_from_asset_name(full_name)
+          resource_name = normalize_aiplatform_resource_name(full_name)
           if resource_name is None:
             print("Warning: CAI returned an invalid Vertex AI resource name", file=sys.stderr)
             continue

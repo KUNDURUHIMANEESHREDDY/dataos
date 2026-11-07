@@ -14,13 +14,17 @@ cryptography>=42.0
 idna>=3.6,<4
 
 # ── API backend ──────────────────────────────────────────────────────────────
-fastapi>=0.110
-python-multipart>=0.0.20  # Required for FastAPI Form/File routes at app import time.
+fastapi>=0.142.2
+# Starlette 1.0.1 fixes Host-header URL confusion; 1.3.1 enforces URL-encoded
+# max_fields limits. Keep this floor explicit instead of relying on FastAPI's
+# broad transitive range to select a patched parser.
+starlette>=1.3.1,<2.0.0
+python-multipart>=0.0.20  # Required for FastAPI form parsing at app import time.
 pydantic>=2.0
 uvicorn>=0.27
 requests>=2.31
 
-# ── Optional: install only the backends you actually use ─────────────────────
+# ── Optional: install only the backends you actually use ──────────────────────
 # SQLite is the default and needs nothing extra.
 #
 # psycopg2-binary>=2.9        # PostgreSQL storage backend
