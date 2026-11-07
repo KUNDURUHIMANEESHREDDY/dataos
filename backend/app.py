@@ -965,7 +965,7 @@ async def verify_sharing_token_api(req: VerifySharingTokenRequest):
         payload = dataos.tokens.verify_and_decode_token(req.token)
         import dataclasses
         return {"status": "valid", "payload": dataclasses.asdict(payload)}
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - preserve the fixed 403 contract for every verification failure
         logger.warning("Sharing token verification failed (%s)", type(exc).__name__)
         raise HTTPException(status_code=403, detail="Sharing token is invalid or expired.") from None
 
