@@ -350,7 +350,11 @@ async def register_user(req: RegisterRequest):
         store = await run_in_threadpool(get_user_store)
         user = await run_in_threadpool(store.register, req.username, req.email, req.password)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        logger.warning("User registration failed (%s)", type(exc).__name__)
+        raise HTTPException(
+            status_code=400,
+            detail="Registration could not be completed. Check the supplied fields or try a different username/email.",
+        ) from None
     return user.to_dict()
 
 
@@ -747,8 +751,11 @@ async def ingest_notebook_api(
         permissions = _request_object_permissions(current_user)
         return dataos.ingest(content, filename=filename, discover_relations=True, permissions=permissions)
     except (ValueError, TypeError) as exc:
-        logger.warning("Notebook ingestion rejected (%s)", type(exc).__name__)
-        raise HTTPException(status_code=422, detail="Notebook ingestion could not be completed.") from None
+        logger.warning("Notebook ingestion failed (%s)", type(exc).__name__)
+        raise HTTPException(
+            status_code=422,
+            detail="Notebook ingestion failed. Check the format and supported content limits.",
+        ) from None
 
 
 @app.post("/api/documents/extract_rich", summary="Extract Rich Document Tables & Citations (Rule #54)")
@@ -761,8 +768,11 @@ async def extract_rich_document_api(
         permissions = _request_object_permissions(current_user)
         return dataos.ingest(content, filename=filename, discover_relations=True, permissions=permissions)
     except (ValueError, TypeError) as exc:
-        logger.warning("Rich-document ingestion rejected (%s)", type(exc).__name__)
-        raise HTTPException(status_code=422, detail="Document ingestion could not be completed.") from None
+        logger.warning("Document ingestion failed (%s)", type(exc).__name__)
+        raise HTTPException(
+            status_code=422,
+            detail="Document ingestion failed. Check the format and supported content limits.",
+        ) from None
 
 
 # =============================================================================
@@ -820,10 +830,10 @@ async def resolve_conflict_api(req: ConflictResolutionRequest):
         )
         return res
     except ValueError as exc:
-        logger.warning("Conflict resolution rejected (%s)", type(exc).__name__)
+        logger.warning("Conflict resolution failed (%s)", type(exc).__name__)
         raise HTTPException(
             status_code=400,
-            detail="Conflict could not be resolved with the supplied strategy.",
+            detail="Conflict resolution request could not be completed.",
         ) from None
 
 
@@ -1001,7 +1011,11 @@ async def execute_workflow(req: WorkflowExecutionRequest):
                 execute_safe_workflow, workflow_engine, req.definition, req.context
             )
         except WorkflowRequestError as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
+            logger.warning("Workflow request rejected (%s)", type(exc).__name__)
+            raise HTTPException(
+                status_code=422,
+                detail="Workflow definition must contain valid nodes and stay within the supported execution limits.",
+            ) from None
     finally:
         workflow_slots.release()
 
@@ -1071,10 +1085,9 @@ async def verify_sharing_token_api(req: VerifySharingTokenRequest):
         payload = dataos.tokens.verify_and_decode_token(req.token)
         import dataclasses
         return {"status": "valid", "payload": dataclasses.asdict(payload)}
-    except Exception:
-        # Token parser/crypto diagnostics may contain internal state. Keep the
-        # public contract stable and do not expose exception text.
-        raise HTTPException(status_code=403, detail="Invalid or expired sharing token.") from None
+    except Exception as exc:  # noqa: BLE001 - preserve a fixed 403 contract for every verification failure
+        logger.warning("Sharing token verification failed (%s)", type(exc).__name__)
+        raise HTTPException(status_code=403, detail="Sharing token is invalid or expired.") from None
 
 
 @app.get("/api/federation/search", summary="Federated Cross-Instance Search (Rule #64)")

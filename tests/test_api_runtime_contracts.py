@@ -586,7 +586,7 @@ def test_sharing_token_verification_does_not_expose_internal_exception_text(monk
         run(api.verify_sharing_token_api(SimpleNamespace(token="invalid-token")))
 
     assert exc.value.status_code == 403
-    assert exc.value.detail == "Invalid or expired sharing token."
+    assert exc.value.detail == "Sharing token is invalid or expired."
     assert "private key path" not in exc.value.detail
 
 
@@ -603,7 +603,7 @@ def test_notebook_and_document_ingestion_errors_do_not_expose_exception_text(mon
             current_user=None,
         ))
     assert notebook_exc.value.status_code == 422
-    assert notebook_exc.value.detail == "Notebook ingestion could not be completed."
+    assert notebook_exc.value.detail == "Notebook ingestion failed. Check the format and supported content limits."
     assert "internal/customer-data" not in notebook_exc.value.detail
 
     with pytest.raises(HTTPException) as document_exc:
@@ -613,5 +613,5 @@ def test_notebook_and_document_ingestion_errors_do_not_expose_exception_text(mon
             current_user=None,
         ))
     assert document_exc.value.status_code == 422
-    assert document_exc.value.detail == "Document ingestion could not be completed."
+    assert document_exc.value.detail == "Document ingestion failed. Check the format and supported content limits."
     assert "internal/customer-data" not in document_exc.value.detail
