@@ -225,3 +225,54 @@ def test_knowledge_retrieval_conceals_private_selected_id():
             current_user=user("alice"),
         ))
     assert exc.value.status_code == 404
+
+
+def test_graph_engine_never_traverses_through_private_intermediate_nodes():
+    from engines.graph.engine import GraphEngine
+
+    root = obj("root", owner="alice", read=["alice"])
+    private = obj("private", owner="bob", read=["bob"])
+    public_descendant = obj("public-descendant", owner="alice", read=["alice"])
+    root_to_private = SimpleNamespace(
+        source="root", target="private", relation_type="references",
+        confidence=1.0, to_dict=lambda: {"source": "root", "target": "private"},
+    )
+    private_to_public = SimpleNamespace(
+        source="private", target="public-descendant", relation_type="references",
+        confidence=1.0, to_dict=lambda: {"source": "private", "target": "public-descendant"},
+    )
+    engine = GraphEngine(MemoryStorage(
+        [root, private, public_descendant],
+        [root_to_private, private_to_public],
+    ))
+
+    neighbors = engine.get_neighbors("root", allowed_object_ids={"root", "public-descendant"})
+    assert neighbors == []
+
+    result = engine.traverse(
+        "root",
+        max_hops=3,
+        allowed_object_ids={"root", "public-descendant"},
+    )
+    assert [node["id"] for node in result["nodes"]] == ["root"]
+    assert result["edges"] == []
+    assert result["paths"] == []
+
+
+def test_hybrid_search_rejects_private_context_object(monkeypatch):
+    storage = MemoryStorage([
+        obj("visible", owner="alice", read=["alice"]),
+        obj("private-context", owner="bob", read=["bob"]),
+    ])
+    monkeypatch.setattr(api.dataos, "storage", storage)
+    called = {"value": False}
+
+    def search(**kwargs):
+        called["value"] = True
+        return []
+
+    monkeypatch.setattr(api.dataos.search_engine, "search", search)
+    with pytest.raises(HTTPException) as exc:
+        run(api.hybrid_search(q="sales", context_id="private-context", current_user=user("alice")))
+    assert exc.value.status_code == 404
+    assert called["value"] is False
