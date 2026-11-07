@@ -803,10 +803,15 @@ async def resolve_conflict_api(req: ConflictResolutionRequest):
 
 
 @app.get("/api/profiling/{object_id}", summary="Get Dataset Profile")
-async def get_dataset_profile(object_id: str):
+async def get_dataset_profile(
+    object_id: str,
+    current_user: Optional[User] = Depends(get_current_user),
+):
+    _request_object_permissions(current_user)
     obj = dataos.storage.get_object(object_id)
     if not obj:
         raise HTTPException(status_code=404, detail="Object not found")
+    _ensure_object_access(current_user, obj)
     
     import pandas as pd
     import io
@@ -826,10 +831,16 @@ async def get_dataset_profile(object_id: str):
 
 
 @app.post("/api/quality/{object_id}", summary="Evaluate Data Quality Rules")
-async def evaluate_quality(object_id: str, req: QualityEvaluateRequest):
+async def evaluate_quality(
+    object_id: str,
+    req: QualityEvaluateRequest,
+    current_user: Optional[User] = Depends(get_current_user),
+):
+    _request_object_permissions(current_user)
     obj = dataos.storage.get_object(object_id)
     if not obj:
         raise HTTPException(status_code=404, detail="Object not found")
+    _ensure_object_access(current_user, obj)
     
     import pandas as pd
     import io
@@ -846,6 +857,7 @@ async def evaluate_quality(object_id: str, req: QualityEvaluateRequest):
 
     rules = req.rules if req.rules else [{"type": "row_count_min", "min_rows": 1}]
     quality_obj = dataos.quality.evaluate_rules(df, rules, target_object_id=obj.id)
+    quality_obj.permissions = dict(obj.permissions)
     dataos.storage.save_object(quality_obj)
     return quality_obj.to_dict()
 
