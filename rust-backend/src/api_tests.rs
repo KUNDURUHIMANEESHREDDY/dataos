@@ -1358,8 +1358,8 @@ fn principal_scoped_research_routes_are_not_admin_only_aggregates() {
         "the research pipeline registers and queries only the caller's datasets"
     );
     assert!(
-        crate::is_global_data_route("/api/compute/sql"),
-        "unscoped SQL must remain admin-only until its query contract is principal-scoped"
+        !crate::is_global_data_route("/api/compute/sql"),
+        "SQL is principal-scoped: compute_sql registers only datasets readable by the authenticated principal"
     );
     assert!(
         crate::is_global_data_route("/api/io/export"),
