@@ -127,7 +127,7 @@ def test_ingestion_errors_do_not_disclose_paths_or_parser_details(monkeypatch, h
     route = getattr(api, handler)
 
     with pytest.raises(HTTPException) as exc:
-        run(route(filename="customer-file", content="synthetic content"))
+        run(route(filename="customer-file", content="synthetic content", current_user=None))
 
     assert exc.value.status_code == 422
     assert exc.value.detail == expected
