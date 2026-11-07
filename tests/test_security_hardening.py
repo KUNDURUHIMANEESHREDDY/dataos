@@ -43,7 +43,9 @@ class TestSecurityHardening(unittest.TestCase):
             res = self.sandbox.execute_code(malicious_code)
             self.assertFalse(res["success"])
             self.assertTrue(res["security_violation"])
-            self.assertIn("prohibited in sandbox", res["error"])
+            self.assertEqual(res["error_code"], "PYTHON_SECURITY_VIOLATION")
+            self.assertEqual(res["error"], "Python code was rejected by the sandbox policy.")
+            self.assertNotIn("prohibited module", res["error"])
 
     def test_blocks_from_import_syntax(self):
         for malicious_code in [
@@ -82,7 +84,9 @@ for c in classes:
         res = self.sandbox.execute_code(exploit_code)
         self.assertFalse(res["success"])
         self.assertTrue(res["security_violation"])
-        self.assertIn("dangerous attribute", res["error"])
+        self.assertEqual(res["error_code"], "PYTHON_SECURITY_VIOLATION")
+        self.assertEqual(res["error"], "Python code was rejected by the sandbox policy.")
+        self.assertNotIn("__subclasses__", res["error"])
 
     def test_blocks_async_and_concurrency_constructs(self):
         async_code = """
@@ -108,7 +112,8 @@ while True:
         res = self.sandbox.execute_code(infinite_loop, timeout_seconds=0.3)
         self.assertFalse(res["success"])
         self.assertTrue(res["timeout_exceeded"])
-        self.assertIn("ExecutionTimeoutError", res["error"])
+        self.assertEqual(res["error_code"], "PYTHON_TIMEOUT")
+        self.assertIn("hard timeout", res["error"])
 
     # -------------------------------------------------------------------------
     # 4. MEMORY / PAYLOAD SIZE LIMITS
@@ -121,7 +126,8 @@ results['large_data'] = 'A' * 2000
 """
         res = small_cap_sandbox.execute_code(large_output_code)
         self.assertFalse(res["success"])
-        self.assertIn("MemoryPayloadExceeded", res["error"])
+        self.assertEqual(res["error_code"], "PYTHON_OUTPUT_LIMIT")
+        self.assertIn("byte limit", res["error"])
 
     # -------------------------------------------------------------------------
     # 5. AGENT CAPABILITY & PRIVILEGE ESCALATION GATING
