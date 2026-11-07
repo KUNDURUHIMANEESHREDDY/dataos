@@ -687,11 +687,7 @@ async def compute_python(
     current_user = _resolved_current_user(current_user)
     _request_object_permissions(current_user)
     if current_user is None:
-        return dataos.python(
-            req.code,
-            input_object_ids=req.input_object_ids,
-            agent_or_user=req.agent_or_user,
-        )
+        return dataos.python(req.code, input_object_ids=req.input_object_ids)
 
     allowed_ids = set(_readable_object_ids(current_user) or [])
     scoped_ids = [object_id for object_id in req.input_object_ids if object_id in allowed_ids]
