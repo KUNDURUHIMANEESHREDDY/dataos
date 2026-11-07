@@ -234,7 +234,7 @@ async def get_current_user(
             status_code=401,
             detail="Invalid bearer token.",
             headers={"WWW-Authenticate": "Bearer"},
-        ) from exc
+        ) from None
 
     store = await run_in_threadpool(get_user_store)
     user = await run_in_threadpool(store.get_by_id, str(claims.get("sub", "")))
@@ -714,15 +714,23 @@ def _execute_sql_for_user(query: str, current_user: Optional[User]) -> Dict[str,
                 detail="A per-user session is required for SQL queries.",
                 headers={"WWW-Authenticate": "Bearer"},
             )
-        return _safe_sql_result(dataos.sql(query))
+        try:
+            return _safe_sql_result(dataos.sql(query))
+        except Exception as exc:
+            logger.warning("SQL execution failed (%s)", type(exc).__name__)
+            return _safe_sql_result({"success": False, "error_code": "SQL_EXECUTION_FAILED"})
 
     readable_datasets = datasets_readable_by_user(dataos.storage, current_user)
-    result = dataos.sql_engine.execute_sql(
-        query,
-        table_objects=readable_datasets,
-        agent_or_user=f"user:{current_user.id}",
-    )
-    return _safe_sql_result(result)
+    try:
+        result = dataos.sql_engine.execute_sql(
+            query,
+            table_objects=readable_datasets,
+            agent_or_user=f"user:{current_user.id}",
+        )
+        return _safe_sql_result(result)
+    except Exception as exc:
+        logger.warning("SQL execution failed (%s)", type(exc).__name__)
+        return _safe_sql_result({"success": False, "error_code": "SQL_EXECUTION_FAILED"})
 
 
 @app.post("/api/compute/sql", summary="Execute SQL Query")
@@ -1047,9 +1055,9 @@ async def execute_agent(req: AgentExecutionRequest, current_user: Optional[User]
             )
         return agent.execute_capability(capability, req.params)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=f"Invalid capability: {req.capability}") from exc
+        raise HTTPException(status_code=400, detail=f"Invalid capability: {req.capability}") from None
     except PermissionError as exc:
-        raise HTTPException(status_code=403, detail="Agent capability is not permitted") from exc
+        raise HTTPException(status_code=403, detail="Agent capability is not permitted") from None
 
 
 @app.post("/api/workflows/execute", summary="Execute a bounded built-in Workflow DAG")
@@ -1166,7 +1174,7 @@ async def federated_search_api(
 async def explain_object_why(object_id: str):
     res = dataos.why(object_id)
     if "error" in res:
-        raise HTTPException(status_code=404, detail=res["error"])
+        raise HTTPException(status_code=404, detail="Object explanation is unavailable.") from None
     return res
 
 
@@ -1174,7 +1182,7 @@ async def explain_object_why(object_id: str):
 async def explain_object_impact(object_id: str):
     res = dataos.impact(object_id)
     if "error" in res:
-        raise HTTPException(status_code=404, detail=res["error"])
+        raise HTTPException(status_code=404, detail="Object impact analysis is unavailable.") from None
     return res
 
 
@@ -1365,7 +1373,7 @@ async def get_health_overview():
         # A bounded read verifies that the configured storage backend is reachable.
         dataos.storage.list_objects(limit=1)
     except Exception as exc:
-        raise HTTPException(status_code=503, detail="DataOS storage is unavailable") from exc
+        raise HTTPException(status_code=503, detail="DataOS storage is unavailable") from None
     return {
         "status": "operational",
         "storage_backend": type(dataos.storage).__name__,
