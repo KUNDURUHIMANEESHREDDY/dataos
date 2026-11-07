@@ -53,3 +53,13 @@ def datasets_readable_by_user(
             readable.append(dataset)
 
     return readable
+
+
+def requires_per_user_identity(
+    user: User | None,
+    *,
+    production_mode: bool,
+    jwt_auth_configured: bool,
+) -> bool:
+    """Return whether SQL must reject a request that has no resolved user."""
+    return user is None and (production_mode or jwt_auth_configured)
