@@ -183,7 +183,7 @@ def test_python_api_neighbors_hide_private_nodes_and_edges(monkeypatch):
         obj("private", owner="bob", read=["bob"]),
     ])
     monkeypatch.setattr(api.dataos, "storage", storage)
-    monkeypatch.setattr(api.dataos.graph, "neighbors", lambda object_id, direction: [
+    monkeypatch.setattr(api.dataos.graph, "neighbors", lambda object_id, direction, allowed_object_ids=None: [
         {"neighbor_id": "visible", "neighbor_object": {"id": "visible"}},
         {"neighbor_id": "private", "neighbor_object": {"id": "private"}},
     ])
