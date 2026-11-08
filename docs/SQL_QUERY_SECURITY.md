@@ -4,6 +4,10 @@
 
 DataOS registers only the dataset tables available to the current execution context, then enables SQLite query-only mode, a deny-by-default authorizer for database mutations, a query deadline, and a result-row limit. The Python reference engine and Rust/Axum engine now also share an explicit SQLite function allowlist.
 
+## Shared policy manifest
+
+Both engines load `security/sqlite_allowed_functions.txt` as the single source of truth. The Python and Rust tests verify that the manifest is sorted, unique, and consumed by the reference engine; the Rust engine embeds the same file at compile time. Add or remove a function only through this manifest and review its SQLite capability and determinism before changing it.
+
 ## Allowed function families
 
 The allowlist currently includes reviewed aggregate, scalar, window, date/time, pattern-matching, and JSON functions:
