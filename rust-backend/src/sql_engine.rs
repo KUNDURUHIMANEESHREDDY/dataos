@@ -45,9 +45,7 @@ fn is_allowed_function(name: &str) -> bool {
     })
 }
 
-fn is_allowed_function(name: &str) -> bool {
-    ALLOWED_FUNCTIONS.iter().any(|allowed| name.eq_ignore_ascii_case(allowed))
-}
+
 
 fn sanitize_table_name(input: &str) -> String {
     let sanitized: String = input
