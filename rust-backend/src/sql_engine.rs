@@ -33,18 +33,17 @@ fn contains_word(haystack: &str, needle: &str) -> bool {
 }
 
 
-const ALLOWED_FUNCTIONS: &[&str] = &[
-    "abs", "avg", "coalesce", "count", "date", "datetime", "dense_rank",
-    "first_value", "glob", "group_concat", "ifnull", "instr", "julianday",
-    "lag", "last_value", "lead", "length", "like", "lower", "ltrim", "max",
-    "min", "nullif", "nth_value", "ntile", "percent_rank", "rank", "replace",
-    "round", "row_number", "rtrim", "strftime", "substr", "sum", "time",
-    "total", "trim", "typeof", "unixepoch", "upper",
-    "json", "json_array", "json_array_length", "json_extract", "json_insert",
-    "json_object", "json_patch", "json_quote", "json_remove", "json_replace",
-    "json_set", "json_type", "json_valid", "json_group_array",
-    "json_group_object",
-];
+// Read the same reviewed function policy as the Python reference engine.
+const ALLOWED_FUNCTIONS_MANIFEST: &str = include_str!("../../security/sqlite_allowed_functions.txt");
+
+fn is_allowed_function(name: &str) -> bool {
+    ALLOWED_FUNCTIONS_MANIFEST.lines().any(|line| {
+        let candidate = line.trim();
+        !candidate.is_empty()
+            && !candidate.starts_with('#')
+            && candidate.eq_ignore_ascii_case(name)
+    })
+}
 
 fn is_allowed_function(name: &str) -> bool {
     ALLOWED_FUNCTIONS.iter().any(|allowed| name.eq_ignore_ascii_case(allowed))
@@ -378,6 +377,21 @@ mod function_policy_tests {
     use super::{execute_sql, is_allowed_function};
     use crate::db::Db;
     use serde_json::json;
+
+    #[test]
+    fn canonical_function_manifest_is_sorted_and_unique() {
+        let entries: Vec<&str> = super::ALLOWED_FUNCTIONS_MANIFEST
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .collect();
+        let mut sorted = entries.clone();
+        sorted.sort_unstable();
+        assert_eq!(entries, sorted, "manifest entries must be sorted");
+        let mut unique = entries.clone();
+        unique.dedup();
+        assert_eq!(entries, unique, "manifest entries must be unique");
+    }
 
     #[test]
     fn allows_the_shared_safe_function_surface_case_insensitively() {
