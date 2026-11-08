@@ -32,6 +32,24 @@ fn contains_word(haystack: &str, needle: &str) -> bool {
         .any(|token| token == needle)
 }
 
+
+const ALLOWED_FUNCTIONS: &[&str] = &[
+    "abs", "avg", "coalesce", "count", "date", "datetime", "dense_rank",
+    "first_value", "glob", "group_concat", "ifnull", "instr", "julianday",
+    "lag", "last_value", "lead", "length", "like", "lower", "ltrim", "max",
+    "min", "nullif", "nth_value", "ntile", "percent_rank", "rank", "replace",
+    "round", "row_number", "rtrim", "strftime", "substr", "sum", "time",
+    "total", "trim", "typeof", "unixepoch", "upper",
+    "json", "json_array", "json_array_length", "json_extract", "json_insert",
+    "json_object", "json_patch", "json_quote", "json_remove", "json_replace",
+    "json_set", "json_type", "json_valid", "json_group_array",
+    "json_group_object",
+];
+
+fn is_allowed_function(name: &str) -> bool {
+    ALLOWED_FUNCTIONS.iter().any(|allowed| name.eq_ignore_ascii_case(allowed))
+}
+
 fn sanitize_table_name(input: &str) -> String {
     let sanitized: String = input
         .chars()
@@ -300,14 +318,10 @@ fn execute_sql_inner(query: &str, db: &Db, owner_id: Option<&str>) -> Result<Val
     conn.authorizer(Some(|context: AuthContext<'_>| match context.action {
         AuthAction::Select | AuthAction::Read { .. } | AuthAction::Recursive => Authorization::Allow,
         AuthAction::Function { function_name } => {
-            if function_name.eq_ignore_ascii_case("load_extension")
-                || function_name.eq_ignore_ascii_case("readfile")
-                || function_name.eq_ignore_ascii_case("writefile")
-                || function_name.eq_ignore_ascii_case("fts3_tokenizer")
-            {
-                Authorization::Deny
-            } else {
+            if is_allowed_function(function_name) {
                 Authorization::Allow
+            } else {
+                Authorization::Deny
             }
         }
         // Deny writes, schema changes, PRAGMAs, transactions, ATTACH/DETACH,
@@ -356,4 +370,24 @@ fn execute_sql_inner(query: &str, db: &Db, owner_id: Option<&str>) -> Result<Val
         },
         "error": Value::Null
     }))
+}
+
+
+#[cfg(test)]
+mod function_policy_tests {
+    use super::is_allowed_function;
+
+    #[test]
+    fn allows_the_shared_safe_function_surface_case_insensitively() {
+        for function in ["count", "AVG", "json_extract", "row_number", "LOWER"] {
+            assert!(is_allowed_function(function), "expected {function} to be allowed");
+        }
+    }
+
+    #[test]
+    fn rejects_unreviewed_and_nondeterministic_functions() {
+        for function in ["random", "randomblob", "load_extension", "readfile", "sqlite_version"] {
+            assert!(!is_allowed_function(function), "expected {function} to be denied");
+        }
+    }
 }
