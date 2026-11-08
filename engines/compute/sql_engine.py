@@ -56,6 +56,23 @@ _DENIED_SQLITE_ACTIONS = frozenset(
     if hasattr(sqlite3, name)
 )
 
+# SQLite functions are an explicit capability surface. Keep this list aligned with
+# rust-backend/src/sql_engine.rs so the reference and production engines fail closed
+# on the same function calls.
+_ALLOWED_SQLITE_FUNCTIONS = frozenset({
+    "abs", "avg", "coalesce", "count", "date", "datetime", "dense_rank",
+    "first_value", "glob", "group_concat", "ifnull", "instr", "julianday",
+    "lag", "last_value", "lead", "length", "like", "lower", "ltrim", "max",
+    "min", "nullif", "nth_value", "ntile", "percent_rank", "rank", "replace",
+    "round", "row_number", "rtrim", "strftime", "substr", "sum", "time",
+    "total", "trim", "typeof", "unixepoch", "upper",
+    "json", "json_array", "json_array_length", "json_extract", "json_insert",
+    "json_object", "json_patch", "json_quote", "json_remove", "json_replace",
+    "json_set", "json_type", "json_valid", "json_group_array",
+    "json_group_object",
+})
+
+
 
 class SQLExecutionEngine:
     """Execute bounded, read-only SQL against registered DataOS objects."""
@@ -80,8 +97,8 @@ class SQLExecutionEngine:
             return sqlite3.SQLITE_DENY
 
         if action == sqlite3.SQLITE_FUNCTION:
-            function_name = (arg2 or arg1 or "").lower()
-            if function_name in {"load_extension", "readfile", "writefile", "fts3_tokenizer"}:
+            function_name = (arg2 or arg1 or "").casefold()
+            if function_name not in _ALLOWED_SQLITE_FUNCTIONS:
                 return sqlite3.SQLITE_DENY
 
         return sqlite3.SQLITE_OK
