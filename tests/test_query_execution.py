@@ -100,6 +100,24 @@ class TestQueryExecution(unittest.TestCase):
                 )
                 self.assertFalse(result["success"])
 
+    def test_sql_engine_allows_reviewed_scalar_and_aggregate_functions(self):
+        result = self.sql_engine.execute_sql(
+            "SELECT LOWER(name) AS normalized_name, "
+            "ROUND(AVG(salary), 2) AS avg_salary "
+            "FROM employees GROUP BY LOWER(name) ORDER BY normalized_name",
+            table_objects=[self.dataset],
+        )
+        self.assertTrue(result["success"], result["error"])
+        self.assertEqual(result["row_count"], 3)
+        self.assertEqual(result["rows"][0]["normalized_name"], "alice")
+
+    def test_sql_engine_rejects_unreviewed_sqlite_functions(self):
+        for query in ("SELECT random()", "SELECT randomblob(8)", "SELECT sqlite_version()"):
+            with self.subTest(query=query):
+                result = self.sql_engine.execute_sql(query, table_objects=[])
+                self.assertFalse(result["success"])
+                self.assertIn("not authorized", result["error"].lower())
+
     def test_sql_engine_rejects_extension_and_file_functions(self):
         """Untrusted SQL must not load extensions or access SQLite file helpers."""
         forbidden_queries = (
