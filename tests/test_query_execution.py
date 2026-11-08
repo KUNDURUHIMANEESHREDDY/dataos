@@ -49,6 +49,37 @@ class TestQueryExecution(unittest.TestCase):
         eng_row = next(r for r in res["results"] if r["department"] == "Eng")
         self.assertEqual(eng_row["avg_sal"], 115000.0)
 
+    def test_sql_engine_does_not_overwrite_ambiguous_dataset_aliases(self):
+        """Duplicate filenames must not silently select whichever dataset registers last."""
+        second_dataset = self.storage.save_object(DataObject(
+            type=ObjectType.DATASET.value,
+            properties={"filename": "employees.csv", "table_name": "employees"},
+            content=[{"id": 9, "name": "Mallory", "department": "Security", "salary": 1}],
+            source="file://another-employees.csv",
+        ))
+
+        ambiguous = self.sql_engine.execute_sql(
+            "SELECT name FROM employees",
+            table_objects=[self.dataset, second_dataset],
+        )
+        self.assertFalse(ambiguous["success"])
+        self.assertIn("employees", ambiguous["ambiguous_table_names"])
+        self.assertNotIn("employees", ambiguous["registered_tables"])
+
+        for dataset, expected_name in (
+            (self.dataset, "Alice"),
+            (second_dataset, "Mallory"),
+        ):
+            with self.subTest(dataset_id=dataset.id):
+                alias = f"tbl_{dataset.id[:8]}"
+                result = self.sql_engine.execute_sql(
+                    f"SELECT name FROM {alias}",
+                    table_objects=[self.dataset, second_dataset],
+                )
+                self.assertTrue(result["success"], result["error"])
+                self.assertEqual(result["rows"][0]["name"], expected_name)
+                self.assertIn("employees", result["ambiguous_table_names"])
+
     def test_sql_engine_rejects_database_mutations_and_pragmas(self):
         """Caller SQL must not alter registered data or the in-memory schema."""
         forbidden_queries = (

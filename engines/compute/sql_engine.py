@@ -107,6 +107,7 @@ class SQLExecutionEngine:
         conn = sqlite3.connect(":memory:")
         registered_tables: List[str] = []
         source_object_ids: List[str] = []
+        ambiguous_table_names: List[str] = []
 
         try:
             if not isinstance(sql_query, str) or not sql_query.strip():
@@ -122,6 +123,8 @@ class SQLExecutionEngine:
                     limit=100,
                 )
 
+            prepared_datasets = []
+            alias_owners: Dict[str, set[str]] = {}
             for obj in table_objects:
                 filename_raw = obj.properties.get("filename", "")
                 base_name, _ = (
@@ -136,14 +139,16 @@ class SQLExecutionEngine:
                 if filename_raw:
                     table_names.add(
                         "".join(
-                            c if c.isalnum() or c == "_" else "_"
+                            c if c.isalnum() or c == "_"
+                            else "_"
                             for c in filename_raw
                         )
                     )
                 if base_name:
                     table_names.add(
                         "".join(
-                            c if c.isalnum() or c == "_" else "_"
+                            c if c.isalnum() or c == "_"
+                            else "_"
                             for c in base_name
                         )
                     )
@@ -159,10 +164,39 @@ class SQLExecutionEngine:
                 elif isinstance(obj.properties.get("sample_rows"), list):
                     df = pd.DataFrame(obj.properties["sample_rows"])
 
-                if df is not None and not df.empty:
-                    for table_name in table_names:
-                        df.to_sql(table_name, conn, if_exists="replace", index=False)
-                        registered_tables.append(table_name)
+                if df is None or df.empty:
+                    continue
+
+                # SQLite identifiers are case-insensitive. Normalize aliases before
+                # registration so two datasets cannot silently shadow one another.
+                normalized_names: Dict[str, str] = {}
+                for table_name in sorted(table_names):
+                    normalized_names.setdefault(table_name.casefold(), table_name)
+                prepared_datasets.append((obj, df, normalized_names))
+                for normalized_name in normalized_names:
+                    alias_owners.setdefault(normalized_name, set()).add(str(obj.id))
+
+            ambiguous_table_names = sorted(
+                {
+                    table_name
+                    for _, _, names in prepared_datasets
+                    for normalized_name, table_name in names.items()
+                    if len(alias_owners[normalized_name]) > 1
+                },
+                key=str.casefold,
+            )
+
+            for obj, df, names in prepared_datasets:
+                registered_for_object = False
+                for normalized_name, table_name in names.items():
+                    if len(alias_owners[normalized_name]) > 1:
+                        # Ambiguous aliases are omitted for every owner. Each
+                        # dataset retains its deterministic tbl_<id-prefix> alias.
+                        continue
+                    df.to_sql(table_name, conn, if_exists="fail", index=False)
+                    registered_tables.append(table_name)
+                    registered_for_object = True
+                if registered_for_object:
                     source_object_ids.append(obj.id)
 
             # Lock the registered in-memory schema before executing caller SQL.
@@ -197,6 +231,7 @@ class SQLExecutionEngine:
                 "query_text": sql_query,
                 "input_sources": source_object_ids,
                 "registered_tables": registered_tables,
+                "ambiguous_table_names": ambiguous_table_names,
                 "execution_time_ms": execution_time_ms,
                 "row_count": len(records),
                 "executed_by": agent_or_user,
@@ -211,6 +246,7 @@ class SQLExecutionEngine:
                 "rows": records,
                 "execution_time_ms": execution_time_ms,
                 "registered_tables": registered_tables,
+                "ambiguous_table_names": ambiguous_table_names,
                 "provenance": provenance,
                 "error": None,
             }
@@ -225,6 +261,7 @@ class SQLExecutionEngine:
                 "rows": [],
                 "execution_time_ms": execution_time_ms,
                 "registered_tables": registered_tables,
+                "ambiguous_table_names": ambiguous_table_names,
                 "provenance": {
                     "engine": "sqlite_in_memory",
                     "query_text": sql_query,

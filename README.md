@@ -146,6 +146,8 @@ d.close()
 
 The SQL engines execute against an isolated in-memory SQLite connection. The Rust/Axum path enables SQLite `query_only` mode and an authorizer that permits reads/selects while denying writes, schema changes, PRAGMAs, transaction control, database attachment, extension loading, and file-access helper functions. It also caps query text at 64 KiB, execution at five seconds, and results at 10,000 rows. The legacy Python reference engine applies the same read-only authorizer pattern and resource limits. These runtime controls do not replace CodeQL alert triage; the SQL endpoint remains admin-only until its principal-scoped query contract is complete.
 
+Friendly dataset aliases (such as a filename stem or configured `table_name`) are registered only when they identify exactly one dataset in the current principal's readable set. If multiple datasets share an alias, that alias is omitted for every owner and is listed in `ambiguous_table_names`; each dataset remains queryable through its deterministic `tbl_<id-prefix>` alias. This prevents registration order from silently choosing or replacing another dataset.
+
 Convenience methods that genuinely exist: `from_url`, `ingest`, `why`, `impact`, `ask`, `sql`, `python`,
 `search`, `search_vector`, `profile`, `embed`, `embed_batch`, `classify`, `ingest_source`, `export_data`, `mask`,
 `check_rate_limit`, `close`.
