@@ -6,10 +6,11 @@ Verifies SQL execution, Python execution, grounded NL queries and SQL safety.
 import os
 import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from core.object.model import DataObject, ObjectType
-from engines.compute.sql_engine import SQLExecutionEngine
+from engines.compute.sql_engine import SQLExecutionEngine, _ALLOWED_SQLITE_FUNCTIONS
 from infrastructure.storage.sqlite_store import SQLiteStorage
 from engines.query.query_engine import UnifiedQueryEngine
 
@@ -99,6 +100,17 @@ class TestQueryExecution(unittest.TestCase):
                     table_objects=[self.dataset],
                 )
                 self.assertFalse(result["success"])
+
+    def test_sqlite_function_policy_uses_canonical_sorted_manifest(self):
+        manifest = Path(__file__).resolve().parents[1] / "security" / "sqlite_allowed_functions.txt"
+        entries = [
+            line.strip()
+            for line in manifest.read_text(encoding="utf-8").splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        ]
+        self.assertEqual(entries, sorted(entries))
+        self.assertEqual(len(entries), len(set(entries)))
+        self.assertEqual(_ALLOWED_SQLITE_FUNCTIONS, set(entries))
 
     def test_sql_engine_allows_reviewed_scalar_and_aggregate_functions(self):
         result = self.sql_engine.execute_sql(
