@@ -118,8 +118,17 @@ class GraphNamespace:
             metadata=metadata
         )
 
-    def neighbors(self, object_id: str, direction: str = "both") -> List[Dict[str, Any]]:
-        return self.engine.get_neighbors(object_id, direction=direction)
+    def neighbors(
+        self,
+        object_id: str,
+        direction: str = "both",
+        allowed_object_ids: Optional[set[str]] = None,
+    ) -> List[Dict[str, Any]]:
+        return self.engine.get_neighbors(
+            object_id,
+            direction=direction,
+            allowed_object_ids=allowed_object_ids,
+        )
 
     def paths(self, source_id: str, target_id: str, max_depth: int = 5) -> List[List[str]]:
         return self.engine.find_paths(source_id, target_id, max_depth=max_depth)
@@ -243,9 +252,20 @@ class DataOS:
     # TOP-LEVEL CONVENIENCE SYSTEM APIS
     # -------------------------------------------------------------------------
 
-    def ingest(self, file_path_or_content: Any, filename: Optional[str] = None, discover_relations: bool = True) -> Dict[str, Any]:
-        """Ingest any file format (Markdown, PDF, CSV, Notebook, Code, Audio/Video) in one call."""
-        return self.ingestion_pipeline.ingest(file_path_or_content, filename=filename, discover_relations=discover_relations)
+    def ingest(
+        self,
+        file_path_or_content: Any,
+        filename: Optional[str] = None,
+        discover_relations: bool = True,
+        permissions: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Ingest supported formats and propagate request-scoped object ACLs."""
+        return self.ingestion_pipeline.ingest(
+            file_path_or_content,
+            filename=filename,
+            discover_relations=discover_relations,
+            permissions=permissions,
+        )
 
     def why(self, object_id: str) -> Dict[str, Any]:
         """Explain the complete origin, lineage, and rationale of any object."""

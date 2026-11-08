@@ -145,3 +145,63 @@ def test_jwt_middleware_enforces_role_capabilities(monkeypatch, tmp_path):
         assert _asgi_status("POST", "/api/compute/sql", headers) == 403
     finally:
         store.close()
+
+
+def test_unscoped_data_routes_are_admin_only_when_jwt_is_enabled(monkeypatch, tmp_path):
+    monkeypatch.setenv("DATAOS_JWT_SECRET", "a" * 48)
+    store = UserStore(db_path=str(tmp_path / "unscoped-auth.db"))
+    try:
+        viewer = store.register("unscoped-viewer", "unscoped-viewer@example.com", "password123", role=Role.VIEWER.value)
+        admin = store.register("unscoped-admin", "unscoped-admin@example.com", "password123", role=Role.ADMIN.value)
+        monkeypatch.setattr(authorization, "_user_store", store)
+        viewer_headers = {"authorization": f"Bearer {issue_jwt(viewer.id, viewer.role)}"}
+        admin_headers = {"authorization": f"Bearer {issue_jwt(admin.id, admin.role)}"}
+        routes = (
+            ("GET", "/api/graph/analytics"),
+            ("GET", "/api/time_travel/graph"),
+            ("GET", "/api/time_travel/changes"),
+            ("GET", "/api/provenance/lineage/object-1"),
+            ("GET", "/api/recommendations/datasets"),
+            ("GET", "/api/federation/search"),
+            ("GET", "/api/io/export"),
+            ("POST", "/api/ask"),
+            ("POST", "/api/compute/sql"),
+            ("POST", "/api/compute/python"),
+            ("POST", "/api/query/"),
+            ("POST", "/api/agents/execute"),
+            ("POST", "/api/workflows/execute"),
+            ("POST", "/api/vectors/recompute"),
+            ("POST", "/api/sync/resolve_conflict"),
+            ("POST", "/api/sharing/issue_token"),
+            ("GET", "/api/governance/duplicates"),
+            ("GET", "/api/objects/object-1/why"),
+            ("GET", "/api/objects/object-1/impact"),
+        )
+        for method, path in routes:
+            assert authorization.is_admin_only_unscoped_route(path), path
+            assert _asgi_status(method, path, viewer_headers) == 403, path
+            assert _asgi_status(method, path, admin_headers) == 204, path
+    finally:
+        store.close()
+
+
+def test_production_unscoped_routes_reject_shared_token_without_user_jwt(monkeypatch):
+    monkeypatch.setenv("DATAOS_ENV", "production")
+    monkeypatch.setenv("DATAOS_API_TOKEN", "t" * 48)
+    monkeypatch.delenv("DATAOS_JWT_SECRET", raising=False)
+    headers = {"authorization": f"Bearer {'t' * 48}"}
+    assert _asgi_status("GET", "/api/graph/analytics", headers) == 503
+
+
+def test_local_development_without_jwt_preserves_unscoped_route_compatibility(monkeypatch):
+    for name in ("DATAOS_ENV", "APP_ENV", "ENVIRONMENT", "DATAOS_JWT_SECRET"):
+        monkeypatch.delenv(name, raising=False)
+    assert _asgi_status("GET", "/api/graph/analytics") == 204
+
+
+def test_scoped_routes_are_not_accidentally_marked_global_admin_only():
+    assert not authorization.is_admin_only_unscoped_route("/api/objects/")
+    assert not authorization.is_admin_only_unscoped_route("/api/objects/object-1")
+    assert not authorization.is_admin_only_unscoped_route("/api/search/")
+    assert not authorization.is_admin_only_unscoped_route("/api/graph/traverse/object-1")
+    assert not authorization.is_admin_only_unscoped_route("/api/vectors/search")

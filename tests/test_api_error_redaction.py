@@ -120,6 +120,8 @@ def test_registration_errors_do_not_disclose_database_details(monkeypatch):
     ],
 )
 def test_ingestion_errors_do_not_disclose_paths_or_parser_details(monkeypatch, handler, expected):
+    _disable_api_auth(monkeypatch)
+
     def fail_ingestion(*args, **kwargs):
         raise ValueError("parser failed while opening /srv/private/customer-records.pdf")
 
@@ -127,7 +129,7 @@ def test_ingestion_errors_do_not_disclose_paths_or_parser_details(monkeypatch, h
     route = getattr(api, handler)
 
     with pytest.raises(HTTPException) as exc:
-        run(route(filename="customer-file", content="synthetic content"))
+        run(route(filename="customer-file", content="synthetic content", current_user=None))
 
     assert exc.value.status_code == 422
     assert exc.value.detail == expected
