@@ -11,6 +11,7 @@ import datetime
 import io
 import os
 import sqlite3
+from pathlib import Path
 import time
 from typing import Any, Dict, List, Optional
 
@@ -56,6 +57,24 @@ _DENIED_SQLITE_ACTIONS = frozenset(
     if hasattr(sqlite3, name)
 )
 
+# Both runtimes consume one reviewed manifest so their SQLite capability
+# surfaces cannot silently drift apart.
+def _load_allowed_sqlite_functions() -> frozenset[str]:
+    manifest = Path(__file__).resolve().parents[2] / "security" / "sqlite_allowed_functions.txt"
+    try:
+        lines = manifest.read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        raise RuntimeError(f"Unable to load SQLite function policy: {manifest}") from exc
+    return frozenset(
+        line.strip().casefold()
+        for line in lines
+        if line.strip() and not line.lstrip().startswith("#")
+    )
+
+
+_ALLOWED_SQLITE_FUNCTIONS = _load_allowed_sqlite_functions()
+
+
 
 class SQLExecutionEngine:
     """Execute bounded, read-only SQL against registered DataOS objects."""
@@ -80,8 +99,8 @@ class SQLExecutionEngine:
             return sqlite3.SQLITE_DENY
 
         if action == sqlite3.SQLITE_FUNCTION:
-            function_name = (arg2 or arg1 or "").lower()
-            if function_name in {"load_extension", "readfile", "writefile", "fts3_tokenizer"}:
+            function_name = (arg2 or arg1 or "").casefold()
+            if function_name not in _ALLOWED_SQLITE_FUNCTIONS:
                 return sqlite3.SQLITE_DENY
 
         return sqlite3.SQLITE_OK

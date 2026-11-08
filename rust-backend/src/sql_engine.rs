@@ -32,6 +32,21 @@ fn contains_word(haystack: &str, needle: &str) -> bool {
         .any(|token| token == needle)
 }
 
+
+// Read the same reviewed function policy as the Python reference engine.
+const ALLOWED_FUNCTIONS_MANIFEST: &str = include_str!("../../security/sqlite_allowed_functions.txt");
+
+fn is_allowed_function(name: &str) -> bool {
+    ALLOWED_FUNCTIONS_MANIFEST.lines().any(|line| {
+        let candidate = line.trim();
+        !candidate.is_empty()
+            && !candidate.starts_with('#')
+            && candidate.eq_ignore_ascii_case(name)
+    })
+}
+
+
+
 fn sanitize_table_name(input: &str) -> String {
     let sanitized: String = input
         .chars()
@@ -300,14 +315,10 @@ fn execute_sql_inner(query: &str, db: &Db, owner_id: Option<&str>) -> Result<Val
     conn.authorizer(Some(|context: AuthContext<'_>| match context.action {
         AuthAction::Select | AuthAction::Read { .. } | AuthAction::Recursive => Authorization::Allow,
         AuthAction::Function { function_name } => {
-            if function_name.eq_ignore_ascii_case("load_extension")
-                || function_name.eq_ignore_ascii_case("readfile")
-                || function_name.eq_ignore_ascii_case("writefile")
-                || function_name.eq_ignore_ascii_case("fts3_tokenizer")
-            {
-                Authorization::Deny
-            } else {
+            if is_allowed_function(function_name) {
                 Authorization::Allow
+            } else {
+                Authorization::Deny
             }
         }
         // Deny writes, schema changes, PRAGMAs, transactions, ATTACH/DETACH,
@@ -356,4 +367,67 @@ fn execute_sql_inner(query: &str, db: &Db, owner_id: Option<&str>) -> Result<Val
         },
         "error": Value::Null
     }))
+}
+
+
+#[cfg(test)]
+mod function_policy_tests {
+    use super::{execute_sql, is_allowed_function};
+    use crate::db::Db;
+    use serde_json::json;
+
+    #[test]
+    fn canonical_function_manifest_is_sorted_and_unique() {
+        let entries: Vec<&str> = super::ALLOWED_FUNCTIONS_MANIFEST
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .collect();
+        let mut sorted = entries.clone();
+        sorted.sort_unstable();
+        assert_eq!(entries, sorted, "manifest entries must be sorted");
+        let mut unique = entries.clone();
+        unique.dedup();
+        assert_eq!(entries, unique, "manifest entries must be unique");
+    }
+
+    #[test]
+    fn allows_the_shared_safe_function_surface_case_insensitively() {
+        for function in ["count", "AVG", "json_extract", "row_number", "LOWER"] {
+            assert!(is_allowed_function(function), "expected {function} to be allowed");
+        }
+    }
+
+    #[test]
+    fn rejects_unreviewed_and_nondeterministic_functions() {
+        for function in ["random", "randomblob", "load_extension", "readfile", "sqlite_version"] {
+            assert!(!is_allowed_function(function), "expected {function} to be denied");
+        }
+    }
+
+    #[test]
+    fn enforces_function_policy_during_real_sql_execution() {
+        let db = Db::open(":memory:").expect("open isolated database");
+        db.create_object(
+            "dataset",
+            "dataset.v1",
+            json!({"filename": "employees.csv", "table_name": "employees"}),
+            json!([
+                {"name": "Alice", "salary": 120.0},
+                {"name": "Bob", "salary": 80.0}
+            ]),
+            "test://employees",
+            json!({}),
+        )
+        .expect("register test dataset");
+
+        let allowed = execute_sql(
+            "SELECT LOWER(name) AS normalized_name, ROUND(AVG(salary), 2) AS avg_salary FROM employees",
+            &db,
+        );
+        assert_eq!(allowed["success"], true, "safe query failed: {allowed}");
+
+        let denied = execute_sql("SELECT random()", &db);
+        assert_eq!(denied["success"], false, "unreviewed function was allowed: {denied}");
+    }
 }
