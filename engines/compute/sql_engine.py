@@ -11,6 +11,7 @@ import datetime
 import io
 import os
 import sqlite3
+from pathlib import Path
 import time
 from typing import Any, Dict, List, Optional
 
@@ -56,21 +57,22 @@ _DENIED_SQLITE_ACTIONS = frozenset(
     if hasattr(sqlite3, name)
 )
 
-# SQLite functions are an explicit capability surface. Keep this list aligned with
-# rust-backend/src/sql_engine.rs so the reference and production engines fail closed
-# on the same function calls.
-_ALLOWED_SQLITE_FUNCTIONS = frozenset({
-    "abs", "avg", "coalesce", "count", "date", "datetime", "dense_rank",
-    "first_value", "glob", "group_concat", "ifnull", "instr", "julianday",
-    "lag", "last_value", "lead", "length", "like", "lower", "ltrim", "max",
-    "min", "nullif", "nth_value", "ntile", "percent_rank", "rank", "replace",
-    "round", "row_number", "rtrim", "strftime", "substr", "sum", "time",
-    "total", "trim", "typeof", "unixepoch", "upper",
-    "json", "json_array", "json_array_length", "json_extract", "json_insert",
-    "json_object", "json_patch", "json_quote", "json_remove", "json_replace",
-    "json_set", "json_type", "json_valid", "json_group_array",
-    "json_group_object",
-})
+# Both runtimes consume one reviewed manifest so their SQLite capability
+# surfaces cannot silently drift apart.
+def _load_allowed_sqlite_functions() -> frozenset[str]:
+    manifest = Path(__file__).resolve().parents[2] / "security" / "sqlite_allowed_functions.txt"
+    try:
+        lines = manifest.read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        raise RuntimeError(f"Unable to load SQLite function policy: {manifest}") from exc
+    return frozenset(
+        line.strip().casefold()
+        for line in lines
+        if line.strip() and not line.lstrip().startswith("#")
+    )
+
+
+_ALLOWED_SQLITE_FUNCTIONS = _load_allowed_sqlite_functions()
 
 
 
