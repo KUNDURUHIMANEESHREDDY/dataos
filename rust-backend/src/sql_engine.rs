@@ -375,7 +375,9 @@ fn execute_sql_inner(query: &str, db: &Db, owner_id: Option<&str>) -> Result<Val
 
 #[cfg(test)]
 mod function_policy_tests {
-    use super::is_allowed_function;
+    use super::{execute_sql, is_allowed_function};
+    use crate::db::Db;
+    use serde_json::json;
 
     #[test]
     fn allows_the_shared_safe_function_surface_case_insensitively() {
@@ -389,5 +391,31 @@ mod function_policy_tests {
         for function in ["random", "randomblob", "load_extension", "readfile", "sqlite_version"] {
             assert!(!is_allowed_function(function), "expected {function} to be denied");
         }
+    }
+
+    #[test]
+    fn enforces_function_policy_during_real_sql_execution() {
+        let db = Db::open(":memory:").expect("open isolated database");
+        db.create_object(
+            "dataset",
+            "dataset.v1",
+            json!({"filename": "employees.csv", "table_name": "employees"}),
+            json!([
+                {"name": "Alice", "salary": 120.0},
+                {"name": "Bob", "salary": 80.0}
+            ]),
+            "test://employees",
+            json!({}),
+        )
+        .expect("register test dataset");
+
+        let allowed = execute_sql(
+            "SELECT LOWER(name) AS normalized_name, ROUND(AVG(salary), 2) AS avg_salary FROM employees",
+            &db,
+        );
+        assert_eq!(allowed["success"], true, "safe query failed: {allowed}");
+
+        let denied = execute_sql("SELECT random()", &db);
+        assert_eq!(denied["success"], false, "unreviewed function was allowed: {denied}");
     }
 }
