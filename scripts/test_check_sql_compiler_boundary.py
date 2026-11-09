@@ -51,6 +51,22 @@ class TestSQLCompilerBoundary(unittest.TestCase):
         self.assertEqual(len(findings), 1)
         self.assertIn("missing source file", findings[0])
 
+    def test_backend_required_aggregate_checks_boundary_result(self):
+        from pathlib import Path
+
+        workflow = (
+            Path(__file__).resolve().parents[1]
+            / ".github"
+            / "workflows"
+            / "backend-verification.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("sql-compiler-boundary]", workflow)
+        self.assertIn(
+            "SQL_COMPILER_BOUNDARY_RESULT: ${{ needs.sql-compiler-boundary.result }}",
+            workflow,
+        )
+        self.assertIn('test "$SQL_COMPILER_BOUNDARY_RESULT" = "success"', workflow)
+
 
 if __name__ == "__main__":
     unittest.main()
