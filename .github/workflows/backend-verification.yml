@@ -336,13 +336,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Fail closed unless backend, PostgreSQL, security, and workflow verification passed
+      - name: Fail closed unless backend, PostgreSQL, SQL boundary, security, and workflow verification passed
         env:
           BACKEND_RESULT: ${{ needs.backend.result }}
           RUST_BACKEND_RESULT: ${{ needs.rust-backend.result }}
           POSTGRES_RESULT: ${{ needs.postgres-storage.result }}
           SECURITY_RESULT: ${{ needs.security-required.result }}
           WORKFLOW_LINT_RESULT: ${{ needs.workflow-lint.result }}
+          SQL_COMPILER_BOUNDARY_RESULT: ${{ needs.sql-compiler-boundary.result }}
         run: |
           set -euo pipefail
           echo "backend: $BACKEND_RESULT"
@@ -350,10 +351,12 @@ jobs:
           echo "postgres-storage: $POSTGRES_RESULT"
           echo "security-required: $SECURITY_RESULT"
           echo "workflow-lint: $WORKFLOW_LINT_RESULT"
+          echo "sql-compiler-boundary: $SQL_COMPILER_BOUNDARY_RESULT"
           test "$BACKEND_RESULT" = "success"
           test "$RUST_BACKEND_RESULT" = "success"
           test "$POSTGRES_RESULT" = "success"
           test "$SECURITY_RESULT" = "success"
           test "$WORKFLOW_LINT_RESULT" = "success"
+          test "$SQL_COMPILER_BOUNDARY_RESULT" = "success"
 
 
